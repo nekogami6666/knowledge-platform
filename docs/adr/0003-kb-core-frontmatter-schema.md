@@ -1,6 +1,6 @@
 # ADR-0003: kb-core frontmatter スキーマの確定事項
 
-- **ステータス**: proposed(ドラフト)
+- **ステータス**: accepted
 - **日付**: 2026-06-10
 - **関連**: design.md §4.2〜4.5, §6.1 / Phase 0(`kb-core` 実装 PR)
 - **備考**: ADR-0001(本設計の採択)・ADR-0002(API データポリシー確認)は未起票。本 ADR は
