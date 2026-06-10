@@ -213,9 +213,7 @@ knowledge-base/
 ```
 
 ### 4.2 ナレッジエントリ スキーマ
-
-ファイル: `knowledge/<domain>/<id>-<slug>.md`。frontmatter は `kb-core` の zod スキーマを唯一の正とし、CI でバリデーションする。
-
+ファイル: `knowledge/<domain>/<id>-<slug>.md`。frontmatter は `kb-core` の zod スキーマを唯一の正とし、CI でバリデーションする。スキーマ確定の経緯は ADR-0003 を参照。
 ```markdown
 ---
 id: kb-2026-0142            # kb-<年>-<4桁連番>。_meta/id-counter.json で採番
@@ -223,12 +221,16 @@ title: 分注ロボット X は高湿度環境で Y 軸が脱調する
 type: failure                # decision | learning | procedure | fact | failure
 domain: hardware             # knowledge/ 直下のディレクトリ名と一致
 tags: [dispenser-x, motor, humidity]
-sources:                     # P2: 必須。1 件以上
-  - kind: meeting            # meeting | discord | pr | issue | voice-memo | interview
+sources:                     # P2: 必須。1 件以上。kind ごとに形状が異なる(下記)
+  - kind: meeting            # meeting | voice-memo | interview は { repo, path, lines?, ref? }
     repo: org/minutes
     path: 2026/06/2026-06-03-hw-weekly.md
-    lines: "L120-L141"       # 任意
-  - kind: discord
+    lines: "L120-L141"       # 任意。行アンカー
+    ref: a1b2c3d             # 任意。commit SHA。指定時は SHA 固定 permalink、省略時は default branch
+  - kind: pr                 # pr | issue は { repo, number }
+    repo: org/knowledge-platform
+    number: 142
+  - kind: discord            # discord は { url }
     url: https://discord.com/channels/...  # メッセージ permalink
 people: ["yamada", "suzuki"] # 言及された当事者(GitHub ユーザ名で統一)
 confidence: high             # high | medium | low(抽出エージェントが自己申告)
@@ -236,21 +238,25 @@ status: active               # active | stale | superseded
 supersedes: kb-2026-0089     # 任意。矛盾検出時の世代交代に使用
 created: "2026-06-10"
 last_verified: "2026-06-10"
-review_interval_days: 180    # type 別デフォルト: procedure=90, fact=180, failure=365, decision=∞
+review_interval_days: 180    # type 別デフォルト: procedure=90, fact=180, learning=180, failure=365。
+                             # decision は鮮度確認対象外 → キー省略(null)で表現
 owner: yamada                # 鮮度確認の宛先。原則 people の筆頭
 ---
-
 ## 事象
 (本文。エージェントが生成し、人間が PR レビューで修正できる)
-
 ## 対処 / 学び
-
 ## 背景・補足
 ```
+**sources の kind 別形状**(ADR-0003 D1/D2):
+| kind | 形状 |
+|---|---|
+| `meeting` / `voice-memo` / `interview` | `{ repo, path, lines?, ref? }` |
+| `pr` / `issue` | `{ repo, number }` |
+| `discord` | `{ url }` |
 
 設計上の注意:
-
-- `type: decision` の本体は `decisions/` に置き、`knowledge/` には置かない(重複防止)
+- `type: decision` の本体は `decisions/` に置き、`knowledge/` には置かない(重複防止)。`knowledge/**` 内の `type: decision` は `validateRepo` がエラー検出する(ADR-0003 D3)
+- `review_interval_days` の `decision`=∞(鮮度確認対象外)は、値ではなくキー省略(null)で表現する(ADR-0003 D4)
 - 人物識別子は **GitHub ユーザ名に統一**し、Discord ID とのマッピングテーブルを discord-bot の設定(`apps/discord-bot/config/members.yaml`)に持つ
 - ID は不変。ファイル名変更(slug 変更)があっても ID で参照する
 
