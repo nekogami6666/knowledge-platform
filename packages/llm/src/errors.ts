@@ -10,7 +10,8 @@ export type LlmErrorCode =
   | "API_ERROR" // その他の API / ネットワーク失敗(リトライ対象外)
   | "BUDGET_EXCEEDED" // アプリ別の日次トークン上限超過(§7.3)
   | "STRUCTURED_PARSE" // 構造化出力の zod 再 parse 失敗(§7.2。client/agent 実装で使用)
-  | "PROMPT_NOT_FOUND"; // プロンプトファイル欠落(§8.1。prompts ローダで使用)
+  | "PROMPT_NOT_FOUND" // プロンプトファイル欠落(§8.1。prompts ローダで使用)
+  | "PROMPT_INVALID"; // プロンプト frontmatter が不正(role 欠落/不正など、§8.1)
 
 /** packages/llm が投げる統一エラー。 */
 export class LlmError extends Error {
