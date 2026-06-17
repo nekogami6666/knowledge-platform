@@ -3,6 +3,12 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
+  "exports": {
+    "./qa": {
+      "types": "./dist/qa-search.d.ts",
+      "default": "./dist/qa-search.js"
+    }
+  },
   "scripts": {
     "typecheck": "tsc --noEmit",
     "build": "tsc -p tsconfig.build.json"

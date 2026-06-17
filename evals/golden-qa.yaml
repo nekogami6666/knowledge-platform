@@ -1,0 +1,96 @@
+# ゴールデン質問セット(design.md §10.2)。初版 10 件。
+# 各エントリ: id / question / expected_sources(QaCitation 形)/ answer_points / not_found?
+# 出典一致率は expected_sources を全て含むかで判定(§6.2 AC1 = 8/10)。
+# 回答妥当性(LLM-as-judge §10.2(b))は PR-5b で追加。
+# 対象コーパスは evals/fixtures/qa-corpus(synthetic、ADR-0002 安全)。
+
+- id: gq-001
+  question: "分注ロボット X は高湿度環境で何が起きますか?"
+  expected_sources:
+    - kind: github_file
+      repo: org/minutes
+      path: "2026/06/2026-06-03-hw-weekly.md"
+  answer_points:
+    - "高湿度で Y 軸が脱調する"
+
+- id: gq-002
+  question: "高湿度での Y 軸脱調への対処は?"
+  expected_sources:
+    - kind: github_file
+      repo: org/minutes
+      path: "2026/06/2026-06-03-hw-weekly.md"
+  answer_points:
+    - "除湿機の設置"
+    - "運転前のホーミング"
+
+- id: gq-003
+  question: "分注ユニットのファーム書き込みは CAN から何に変更されましたか?"
+  expected_sources:
+    - kind: github_file
+      repo: org/minutes
+      path: "2026/06/2026-06-03-hw-weekly.md"
+  answer_points:
+    - "SWD 直結に変更"
+
+- id: gq-004
+  question: "ファーム書き込みで CAN を却下した理由は?"
+  expected_sources:
+    - kind: github_file
+      repo: org/minutes
+      path: "2026/06/2026-06-03-hw-weekly.md"
+  answer_points:
+    - "書き込み速度が遅く量産で律速になるため"
+
+- id: gq-005
+  question: "ファーム更新するとキャリブレーション値はどうなりますか?"
+  expected_sources:
+    - kind: github_file
+      repo: org/dispenser-fw
+      path: "CHANGELOG.md"
+  answer_points:
+    - "初期化される(飛ぶ)ので再キャリブレーションが必要"
+
+- id: gq-006
+  question: "分注機 X の温度補正について教えてください。"
+  expected_sources:
+    - kind: github_file
+      repo: org/dispenser-fw
+      path: "docs/calibration.md"
+  answer_points:
+    - "温度補正に対応"
+    - "基準温度 25℃"
+
+- id: gq-007
+  question: "分注ロボット X の高湿度脱調はナレッジ化されていますか?"
+  expected_sources:
+    - kind: github_file
+      repo: org/knowledge-base
+      path: "knowledge/hardware/kb-2026-0142-dispenser-x-humidity.md"
+  answer_points:
+    - "kb-2026-0142 として記録されている"
+
+- id: gq-008
+  question: "Y 軸脱調の初報はどこで共有されましたか?"
+  expected_sources:
+    - kind: discord
+      url: "https://discord.com/channels/100200/300400/500600"
+  answer_points:
+    - "Discord で初報が共有された"
+
+- id: gq-009
+  question: "分注ロボット X の推奨湿度しきい値は?"
+  expected_sources:
+    - kind: github_file
+      repo: org/minutes
+      path: "2026/06/2026-06-03-hw-weekly.md"
+    - kind: github_file
+      repo: org/minutes
+      path: "2026/06/2026-06-10-hw-weekly.md"
+  answer_points:
+    - "当初 45%RH 以下、後に 40%RH 以下へ更新(両論併記)"
+
+- id: gq-010
+  question: "分注機 Z の保守周期は何ヶ月ですか?"
+  expected_sources: []
+  not_found: true
+  answer_points: []
