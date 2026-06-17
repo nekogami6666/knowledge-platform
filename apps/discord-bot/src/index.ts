@@ -23,7 +23,7 @@ async function main(): Promise<void> {
     logger.warn("channels.allow が空です(default-deny)。どのチャンネルにも応答しません(§9.2)。");
   }
 
-  const bot = createBot({ logger });
+  const bot = createBot({ logger, channels });
   await bot.login(env.DISCORD_TOKEN);
   logger.info("discord-bot started");
 }
