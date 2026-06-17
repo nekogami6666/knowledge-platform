@@ -5,11 +5,27 @@ import {
   isChannelAllowed,
   loadChannels,
   loadMembers,
+  loadRepos,
 } from "./config.js";
 
 function reader(files: Record<string, string | null>): ConfigReader {
   return { read: (name) => Promise.resolve(files[name] ?? null) };
 }
+
+describe("loadRepos", () => {
+  it("ファイルが無ければ空配列", async () => {
+    expect((await loadRepos(reader({}))).repos).toEqual([]);
+  });
+
+  it("repo/dir/url をパースする", async () => {
+    const c = await loadRepos(
+      reader({
+        "repos.yaml": "repos:\n  - repo: org/minutes\n    dir: minutes\n    url: https://x/y.git",
+      }),
+    );
+    expect(c.repos).toEqual([{ repo: "org/minutes", dir: "minutes", url: "https://x/y.git" }]);
+  });
+});
 
 describe("loadChannels", () => {
   it("ファイルが無ければ default-deny の空設定", async () => {

@@ -24,6 +24,19 @@ export const membersConfigSchema = z
   .default({ members: [] });
 export type MembersConfig = z.infer<typeof membersConfigSchema>;
 
+/**
+ * 検索対象リポ(§6.2 / §14 #5)。repo="org/name"(citation allowlist 兼 permalink)、
+ * dir=CLONES_DIR 配下の clone 先、url=git remote(synthetic で既存 dir を使う場合は省略可)。
+ */
+export const reposConfigSchema = z
+  .object({
+    repos: z
+      .array(z.object({ repo: z.string(), dir: z.string(), url: z.string().optional() }))
+      .default([]),
+  })
+  .default({ repos: [] });
+export type ReposConfig = z.infer<typeof reposConfigSchema>;
+
 /** 設定ファイルの読み取り口。ファイルが無ければ null を返す(= 既定値を使う)。 */
 export interface ConfigReader {
   read(name: string): Promise<string | null>;
@@ -52,6 +65,12 @@ export async function loadMembers(reader: ConfigReader): Promise<MembersConfig> 
   const text = await reader.read("members.yaml");
   const data = text === null ? undefined : yaml.load(text);
   return membersConfigSchema.parse(data ?? undefined);
+}
+
+export async function loadRepos(reader: ConfigReader): Promise<ReposConfig> {
+  const text = await reader.read("repos.yaml");
+  const data = text === null ? undefined : yaml.load(text);
+  return reposConfigSchema.parse(data ?? undefined);
 }
 
 /** §9.2 default-deny: allow に含まれ、かつ permanent_exclude に含まれないチャンネルのみ許可。 */

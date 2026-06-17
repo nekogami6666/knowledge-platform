@@ -1,12 +1,18 @@
 /**
  * discord-bot エントリポイント(design.md §6.2 C1)。
- * env / config をロードし、ロガー・Bot を組み立てて Discord にログインする。
- * PR-3a は骨格まで(/ask は stub)。検索パイプライン接続は PR-4。
+ * env / config をロードし、SQLite ストア・RepoSyncer・プロンプトローダ・検索パイプラインを
+ * 組み立てて /ask を配線し、Discord にログインする。
  */
-import { createFsConfigReader, loadChannels, loadMembers } from "./config.js";
-import { createBot } from "./discord.js";
+import { randomUUID } from "node:crypto";
+import { createFsPromptStore, nullUsageRecorder, runAgentSearch, withRetry } from "@stratum/llm";
+import { type AskDeps, handleAskRequest, type QaSearch, qaAnswerSchema } from "./ask.js";
+import { createFsConfigReader, loadChannels, loadMembers, loadRepos } from "./config.js";
+import { type AskHandler, createBot } from "./discord.js";
 import { parseEnv } from "./env.js";
-import { createLogger } from "./logger.js";
+import { createLogger, withCorrelation } from "./logger.js";
+import { createGitRepoSyncer } from "./repos.js";
+import { createSqliteStore } from "./sqlite-store.js";
+import { isoJst } from "./time.js";
 
 async function main(): Promise<void> {
   const env = parseEnv();
@@ -15,15 +21,71 @@ async function main(): Promise<void> {
   const reader = createFsConfigReader(env.CONFIG_DIR);
   const channels = await loadChannels(reader);
   const members = await loadMembers(reader);
+  const reposConfig = await loadRepos(reader);
   logger.info(
-    { allowedChannels: channels.allow.length, members: members.members.length },
+    {
+      allowedChannels: channels.allow.length,
+      members: members.members.length,
+      repos: reposConfig.repos.length,
+    },
     "config loaded",
   );
   if (channels.allow.length === 0) {
     logger.warn("channels.allow が空です(default-deny)。どのチャンネルにも応答しません(§9.2)。");
   }
+  if (reposConfig.repos.length === 0) {
+    logger.warn("repos.yaml が空です。検索対象リポがありません(§14 #5)。");
+  }
 
-  const bot = createBot({ logger, channels });
+  const store = createSqliteStore(env.DB_PATH);
+  const syncer = createGitRepoSyncer(env.CLONES_DIR);
+  const promptStore = createFsPromptStore(env.PROMPTS_DIR);
+
+  // 実 agentic search: runAgentSearch を qaAnswerSchema で実行し、§6.2 のとおり 1 回だけリトライ。
+  // ANTHROPIC_API_KEY は Agent SDK が process.env から自動取得する(env.ts で必須検証済み)。
+  const search: QaSearch = (input) =>
+    withRetry(
+      () =>
+        runAgentSearch(
+          {
+            app: "discord-bot",
+            role: "standard",
+            systemPrompt: input.systemPrompt,
+            prompt: input.question,
+            cwd: input.cwd,
+            outputSchema: qaAnswerSchema,
+          },
+          { usage: nullUsageRecorder },
+        ),
+      { maxRetries: 1 },
+    );
+
+  const onAsk: AskHandler = (question, ctx) => {
+    const deps: AskDeps = {
+      repos: reposConfig.repos,
+      syncer,
+      promptStore,
+      store,
+      clonesDir: env.CLONES_DIR,
+      search,
+      newId: () => randomUUID(),
+      now: () => isoJst(),
+      logError: (err) =>
+        withCorrelation(logger, ctx.correlationId).error({ err }, "/ask pipeline error"),
+    };
+    return handleAskRequest(
+      {
+        question,
+        discordUserId: ctx.userId,
+        discordChannelId: ctx.channelId,
+        threadId: null,
+        correlationId: ctx.correlationId,
+      },
+      deps,
+    );
+  };
+
+  const bot = createBot({ logger, channels, store, onAsk });
   await bot.login(env.DISCORD_TOKEN);
   logger.info("discord-bot started");
 }

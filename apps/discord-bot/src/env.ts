@@ -16,8 +16,10 @@ const envSchema = z.object({
   CLONES_DIR: z.string().default("./.clones"),
   /** SQLite ファイルパス。 */
   DB_PATH: z.string().default("./data/bot.db"),
-  /** members.yaml / channels.yaml の置き場。 */
+  /** members.yaml / channels.yaml / repos.yaml の置き場。 */
   CONFIG_DIR: z.string().default("./config"),
+  /** プロンプト(prompts/<app>/<name>.md)のルート。リポジトリルートの prompts/。 */
+  PROMPTS_DIR: z.string().default("./prompts"),
 });
 
 export type Env = z.infer<typeof envSchema>;

@@ -1,0 +1,10 @@
+# 検索対象リポ(design.md §6.2 / §14 #5)。コピーして repos.yaml を作る(repos.yaml は .gitignore)。
+# repo: "org/name"(citation の allowlist 兼 permalink)/ dir: CLONES_DIR 配下の clone 先 /
+# url: git remote(省略時は既存ディレクトリ前提。Phase 1a の synthetic コーパス検証ではローカル dir を使う)。
+repos:
+  - repo: org/minutes
+    dir: minutes
+    url: https://github.com/org/minutes.git
+  - repo: org/knowledge-base
+    dir: knowledge-base
+    url: https://github.com/org/knowledge-base.git
