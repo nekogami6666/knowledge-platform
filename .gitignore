@@ -5,3 +5,6 @@ coverage/
 .env
 .env.*
 .claude/settings.local.json
+
+# discord-bot のローカル設定(実 ID を含むためコミットしない。*.yaml.example のみ追跡)
+apps/discord-bot/config/*.yaml

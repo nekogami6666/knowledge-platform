@@ -1,0 +1,7 @@
+# Bot が閲覧を許可するチャンネル(design.md §9.2: allowlist 制 / default-deny)。
+# 実チャンネル ID は経営承認の上で channels.yaml(gitignore 済み)に記載する。
+# allow が空のあいだ、Bot はどのチャンネルにも応答しない(安全側)。
+allow: []
+
+# 恒久除外チャンネル(例: #hr / #management。§9.3)。allow より優先される。
+permanent_exclude: []
