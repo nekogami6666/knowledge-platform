@@ -12,6 +12,7 @@ function sampleQuery(over: Partial<QueryRecord> = {}): QueryRecord {
     answer: "A",
     sourcesJson: null,
     answerStatus: "answered",
+    feedback: null,
     inputTokens: 1,
     outputTokens: 2,
     elapsedMs: 10,
@@ -52,6 +53,25 @@ describe("createMemoryStore: pending_actions", () => {
     expect(s.listPendingActions()).toHaveLength(2);
     expect(s.listPendingActions("question_queue")).toHaveLength(1);
     expect(s.listPendingActions("question_queue")[0]?.id).toBe("a1");
+  });
+});
+
+describe("createMemoryStore: feedback / answerStatus", () => {
+  it("setFeedback で 👍👎 を更新でき、未知 id は no-op(§4.6)", () => {
+    const s = createMemoryStore();
+    s.recordQuery(sampleQuery({ id: "q1", feedback: null }));
+    expect(s.getQuery("q1")?.feedback).toBeNull();
+    s.setFeedback("q1", "down");
+    expect(s.getQuery("q1")?.feedback).toBe("down");
+    s.setFeedback("nope", "up"); // throw しない
+  });
+
+  it("answered / unanswered / delivery_failed が round-trip する", () => {
+    const s = createMemoryStore();
+    for (const status of ["answered", "unanswered", "delivery_failed"] as const) {
+      s.recordQuery(sampleQuery({ id: status, answerStatus: status }));
+      expect(s.getQuery(status)?.answerStatus).toBe(status);
+    }
   });
 });
 

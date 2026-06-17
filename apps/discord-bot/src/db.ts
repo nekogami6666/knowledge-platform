@@ -10,6 +10,9 @@
 /** 回答状態。unanswered=NOT_FOUND、delivery_failed=Discord 送信失敗(未回答とは区別)。 */
 export type AnswerStatus = "answered" | "unanswered" | "delivery_failed";
 
+/** 回答への評価(👍👎、§4.6 queries)。未評価は null。 */
+export type Feedback = "up" | "down" | null;
+
 /** /ask 1 件の記録(§4.6 queries)。 */
 export interface QueryRecord {
   id: string;
@@ -22,6 +25,8 @@ export interface QueryRecord {
   /** 出典(QaCitation[])の JSON 文字列。 */
   sourcesJson: string | null;
   answerStatus: AnswerStatus;
+  /** 👍👎 評価(§4.6)。PR-4 でボタン押下時に setFeedback で更新。初期は null。 */
+  feedback: Feedback;
   inputTokens: number | null;
   outputTokens: number | null;
   elapsedMs: number | null;
@@ -52,6 +57,8 @@ export interface BotStore {
   recordQuery(q: QueryRecord): void;
   getQuery(id: string): QueryRecord | undefined;
   listQueries(): QueryRecord[];
+  /** 👍👎 評価を記録/更新する(§4.6。PR-4 のリアクション処理が呼ぶ)。未知 id は no-op。 */
+  setFeedback(id: string, value: Feedback): void;
 
   queueAction(a: PendingAction): void;
   listPendingActions(type?: string): PendingAction[];
@@ -80,6 +87,10 @@ export function createMemoryStore(): BotStore {
     },
     listQueries() {
       return [...queries];
+    },
+    setFeedback(id, value) {
+      const q = queries.find((row) => row.id === id);
+      if (q) q.feedback = value;
     },
     queueAction(a) {
       actions.push({ ...a });
