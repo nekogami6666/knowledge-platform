@@ -1,0 +1,39 @@
+# CI(design.md §10.1): lint → typecheck → unit test。
+# 順序は ADR-0005 D2 に合わせ install → build → lint → typecheck → test。
+# knowledge-base 側のスキーマ検証 CI は別リポジトリ(knowledge-base/.github/workflows/validate.yml)。
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Enable corepack (pnpm)
+        run: corepack enable
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      # build を先に通す(ADR-0005 D1/D2: 消費側 typecheck/test が dist を要求するため)。
+      - name: Build
+        run: pnpm -r --if-present run build
+
+      - name: Lint
+        run: pnpm lint
+
+      - name: Typecheck
+        run: pnpm -r run typecheck
+
+      - name: Test
+        run: pnpm vitest run

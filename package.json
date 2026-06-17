@@ -7,10 +7,10 @@
     "node": ">=22"
   },
   "scripts": {
-    "typecheck": "pnpm -r run typecheck",
+    "build": "pnpm -r --if-present run build",
+    "typecheck": "pnpm -r --if-present run build && pnpm -r run typecheck",
     "lint": "biome check .",
-    "test": "vitest run",
-    "build": "pnpm -r --if-present run build"
+    "test": "pnpm -r --if-present run build && vitest run"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.3.0",
