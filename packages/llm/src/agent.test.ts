@@ -1,6 +1,12 @@
+import type { Options } from "@anthropic-ai/claude-agent-sdk";
 import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
-import { type AgentQueryFn, runAgentSearch } from "./agent.js";
+import {
+  type AgentQueryFn,
+  DEFAULT_ALLOWED_TOOLS,
+  DEFAULT_DISALLOWED_TOOLS,
+  runAgentSearch,
+} from "./agent.js";
 import { LlmError } from "./errors.js";
 import type { Usage, UsageRecorder } from "./usage.js";
 
@@ -121,5 +127,44 @@ describe("runAgentSearch", () => {
     await expect(runAgentSearch(baseOpts, { queryFn })).rejects.toMatchObject({
       code: "API_ERROR",
     });
+  });
+
+  it("§9.5: query に渡す封じ込めオプションを固定する(危険ツールを決して許可しない)", async () => {
+    let captured: Options | undefined;
+    const queryFn: AgentQueryFn = ({ options }) => {
+      captured = options;
+      return (async function* () {
+        yield {
+          type: "result",
+          subtype: "success",
+          structured_output: { answer: "A", notFound: false },
+          usage: { input_tokens: 0, output_tokens: 0 },
+        };
+      })();
+    };
+
+    await runAgentSearch(baseOpts, { queryFn });
+
+    // 許可ツールは読み取り専用の3つだけ。
+    expect(captured?.allowedTools).toEqual([...DEFAULT_ALLOWED_TOOLS]);
+    // 危険ツールは disallowedTools に明示され、allowedTools には決して入らない(回帰防止の核心)。
+    expect(captured?.disallowedTools).toEqual(
+      expect.arrayContaining([...DEFAULT_DISALLOWED_TOOLS]),
+    );
+    for (const danger of [
+      "Bash",
+      "Write",
+      "Edit",
+      "NotebookEdit",
+      "WebFetch",
+      "WebSearch",
+      "Task",
+    ]) {
+      expect(captured?.allowedTools).not.toContain(danger);
+    }
+    // ヘッドレス・ハーメチック・構造化出力の不変条件。
+    expect(captured?.permissionMode).toBe("dontAsk");
+    expect(captured?.settingSources).toEqual([]);
+    expect(captured?.outputFormat).toMatchObject({ type: "json_schema" });
   });
 });
