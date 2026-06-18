@@ -15,9 +15,9 @@ import { createQaSearch } from "@stratum/discord-bot/qa";
 import { createFsPromptStore, loadPrompt } from "@stratum/llm";
 import { describe, expect, it } from "vitest";
 import { loadGoldenQa } from "./golden.js";
+import { type JudgedQuestion, judgeAnswer, scoreValidity } from "./judge.js";
 import { type QaResult, scoreRun } from "./score.js";
 
-const ROOT = fileURLToPath(new URL("../..", import.meta.url)); // repo root
 const PROMPTS_DIR = fileURLToPath(new URL("../../prompts", import.meta.url));
 const CORPUS_DIR = fileURLToPath(new URL("../fixtures/qa-corpus", import.meta.url));
 const GOLDEN = readFileSync(fileURLToPath(new URL("../golden-qa.yaml", import.meta.url)), "utf8");
@@ -36,7 +36,6 @@ describe.skipIf(!process.env.ANTHROPIC_API_KEY)(
   "golden eval (real Claude, synthetic corpus)",
   () => {
     it("出典一致 >= 8/10(§6.2 AC1)+ NOT_FOUND ケース成立", async () => {
-      void ROOT;
       const golden = loadGoldenQa(GOLDEN);
       const promptStore = createFsPromptStore(PROMPTS_DIR);
       const prompt = await loadPrompt("qa", "answer", promptStore);
@@ -50,12 +49,42 @@ describe.skipIf(!process.env.ANTHROPIC_API_KEY)(
       }
 
       const score = scoreRun(golden, results);
-      // 失敗時に内訳が見えるよう per-question を出す。
-      console.log(JSON.stringify(score, null, 2));
+      // 失敗時に内訳が見えるよう per-question を出す(§8.1 PR 貼付用)。
+      console.log("citation:", JSON.stringify(score, null, 2));
       expect(score.passCount).toBeGreaterThanOrEqual(8);
 
       const notFound = results.find((r) => r.id === "gq-010")?.answer;
       expect(notFound?.notFound).toBe(true);
-    }, 600_000); // 10 問 × 実エージェント(各最大 120s)。
+
+      // §10.2(b) 回答妥当性: deep モデルで各回答を 3 段階採点(soft 指標。AC1 のハードゲートにはしない)。
+      const judgePrompt = await loadPrompt("evals", "judge", promptStore);
+      const byId = new Map(results.map((r) => [r.id, r.answer]));
+      const judged: JudgedQuestion[] = [];
+      for (const g of golden) {
+        const answer = byId.get(g.id);
+        if (answer === undefined) continue;
+        // soft 指標: 1 問の judge 失敗(STRUCTURED_PARSE 等の非リトライ throw)で suite 全体を
+        // 落とさない。失敗は level 0(bad)として記録し、blast radius を 1 問に留める。
+        try {
+          const verdict = await judgeAnswer(
+            {
+              question: g.question,
+              answerPoints: g.answer_points,
+              answer,
+              notFoundExpected: g.not_found,
+            },
+            { judgePrompt },
+          );
+          judged.push({ id: g.id, level: verdict.level });
+        } catch (err) {
+          console.warn(`judge failed for ${g.id}:`, err instanceof Error ? err.message : err);
+          judged.push({ id: g.id, level: 0 });
+        }
+      }
+      const validity = scoreValidity(judged);
+      console.log("validity:", JSON.stringify(validity, null, 2));
+      // soft: deep 判定のばらつきで suite を flake させない。bad は 2/10 以下を期待。
+      expect(validity.counts.bad).toBeLessThanOrEqual(2);
+    }, 900_000); // 10 問 × 実エージェント(各最大 120s)。
   },
 );

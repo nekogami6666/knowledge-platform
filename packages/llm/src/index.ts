@@ -16,6 +16,15 @@ export {
 } from "./agent.js";
 // --- エラー ---
 export { LlmError, type LlmErrorCode, RETRYABLE_LLM_CODES } from "./errors.js";
+// --- 単発 Messages ラッパ(構造化 1 ショット) ---
+export {
+  type GenerateDeps,
+  type GenerateStructuredOptions,
+  type GenerateStructuredResult,
+  generateStructured,
+  type MessagesParseFn,
+  type ParseResponse,
+} from "./messages.js";
 // --- モデル設定 ---
 export { MODELS, type ModelRole, modelIdFor } from "./models.js";
 // --- プロンプトローダ ---
