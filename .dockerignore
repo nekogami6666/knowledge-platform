@@ -1,0 +1,15 @@
+# build 段で pnpm install / build をやり直すので、ホストの生成物・秘密は持ち込まない。
+node_modules
+**/node_modules
+dist
+**/dist
+coverage
+.git
+.github
+.clones
+data
+*.log
+.env
+.env.*
+apps/discord-bot/config/*.yaml
+evals/eval-result.json
