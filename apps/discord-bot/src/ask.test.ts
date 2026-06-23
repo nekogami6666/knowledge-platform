@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   type AskDeps,
   type AskRequest,
+  buildRepoManifest,
   handleAskRequest,
   NOT_FOUND_MESSAGE,
   type QaAnswer,
@@ -119,7 +120,38 @@ const req: AskRequest = {
   correlationId: "corr-1",
 };
 
+describe("buildRepoManifest (§6.2 repo 対応表)", () => {
+  it("repo ごとに org/name → subdir 行を組む", () => {
+    const m = buildRepoManifest([
+      { repo: "org/minutes", dir: "minutes" },
+      { repo: "org/fw", dir: "dispenser-fw" },
+    ]);
+    expect(m).toContain("org/minutes → サブディレクトリ `minutes/`");
+    expect(m).toContain("org/fw → サブディレクトリ `dispenser-fw/`");
+  });
+
+  it("repos が空なら空文字(前置きしない)", () => {
+    expect(buildRepoManifest([])).toBe("");
+  });
+});
+
 describe("handleAskRequest synthetic 統合(§6.2 受け入れ条件)", () => {
+  it("systemPrompt に repo manifest とプロンプト本文を前置きして検索する(PR-6a)", async () => {
+    let capturedSystemPrompt = "";
+    const { deps } = makeDeps({
+      search: async (input) => {
+        capturedSystemPrompt = input.systemPrompt;
+        return {
+          value: { answer: "ok", citations: [], notFound: true },
+          usage: { inputTokens: 1, outputTokens: 1 },
+        };
+      },
+    });
+    await handleAskRequest(req, deps);
+    expect(capturedSystemPrompt).toContain("org/minutes → サブディレクトリ `minutes/`");
+    expect(capturedSystemPrompt).toContain("Q&A システムプロンプト本文");
+  });
+
   it("AC1: 出典付き回答 → answered で queries に記録(出典脚注つき)", async () => {
     const answer: QaAnswer = {
       answer: "温度補正は入っています。",

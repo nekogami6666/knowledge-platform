@@ -21,6 +21,7 @@ import { type QaAnswer, type QaSearch, qaAnswerSchema } from "./ask.js";
 
 // QA 契約を再 export(評価ハーネス等の外部消費者向け。型は ask.ts が正)。
 export {
+  buildRepoManifest,
   type QaAnswer,
   type QaCitation,
   type QaSearch,

@@ -20,6 +20,22 @@ import type { RepoSpec, RepoSyncer, SyncedRepo } from "./repos.js";
 const DISCORD_PERMALINK_RE = /^https:\/\/discord\.com\/channels\/\d+\/\d+\/\d+$/;
 const REPO_RE = /^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/;
 
+/**
+ * 検索対象 repo の「subdir ↔ org/name」対応表を systemPrompt に前置する manifest を組む(§6.2)。
+ * cwd 配下のサブディレクトリ名しか見えないエージェントに、引用すべき `repo`(org/name)を教える。
+ * これが無いと本番 /ask でモデルが正しい repo を引用できない(eval と同一の manifest を共用する)。
+ */
+export function buildRepoManifest(repos: readonly RepoSpec[]): string {
+  if (repos.length === 0) return "";
+  const lines = repos.map((r) => `- ${r.repo} → サブディレクトリ \`${r.dir}/\``);
+  return [
+    "## 検索対象リポジトリ(このコーパスでの対応)",
+    ...lines,
+    "引用の repo にはこの org/name を使い、path は各サブディレクトリ配下からの相対パスにすること。",
+    "",
+  ].join("\n");
+}
+
 /** lines は kb-core の正典(parseLineRange)で検証する(形式 + start>=1 かつ start<=end)。 */
 function isValidLineRange(lines: string): boolean {
   try {
@@ -190,8 +206,11 @@ export async function handleAskRequest(req: AskRequest, deps: AskDeps): Promise<
   try {
     const synced = await deps.syncer.sync(deps.repos);
     const prompt = await loadPrompt("qa", "answer", deps.promptStore);
+    // §6.2: repo 対応表を前置きし、モデルが正しい org/name で引用できるようにする(PR-6a)。
+    const manifest = buildRepoManifest(deps.repos);
+    const systemPrompt = manifest === "" ? prompt.body : `${manifest}\n${prompt.body}`;
     const { value, usage } = await deps.search({
-      systemPrompt: prompt.body,
+      systemPrompt,
       question: req.question,
       cwd: deps.clonesDir,
     });

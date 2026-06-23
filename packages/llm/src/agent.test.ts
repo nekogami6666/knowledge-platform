@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import {
   type AgentQueryFn,
+  buildAgentEnv,
   DEFAULT_ALLOWED_TOOLS,
   DEFAULT_DISALLOWED_TOOLS,
   runAgentSearch,
@@ -166,5 +167,41 @@ describe("runAgentSearch", () => {
     expect(captured?.permissionMode).toBe("dontAsk");
     expect(captured?.settingSources).toEqual([]);
     expect(captured?.outputFormat).toMatchObject({ type: "json_schema" });
+    // §9.1 / ADR-0006: subprocess env を絞り込み、秘密は渡さない。
+    expect(captured?.env).toBeDefined();
+    expect(captured?.env && "DISCORD_TOKEN" in captured.env).toBe(false);
+  });
+});
+
+describe("buildAgentEnv (§9.1 / ADR-0006: subprocess env 絞り込み)", () => {
+  const source = {
+    PATH: "/usr/bin",
+    HOME: "/home/bot",
+    ANTHROPIC_API_KEY: "sk-ant-xxx",
+    CLAUDE_CODE_FOO: "1",
+    DISCORD_TOKEN: "raw-discord",
+    GITHUB_TOKEN: "raw-github",
+    SOME_OTHER_SECRET: "nope",
+  };
+
+  it("許可リスト + ANTHROPIC_/CLAUDE_ 接頭辞だけを通す", () => {
+    const env = buildAgentEnv(source);
+    expect(env.PATH).toBe("/usr/bin");
+    expect(env.HOME).toBe("/home/bot");
+    expect(env.ANTHROPIC_API_KEY).toBe("sk-ant-xxx");
+    expect(env.CLAUDE_CODE_FOO).toBe("1");
+  });
+
+  it("DISCORD_TOKEN / GITHUB_TOKEN / 無関係な秘密は渡さない", () => {
+    const env = buildAgentEnv(source);
+    expect("DISCORD_TOKEN" in env).toBe(false);
+    expect("GITHUB_TOKEN" in env).toBe(false);
+    expect("SOME_OTHER_SECRET" in env).toBe(false);
+  });
+
+  it("undefined の値は含めない", () => {
+    const env = buildAgentEnv({ PATH: undefined, HOME: "/h" });
+    expect("PATH" in env).toBe(false);
+    expect(env.HOME).toBe("/h");
   });
 });

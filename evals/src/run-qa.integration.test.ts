@@ -11,7 +11,7 @@
  */
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { createQaSearch } from "@stratum/discord-bot/qa";
+import { buildRepoManifest, createQaSearch } from "@stratum/discord-bot/qa";
 import { createFsPromptStore, loadPrompt } from "@stratum/llm";
 import { describe, expect, it } from "vitest";
 import { loadGoldenQa } from "./golden.js";
@@ -23,14 +23,12 @@ const CORPUS_DIR = fileURLToPath(new URL("../fixtures/qa-corpus", import.meta.ur
 const GOLDEN = readFileSync(fileURLToPath(new URL("../golden-qa.yaml", import.meta.url)), "utf8");
 
 // 評価ハーネス用: コーパスの subdir ↔ repo(org/name)対応表を systemPrompt に前置する。
-const REPO_MANIFEST = [
-  "## 検索対象リポジトリ(このコーパスでの対応)",
-  "- org/minutes → サブディレクトリ `minutes/`",
-  "- org/dispenser-fw → サブディレクトリ `dispenser-fw/`",
-  "- org/knowledge-base → サブディレクトリ `knowledge-base/`",
-  "引用の repo にはこの org/name を使い、path は各サブディレクトリ配下からの相対パスにすること。",
-  "",
-].join("\n");
+// 本番 /ask と同一の buildRepoManifest を使う(PR-6a で共通化)。
+const REPO_MANIFEST = buildRepoManifest([
+  { repo: "org/minutes", dir: "minutes" },
+  { repo: "org/dispenser-fw", dir: "dispenser-fw" },
+  { repo: "org/knowledge-base", dir: "knowledge-base" },
+]);
 
 describe.skipIf(!process.env.ANTHROPIC_API_KEY)(
   "golden eval (real Claude, synthetic corpus)",

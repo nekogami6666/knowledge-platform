@@ -37,6 +37,48 @@ export const DEFAULT_DISALLOWED_TOOLS: readonly string[] = [
   "Task",
 ];
 
+/**
+ * agent subprocess に通す env の許可リスト(キー名)。SDK/ランタイムが必要とする無害な変数のみ。
+ * これに加えて ANTHROPIC_ / CLAUDE_ 接頭辞のキーは素通しする(下記 buildAgentEnv)。
+ */
+const AGENT_ENV_ALLOWLIST: readonly string[] = [
+  "PATH",
+  "HOME",
+  "LANG",
+  "LC_ALL",
+  "LC_CTYPE",
+  "TZ",
+  "TMPDIR",
+  "TEMP",
+  "TMP",
+  "SHELL",
+  "USER",
+  "NODE_EXTRA_CA_CERTS",
+];
+
+/**
+ * agent subprocess に渡す最小 env を組む(§9.1 / ADR-0006)。
+ * SDK の Options.env は process.env を**置換**する(マージしない)ため、許可リストのキーと
+ * ANTHROPIC_ / CLAUDE_ 接頭辞だけを通し、DISCORD_TOKEN・GITHUB_TOKEN 等の秘密は subprocess へ渡さない
+ * (`/proc/self/environ` 経由のトークン漏洩ベクタを塞ぐ)。ファイル読み取り自体の封じ込めは別途
+ * OS/コンテナ FS サンドボックス(ADR-0006、Phase 1b デプロイ要件)に依存する。
+ */
+export function buildAgentEnv(
+  source: Record<string, string | undefined> = process.env,
+): Record<string, string> {
+  const env: Record<string, string> = {};
+  for (const key of AGENT_ENV_ALLOWLIST) {
+    const v = source[key];
+    if (v !== undefined) env[key] = v;
+  }
+  for (const [k, v] of Object.entries(source)) {
+    if (v !== undefined && (k.startsWith("ANTHROPIC_") || k.startsWith("CLAUDE_"))) {
+      env[k] = v;
+    }
+  }
+  return env;
+}
+
 export interface AgentSearchOptions<T> {
   /** UsageRecorder のラベル(アプリ名)。 */
   app: string;
@@ -124,6 +166,8 @@ export async function runAgentSearch<T>(
     settingSources: [],
     allowedTools: [...allowedTools],
     disallowedTools: [...DEFAULT_DISALLOWED_TOOLS],
+    // §9.1 / ADR-0006: subprocess env を最小許可リストに置換し、DISCORD_TOKEN 等を渡さない。
+    env: buildAgentEnv(),
     outputFormat: { type: "json_schema", schema },
     maxTurns,
     abortController,
