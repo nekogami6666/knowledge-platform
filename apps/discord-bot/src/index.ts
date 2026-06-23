@@ -17,7 +17,8 @@ import { isoJst } from "./time.js";
 
 async function main(): Promise<void> {
   const env = parseEnv();
-  const logger = createLogger();
+  // §9.1: env の秘密「値」をログ最終行から伏字化(err.message 混入も捕捉。logger.ts (A))。
+  const logger = createLogger("info", undefined, [env.DISCORD_TOKEN, env.ANTHROPIC_API_KEY]);
 
   const reader = createFsConfigReader(env.CONFIG_DIR);
   const channels = await loadChannels(reader);

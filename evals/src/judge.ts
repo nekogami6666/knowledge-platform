@@ -96,6 +96,11 @@ export async function judgeAnswer(input: JudgeInput, deps: JudgeDeps): Promise<J
           userContent,
           outputSchema: judgeVerdictSchema,
           effort: "low",
+          // 0/1/2 + 短い reasoning に adaptive thinking は不要。thinking を無効化し、
+          // maxTokens に十分な余裕を持たせて「thinking が出力枠を食って verdict 空 → 非リトライ
+          // STRUCTURED_PARSE」の silent flake を防ぐ(belt-and-suspenders)。
+          thinking: false,
+          maxTokens: 2048,
         },
         deps.generateDeps,
       ),

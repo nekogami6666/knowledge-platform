@@ -93,6 +93,13 @@ describe("judgeAnswer", () => {
     expect(captured.opts?.app).toBe("evals");
   });
 
+  it("truncation 対策: thinking 無効 + maxTokens に余裕(silent flake 防止)", async () => {
+    const { gen, captured } = genReturning({ reasoning: "r", level: 2 });
+    await judgeAnswer(input(), { judgePrompt: fakePrompt, generate: gen });
+    expect(captured.opts?.thinking).toBe(false);
+    expect(captured.opts?.maxTokens).toBe(2048);
+  });
+
   it("RATE_LIMITED は再試行して成功する(withRetry, sleep 注入)", async () => {
     let calls = 0;
     const gen: JudgeGenerateFn = async (_opts) => {

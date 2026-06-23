@@ -1,9 +1,14 @@
+import type { ButtonInteraction } from "discord.js";
+import type { Logger } from "pino";
 import { describe, expect, it } from "vitest";
 import type { ChannelsConfig } from "./config.js";
+import type { BotStore } from "./db.js";
 import {
+  type BotDeps,
   DENY_MESSAGE,
   denyReason,
   feedbackButtons,
+  handleButton,
   parseFeedbackCustomId,
   windowKey,
 } from "./discord.js";
@@ -60,5 +65,97 @@ describe("windowKey (10分バケット)", () => {
     const base = 600_000 * 2_000_000; // バケット境界に揃える(固定バケットのため)
     expect(windowKey(base)).toBe(windowKey(base + 9 * 60 * 1000));
     expect(windowKey(base)).not.toBe(windowKey(base + 11 * 60 * 1000));
+  });
+});
+
+/** discord.js を起動せず handleButton の配線・例外封じ込めを検証するための最小 fake 群。 */
+function fakeLogger(): { logger: Logger; errors: unknown[] } {
+  const errors: unknown[] = [];
+  const l = {
+    child: () => l,
+    error: (obj: unknown) => {
+      errors.push(obj);
+    },
+    info: () => {},
+    warn: () => {},
+    debug: () => {},
+  };
+  return { logger: l as unknown as Logger, errors };
+}
+
+function fakeStore(opts: { throwOnFeedback?: boolean } = {}): {
+  store: BotStore;
+  feedback: [string, string][];
+  queued: unknown[];
+} {
+  const feedback: [string, string][] = [];
+  const queued: unknown[] = [];
+  const store = {
+    setFeedback: (id: string, value: "up" | "down") => {
+      if (opts.throwOnFeedback) throw new Error("db locked");
+      feedback.push([id, value]);
+    },
+    queueAction: (a: unknown) => {
+      queued.push(a);
+    },
+  };
+  return { store: store as unknown as BotStore, feedback, queued };
+}
+
+function fakeButton(customId: string): { interaction: ButtonInteraction; replies: unknown[] } {
+  const replies: unknown[] = [];
+  const interaction = {
+    customId,
+    replied: false,
+    deferred: false,
+    reply: async (o: unknown) => {
+      replies.push(o);
+    },
+  };
+  return { interaction: interaction as unknown as ButtonInteraction, replies };
+}
+
+describe("handleButton (例外封じ込め / 配線)", () => {
+  const deps = (logger: Logger, store: BotStore): BotDeps => ({
+    logger,
+    channels: channels(),
+    store,
+  });
+
+  it("👍 で setFeedback + 感謝 reply(queueAction は呼ばない)", async () => {
+    const { logger } = fakeLogger();
+    const { store, feedback, queued } = fakeStore();
+    const { interaction, replies } = fakeButton("fb:up:q1");
+    await handleButton(interaction, deps(logger, store));
+    expect(feedback).toEqual([["q1", "up"]]);
+    expect(queued).toHaveLength(0);
+    expect(replies).toHaveLength(1);
+  });
+
+  it("👎 で setFeedback + queueAction(§6.2 step6)+ reply", async () => {
+    const { logger } = fakeLogger();
+    const { store, feedback, queued } = fakeStore();
+    const { interaction } = fakeButton("fb:down:q2");
+    await handleButton(interaction, deps(logger, store));
+    expect(feedback).toEqual([["q2", "down"]]);
+    expect(queued).toHaveLength(1);
+  });
+
+  it("不正 customId は何もしない(store/reply 不発)", async () => {
+    const { logger } = fakeLogger();
+    const { store, feedback } = fakeStore();
+    const { interaction, replies } = fakeButton("garbage");
+    await handleButton(interaction, deps(logger, store));
+    expect(feedback).toHaveLength(0);
+    expect(replies).toHaveLength(0);
+  });
+
+  it("store throw でも例外を外へ漏らさず log.error + ガード reply", async () => {
+    const { logger, errors } = fakeLogger();
+    const { store } = fakeStore({ throwOnFeedback: true });
+    const { interaction, replies } = fakeButton("fb:up:q3");
+    await expect(handleButton(interaction, deps(logger, store))).resolves.toBeUndefined();
+    expect(errors).toHaveLength(1);
+    expect(replies).toHaveLength(1); // ガード付き ephemeral 通知
   });
 });

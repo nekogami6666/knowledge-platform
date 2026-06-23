@@ -185,6 +185,15 @@ describe("handleAskRequest synthetic 統合(§6.2 受け入れ条件)", () => {
     expect(errors).toHaveLength(1); // §7.4: エラーは握りつぶさず観測フックへ
   });
 
+  it("§6.2 step5: elapsedMs を monotonic 差分で記録する(常に null ではない)", async () => {
+    // monotonicMs は startedAt(1回目)と recordQuery(2回目)で呼ばれる → 250-100=150ms。
+    const ticks = [100, 250];
+    let i = 0;
+    const { deps, store } = makeDeps({ monotonicMs: () => ticks[i++] ?? 0 });
+    const res = await handleAskRequest(req, deps);
+    expect(store.getQuery(res.queryId)?.elapsedMs).toBe(150);
+  });
+
   it("AC3: 直列キュー経由で 3 件同時に投げても全て解決しクラッシュしない", async () => {
     const { deps, store } = makeDeps({
       search: async () => ({

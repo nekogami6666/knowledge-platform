@@ -148,6 +148,8 @@ export interface AskDeps {
   newId: () => string;
   /** ISO 8601 タイムスタンプ生成(注入)。 */
   now: () => string;
+  /** 単調増加クロック(ms、所要時間計測用。注入。既定 performance.now)。§6.2 step5。 */
+  monotonicMs?: () => number;
   /** ファイル実在判定(注入。既定 fs.existsSync)。 */
   fileExists?: (absPath: string) => boolean;
   /** エラー観測フック(§7.4。既定 no-op。PR-4b で相関 ID 付き pino を渡す)。 */
@@ -166,10 +168,16 @@ export const NOT_FOUND_MESSAGE =
 export const ERROR_MESSAGE =
   "すみません、回答中にエラーが発生しました。時間をおいて再度お試しください。";
 
+/** 既定の単調クロック(§6.2 step5 の所要時間計測)。壁時計でなく monotonic を使う。 */
+const defaultMonotonicMs = (): number => performance.now();
+
 /** /ask 1 件を処理し、queries に記録して返す(notFound/全滅は pending_actions へ)。 */
 export async function handleAskRequest(req: AskRequest, deps: AskDeps): Promise<AskResult> {
   const queryId = deps.newId();
   const createdAt = deps.now();
+  // §6.2 step5: 所要時間を記録する。monotonic で開始時刻を取り、各記録点で差分を ms で出す。
+  const monoNow = deps.monotonicMs ?? defaultMonotonicMs;
+  const startedAt = monoNow();
   const base = {
     id: queryId,
     correlationId: req.correlationId,
@@ -201,7 +209,7 @@ export async function handleAskRequest(req: AskRequest, deps: AskDeps): Promise<
         feedback: null,
         inputTokens: usage.inputTokens,
         outputTokens: usage.outputTokens,
-        elapsedMs: null,
+        elapsedMs: Math.round(monoNow() - startedAt),
       });
       // git には書かず SQLite キューへ(gap-tracker が Phase 3 で commit)。
       deps.store.queueAction({
@@ -224,7 +232,7 @@ export async function handleAskRequest(req: AskRequest, deps: AskDeps): Promise<
       feedback: null,
       inputTokens: usage.inputTokens,
       outputTokens: usage.outputTokens,
-      elapsedMs: null,
+      elapsedMs: Math.round(monoNow() - startedAt),
     });
     return { answerText, status: "answered", queryId };
   } catch (err) {
@@ -238,7 +246,7 @@ export async function handleAskRequest(req: AskRequest, deps: AskDeps): Promise<
       feedback: null,
       inputTokens: null,
       outputTokens: null,
-      elapsedMs: null,
+      elapsedMs: Math.round(monoNow() - startedAt),
     });
     return { answerText: ERROR_MESSAGE, status: "error", queryId };
   }

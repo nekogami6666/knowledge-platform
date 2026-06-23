@@ -168,26 +168,44 @@ async function handleAsk(
   }
 }
 
-async function handleButton(interaction: ButtonInteraction, deps: BotDeps): Promise<void> {
+export async function handleButton(interaction: ButtonInteraction, deps: BotDeps): Promise<void> {
   const parsed = parseFeedbackCustomId(interaction.customId);
   if (parsed === null) return;
-  deps.store.setFeedback(parsed.queryId, parsed.value);
-  if (parsed.value === "down") {
-    // §6.2 step6: 👎 はフライホイール燃料として questions キューへ(git には書かない)。
-    deps.store.queueAction({
-      id: randomUUID(),
-      type: "question_queue",
-      queryId: parsed.queryId,
-      payloadJson: null,
-      state: "pending",
-      createdAt: isoJst(),
+  // 相関 ID には対象 queryId を使い、フィードバック操作を該当クエリに紐づけて追跡する(§7.4)。
+  const log = withCorrelation(deps.logger, parsed.queryId);
+  try {
+    deps.store.setFeedback(parsed.queryId, parsed.value);
+    if (parsed.value === "down") {
+      // §6.2 step6: 👎 はフライホイール燃料として questions キューへ(git には書かない)。
+      deps.store.queueAction({
+        id: randomUUID(),
+        type: "question_queue",
+        queryId: parsed.queryId,
+        payloadJson: null,
+        state: "pending",
+        createdAt: isoJst(),
+      });
+    }
+    await interaction.reply({
+      content:
+        parsed.value === "up"
+          ? "ありがとうございます!"
+          : "フィードバックを記録しました。改善に役立てます。",
+      ephemeral: true,
     });
+  } catch (err) {
+    // store throw(SQLite ロック等)や送信失敗で interaction を未 ack のまま落とさない。
+    log.error({ err }, "feedback handling failed");
+    // 未応答ならガード付きで ephemeral 通知。二重応答や再失敗はこれ以上できることが無いので握りつぶす。
+    if (!interaction.replied && !interaction.deferred) {
+      try {
+        await interaction.reply({
+          content: "フィードバックの記録に失敗しました。",
+          ephemeral: true,
+        });
+      } catch {
+        // noop: Discord への通知自体が失敗。ログ済みなのでこれ以上は何もしない。
+      }
+    }
   }
-  await interaction.reply({
-    content:
-      parsed.value === "up"
-        ? "ありがとうございます!"
-        : "フィードバックを記録しました。改善に役立てます。",
-    ephemeral: true,
-  });
 }
