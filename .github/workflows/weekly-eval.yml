@@ -1,0 +1,63 @@
+# 週次 golden eval(design.md §10.2)。synthetic コーパスに対し実 Claude で出典一致/回答妥当性を計測し、
+# ベースラインから 10pt 以上低下(or passCount<8)したら #stratum-ops に Discord webhook で通知する。
+# corpus は in-repo synthetic(ADR-0002 安全)。cross-repo PAT 不要。
+# 必要な secrets: ANTHROPIC_API_KEY(eval 実行)/ DISCORD_OPS_WEBHOOK(#stratum-ops 通知)。
+name: weekly-eval
+
+on:
+  schedule:
+    - cron: "0 0 * * 1" # 毎週月曜 00:00 UTC(= 09:00 JST)
+  workflow_dispatch: {} # 手動実行(初回検証用)
+
+jobs:
+  golden-eval:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Enable corepack (pnpm)
+        run: corepack enable
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Build
+        run: pnpm -r --if-present run build
+
+      # 実 Claude で golden eval を実行(synthetic corpus)。eval-result.json を書き出す。
+      # eval 自体が失敗(API エラー等)したらここで job が落ち、GitHub の失敗通知に乗る。
+      - name: Run golden eval
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: pnpm --filter @stratum/evals run eval:qa
+
+      # ベースラインから 10pt 以上低下 or passCount<8 のとき #stratum-ops に通知(§10.2)。
+      - name: Alert on regression
+        if: always()
+        env:
+          DISCORD_OPS_WEBHOOK: ${{ secrets.DISCORD_OPS_WEBHOOK }}
+        run: |
+          set -euo pipefail
+          RESULT=evals/eval-result.json
+          if [ ! -f "$RESULT" ]; then
+            echo "eval-result.json なし(eval 実行失敗)。スキップ。"
+            exit 0
+          fi
+          ALERT=$(jq -r '.alert' "$RESULT")
+          if [ "$ALERT" != "true" ]; then
+            echo "回帰なし。通知しない。"
+            exit 0
+          fi
+          SUMMARY=$(jq -c '{passCount: .citation.passCount, current, comparison: .comparison.drops}' "$RESULT")
+          if [ -z "${DISCORD_OPS_WEBHOOK:-}" ]; then
+            echo "DISCORD_OPS_WEBHOOK 未設定。通知できないが回帰を検出: $SUMMARY"
+            exit 0
+          fi
+          jq -n --arg s "$SUMMARY" \
+            '{content: ("⚠️ 週次 golden eval 回帰検出(§10.2)\n```json\n" + $s + "\n```")}' \
+            | curl -fsS -X POST -H "Content-Type: application/json" -d @- "$DISCORD_OPS_WEBHOOK"

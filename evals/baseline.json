@@ -1,0 +1,5 @@
+{
+  "_note": "週次 golden eval のベースライン(§10.2)。current がここから 10pt 以上低下したら #stratum-ops に通知。プレースホルダ値。最初の実走後、安定スコアで手動更新する。",
+  "citationMatchRate": 0.8,
+  "validityRate": 0.6
+}

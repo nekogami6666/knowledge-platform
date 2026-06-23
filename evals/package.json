@@ -4,7 +4,9 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "build": "tsc -p tsconfig.build.json",
+    "eval:qa": "node dist/run-qa-cli.js"
   },
   "dependencies": {
     "@stratum/discord-bot": "workspace:*",
