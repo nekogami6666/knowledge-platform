@@ -204,4 +204,22 @@ describe("buildAgentEnv (§9.1 / ADR-0006: subprocess env 絞り込み)", () => 
     expect("PATH" in env).toBe(false);
     expect(env.HOME).toBe("/h");
   });
+
+  it("AWS_/CLAUDE_/ANTHROPIC_ 接頭辞(Claude Platform on AWS 認証)を通す(ADR-0008)", () => {
+    const env = buildAgentEnv({
+      AWS_REGION: "ap-northeast-1",
+      CLAUDE_CODE_USE_ANTHROPIC_AWS: "1",
+      ANTHROPIC_AWS_API_KEY: "AEAA-key",
+      ANTHROPIC_AWS_WORKSPACE_ID: "wrkspc_xxx",
+      DISCORD_TOKEN: "raw-discord",
+    });
+    expect(env.AWS_REGION).toBe("ap-northeast-1");
+    expect(env.CLAUDE_CODE_USE_ANTHROPIC_AWS).toBe("1");
+    expect(env.ANTHROPIC_AWS_API_KEY).toBe("AEAA-key");
+    expect(env.ANTHROPIC_AWS_WORKSPACE_ID).toBe("wrkspc_xxx");
+    // 秘密の選別は維持: bot トークンは subprocess へ渡さない。
+    expect("DISCORD_TOKEN" in env).toBe(false);
+  });
 });
+
+// extractStructured は削除(Claude Platform on AWS/第一者とも structured_output が入る。ADR-0008)。

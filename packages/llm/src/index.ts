@@ -25,8 +25,8 @@ export {
   type MessagesParseFn,
   type ParseResponse,
 } from "./messages.js";
-// --- モデル設定 ---
-export { MODELS, type ModelRole, modelIdFor } from "./models.js";
+// --- モデル設定 / プロバイダ ---
+export { type LlmProvider, MODELS, type ModelRole, modelIdFor, resolveProvider } from "./models.js";
 // --- プロンプトローダ ---
 export {
   createFsPromptStore,

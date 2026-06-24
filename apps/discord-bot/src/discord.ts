@@ -44,6 +44,11 @@ export interface BotDeps {
   store: BotStore;
   /** /ask の処理。未指定なら stub 応答。 */
   onAsk?: AskHandler;
+  /**
+   * スラッシュコマンドの登録先ギルド(env DISCORD_GUILD_ID)。指定時はそのギルドへ即時反映、
+   * 未指定はグローバル登録(全サーバーに反映されるが最大 1 時間かかる)。テストサーバーでは指定推奨。
+   */
+  guildId?: string;
 }
 
 /** §9.2 default-deny: 許可されないチャンネルへの拒否メッセージ。許可なら null。 */
@@ -91,18 +96,39 @@ const stubHandler: AskHandler = async () => ({
   queryId: "",
 });
 
+/**
+ * Gateway intents(§9.5 最小権限)。/ask の slash コマンドと 👍👎 ボタンはどちらも interaction
+ * として届くため `Guilds` だけで足りる。メッセージ本文は読まないので privileged な
+ * `MessageContent`(および `GuildMessages`)は要求しない=Developer Portal での有効化が不要。
+ */
+export const BOT_INTENTS = [GatewayIntentBits.Guilds] as const;
+
 /** Bot クライアントを構築する(login はしない。呼び出し側で client.login する)。 */
 export function createBot(deps: BotDeps): Client {
-  const client = new Client({
-    intents: [
-      GatewayIntentBits.Guilds,
-      GatewayIntentBits.GuildMessages,
-      GatewayIntentBits.MessageContent,
-    ],
-  });
+  const client = new Client({ intents: [...BOT_INTENTS] });
   const onAsk = deps.onAsk ?? stubHandler;
   // §6.2: /ask は直列処理(同時多発でもクラッシュしない)。
   const queue = new SerialQueue();
+
+  // 起動時に /ask を Discord へ登録する。guildId 指定ならそのギルドへ即時、未指定はグローバル
+  // (反映に最大 1 時間)。登録失敗は致命ではないのでログのみで起動を続ける。
+  client.once(Events.ClientReady, async (ready) => {
+    const commands = [askCommand.toJSON()];
+    try {
+      // guildId 指定はそのギルドへ即時、未指定はグローバル登録(set の guildId 引数は string 必須)。
+      if (deps.guildId !== undefined) {
+        await ready.application.commands.set(commands, deps.guildId);
+      } else {
+        await ready.application.commands.set(commands);
+      }
+      deps.logger.info(
+        { scope: deps.guildId !== undefined ? "guild" : "global", guildId: deps.guildId ?? null },
+        "slash commands registered",
+      );
+    } catch (err) {
+      withCorrelation(deps.logger, "startup").error({ err }, "slash command registration failed");
+    }
+  });
 
   client.on(Events.InteractionCreate, async (interaction: Interaction) => {
     if (interaction.isChatInputCommand() && interaction.commandName === "ask") {

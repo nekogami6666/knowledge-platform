@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { MODELS, type ModelRole, modelIdFor } from "./models.js";
+import { MODELS, type ModelRole, modelIdFor, resolveProvider } from "./models.js";
 
 describe("modelIdFor", () => {
   it("各ロールが非空のモデル ID を返す", () => {
@@ -8,7 +8,7 @@ describe("modelIdFor", () => {
     }
   });
 
-  it("design.md §5.2 のロール対応を保つ", () => {
+  it("design.md §5.2 のロール対応を保つ(素のモデルID)", () => {
     expect(modelIdFor("fast")).toBe("claude-haiku-4-5-20251001");
     expect(modelIdFor("standard")).toBe("claude-sonnet-4-6");
     expect(modelIdFor("deep")).toBe("claude-opus-4-8");
@@ -16,5 +16,18 @@ describe("modelIdFor", () => {
 
   it("MODELS は fast / standard / deep の 3 ロールちょうどを持つ", () => {
     expect(Object.keys(MODELS).sort()).toEqual(["deep", "fast", "standard"]);
+  });
+});
+
+describe("resolveProvider (ADR-0008)", () => {
+  it("CLAUDE_CODE_USE_ANTHROPIC_AWS=1/true で anthropic-aws", () => {
+    expect(resolveProvider({ CLAUDE_CODE_USE_ANTHROPIC_AWS: "1" })).toBe("anthropic-aws");
+    expect(resolveProvider({ CLAUDE_CODE_USE_ANTHROPIC_AWS: "true" })).toBe("anthropic-aws");
+  });
+
+  it("未設定・その他の値は anthropic(既定)", () => {
+    expect(resolveProvider({})).toBe("anthropic");
+    expect(resolveProvider({ CLAUDE_CODE_USE_ANTHROPIC_AWS: "0" })).toBe("anthropic");
+    expect(resolveProvider({ CLAUDE_CODE_USE_ANTHROPIC_AWS: "" })).toBe("anthropic");
   });
 });

@@ -17,8 +17,21 @@ describe("parseEnv", () => {
     expect(() => parseEnv({ ANTHROPIC_API_KEY: "k" })).toThrow();
   });
 
-  it("ANTHROPIC_API_KEY が無ければ throw", () => {
+  it("ANTHROPIC_API_KEY が無ければ throw(第一者 API)", () => {
     expect(() => parseEnv({ DISCORD_TOKEN: "t" })).toThrow();
+  });
+
+  it("Claude Platform on AWS(CLAUDE_CODE_USE_ANTHROPIC_AWS=1)では ANTHROPIC_API_KEY 無しでも通る(ADR-0008)", () => {
+    const env = parseEnv({
+      DISCORD_TOKEN: "t",
+      CLAUDE_CODE_USE_ANTHROPIC_AWS: "1",
+      ANTHROPIC_AWS_API_KEY: "AEAA-xxx",
+      ANTHROPIC_AWS_WORKSPACE_ID: "wrkspc_xxx",
+      AWS_REGION: "ap-northeast-1",
+    });
+    expect(env.CLAUDE_CODE_USE_ANTHROPIC_AWS).toBe("1");
+    expect(env.ANTHROPIC_AWS_WORKSPACE_ID).toBe("wrkspc_xxx");
+    expect(env.ANTHROPIC_API_KEY).toBeUndefined();
   });
 
   it("既定値は上書きできる", () => {

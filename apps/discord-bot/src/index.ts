@@ -18,7 +18,14 @@ import { isoJst } from "./time.js";
 async function main(): Promise<void> {
   const env = parseEnv();
   // §9.1: env の秘密「値」をログ最終行から伏字化(err.message 混入も捕捉。logger.ts (A))。
-  const logger = createLogger("info", undefined, [env.DISCORD_TOKEN, env.ANTHROPIC_API_KEY]);
+  // ANTHROPIC_API_KEY は Claude Platform on AWS 時 undefined になりうる。ワークスペースキーも伏字対象に含める(ADR-0008)。
+  const logger = createLogger(
+    "info",
+    undefined,
+    [env.DISCORD_TOKEN, env.ANTHROPIC_API_KEY, env.ANTHROPIC_AWS_API_KEY].filter(
+      (v): v is string => typeof v === "string" && v.length > 0,
+    ),
+  );
 
   const reader = createFsConfigReader(env.CONFIG_DIR);
   const channels = await loadChannels(reader);
@@ -72,7 +79,7 @@ async function main(): Promise<void> {
     );
   };
 
-  const bot = createBot({ logger, channels, store, onAsk });
+  const bot = createBot({ logger, channels, store, onAsk, guildId: env.DISCORD_GUILD_ID });
   await bot.login(env.DISCORD_TOKEN);
   logger.info("discord-bot started");
 }

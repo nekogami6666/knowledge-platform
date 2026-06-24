@@ -1,9 +1,12 @@
 import type { ButtonInteraction } from "discord.js";
+import { GatewayIntentBits } from "discord.js";
 import type { Logger } from "pino";
 import { describe, expect, it } from "vitest";
 import type { ChannelsConfig } from "./config.js";
 import type { BotStore } from "./db.js";
 import {
+  askCommand,
+  BOT_INTENTS,
   type BotDeps,
   DENY_MESSAGE,
   denyReason,
@@ -157,5 +160,22 @@ describe("handleButton (例外封じ込め / 配線)", () => {
     await expect(handleButton(interaction, deps(logger, store))).resolves.toBeUndefined();
     expect(errors).toHaveLength(1);
     expect(replies).toHaveLength(1); // ガード付き ephemeral 通知
+  });
+});
+
+describe("askCommand (/ask の登録定義)", () => {
+  it("name=ask・必須の question オプションを持つ(REST 登録のペイロード)", () => {
+    const json = askCommand.toJSON();
+    expect(json.name).toBe("ask");
+    const question = json.options?.find((o) => o.name === "question");
+    expect(question).toBeDefined();
+    expect(question && "required" in question && question.required).toBe(true);
+  });
+});
+
+describe("BOT_INTENTS (§9.5 最小権限)", () => {
+  it("Guilds のみ。privileged な MessageContent は要求しない", () => {
+    expect([...BOT_INTENTS]).toEqual([GatewayIntentBits.Guilds]);
+    expect([...BOT_INTENTS]).not.toContain(GatewayIntentBits.MessageContent);
   });
 });

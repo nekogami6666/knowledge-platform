@@ -39,7 +39,8 @@ export const DEFAULT_DISALLOWED_TOOLS: readonly string[] = [
 
 /**
  * agent subprocess に通す env の許可リスト(キー名)。SDK/ランタイムが必要とする無害な変数のみ。
- * これに加えて ANTHROPIC_ / CLAUDE_ 接頭辞のキーは素通しする(下記 buildAgentEnv)。
+ * これに加えて ANTHROPIC_ / CLAUDE_ / AWS_ 接頭辞のキーは素通しする(下記 buildAgentEnv)。
+ * AWS_ は Claude Platform on AWS 認証(ADR-0008: AWS_REGION 等)に必要。
  */
 const AGENT_ENV_ALLOWLIST: readonly string[] = [
   "PATH",
@@ -59,9 +60,9 @@ const AGENT_ENV_ALLOWLIST: readonly string[] = [
 /**
  * agent subprocess に渡す最小 env を組む(§9.1 / ADR-0006)。
  * SDK の Options.env は process.env を**置換**する(マージしない)ため、許可リストのキーと
- * ANTHROPIC_ / CLAUDE_ 接頭辞だけを通し、DISCORD_TOKEN・GITHUB_TOKEN 等の秘密は subprocess へ渡さない
- * (`/proc/self/environ` 経由のトークン漏洩ベクタを塞ぐ)。ファイル読み取り自体の封じ込めは別途
- * OS/コンテナ FS サンドボックス(ADR-0006、Phase 1b デプロイ要件)に依存する。
+ * ANTHROPIC_ / CLAUDE_ / AWS_ 接頭辞だけを通し、DISCORD_TOKEN・GITHUB_TOKEN 等の秘密は subprocess へ渡さない
+ * (`/proc/self/environ` 経由のトークン漏洩ベクタを塞ぐ)。AWS_ は Claude Platform on AWS 認証に必要なため通す(ADR-0008)。
+ * ファイル読み取り自体の封じ込めは別途 OS/コンテナ FS サンドボックス(ADR-0006、Phase 1b デプロイ要件)に依存する。
  */
 export function buildAgentEnv(
   source: Record<string, string | undefined> = process.env,
@@ -72,7 +73,10 @@ export function buildAgentEnv(
     if (v !== undefined) env[key] = v;
   }
   for (const [k, v] of Object.entries(source)) {
-    if (v !== undefined && (k.startsWith("ANTHROPIC_") || k.startsWith("CLAUDE_"))) {
+    if (
+      v !== undefined &&
+      (k.startsWith("ANTHROPIC_") || k.startsWith("CLAUDE_") || k.startsWith("AWS_"))
+    ) {
       env[k] = v;
     }
   }
