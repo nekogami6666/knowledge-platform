@@ -1,6 +1,8 @@
 /**
- * 環境変数の検証(design.md §9.1 / ADR-0008)。zod で必須・型を検証する。
- * シークレット(DISCORD_TOKEN / ANTHROPIC_API_KEY / ANTHROPIC_AWS_API_KEY)はログに出さない。
+ * 環境変数の検証(design.md §9.1 / ADR-0008 / ADR-0009)。zod で必須・型を検証する。
+ * 全 AI 操作は Claude on AWS(Agent SDK)経由に統一(ADR-0009)。第一者 API キー(ANTHROPIC_API_KEY)は
+ * 撤去し、Claude on AWS の env を必須にする。
+ * シークレット(DISCORD_TOKEN / ANTHROPIC_AWS_API_KEY)はログに出さない(§9.1)。
  * テスト可能にするため source を注入できる(既定 process.env)。
  */
 import { z } from "zod";
@@ -9,16 +11,14 @@ const envSchema = z
   .object({
     /** Discord Bot トークン(§9.1)。 */
     DISCORD_TOKEN: z.string().min(1),
-    /** Anthropic API キー(§9.1)。第一者 API 利用時に必須。Claude Platform on AWS 利用時は不要(ADR-0008)。 */
-    ANTHROPIC_API_KEY: z.string().min(1).optional(),
-    /** Claude Platform on AWS(Claude Code on AWS)を使う(ADR-0008)。"1"/"true" で有効。 */
-    CLAUDE_CODE_USE_ANTHROPIC_AWS: z.string().optional(),
-    /** Claude Platform on AWS のワークスペース API キー(§9.1)。ログに出さない。 */
-    ANTHROPIC_AWS_API_KEY: z.string().optional(),
-    /** Claude Platform on AWS のワークスペース ID。 */
-    ANTHROPIC_AWS_WORKSPACE_ID: z.string().optional(),
-    /** Claude Platform on AWS のリージョン(ADR-0008)。 */
-    AWS_REGION: z.string().optional(),
+    /** Claude on AWS(Claude Code on AWS)を使う(ADR-0009)。"1"/"true" 必須。 */
+    CLAUDE_CODE_USE_ANTHROPIC_AWS: z.string().min(1),
+    /** Claude on AWS のワークスペース API キー(§9.1)。ログに出さない。必須。 */
+    ANTHROPIC_AWS_API_KEY: z.string().min(1),
+    /** Claude on AWS のワークスペース ID(ADR-0009)。必須。 */
+    ANTHROPIC_AWS_WORKSPACE_ID: z.string().min(1),
+    /** Claude on AWS のリージョン(ADR-0009)。必須。 */
+    AWS_REGION: z.string().min(1),
     /** スラッシュコマンド登録先ギルド(任意。未指定はグローバル登録)。 */
     DISCORD_GUILD_ID: z.string().optional(),
     /** 検索対象リポの clone ルート(cwd)。 */
@@ -31,15 +31,14 @@ const envSchema = z
     PROMPTS_DIR: z.string().default("./prompts"),
   })
   .superRefine((env, ctx) => {
-    const platformAws =
-      env.CLAUDE_CODE_USE_ANTHROPIC_AWS === "1" || env.CLAUDE_CODE_USE_ANTHROPIC_AWS === "true";
-    // 第一者 API では ANTHROPIC_API_KEY 必須。Claude Platform on AWS では AWS 認証(ワークスペースキー)に委ねる。
-    if (!platformAws && (env.ANTHROPIC_API_KEY === undefined || env.ANTHROPIC_API_KEY === "")) {
+    // 全 AI 操作は Claude on AWS 経由(ADR-0009)。フラグが立っていないと Agent SDK が Claude on AWS に
+    // ルーティングしないため、"1"/"true" を必須にする。
+    if (env.CLAUDE_CODE_USE_ANTHROPIC_AWS !== "1" && env.CLAUDE_CODE_USE_ANTHROPIC_AWS !== "true") {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
-        path: ["ANTHROPIC_API_KEY"],
+        path: ["CLAUDE_CODE_USE_ANTHROPIC_AWS"],
         message:
-          "ANTHROPIC_API_KEY が必要です(Claude Platform on AWS を使う場合は CLAUDE_CODE_USE_ANTHROPIC_AWS=1)",
+          'CLAUDE_CODE_USE_ANTHROPIC_AWS は "1" または "true" にしてください(全 AI 操作は Claude on AWS 経由・ADR-0009)',
       });
     }
   });

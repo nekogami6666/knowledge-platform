@@ -1,10 +1,10 @@
 import type { QaAnswer } from "@stratum/discord-bot/qa";
-import { type GenerateStructuredResult, LlmError, type LoadedPrompt } from "@stratum/llm";
+import { type AgentSearchResult, LlmError, type LoadedPrompt } from "@stratum/llm";
 import { describe, expect, it } from "vitest";
 import {
   buildJudgeUserContent,
-  type JudgeGenerateFn,
   type JudgeInput,
+  type JudgeSearchFn,
   type JudgeVerdict,
   judgeAnswer,
   judgeVerdictSchema,
@@ -28,20 +28,20 @@ const input = (over: Partial<JudgeInput> = {}): JudgeInput => ({
   ...over,
 });
 
-/** generate seam の mock。返す verdict を固定し、渡された opts を捕捉する。 */
-function genReturning(verdict: JudgeVerdict): {
-  gen: JudgeGenerateFn;
-  captured: { opts?: Parameters<JudgeGenerateFn>[0] };
+/** search seam の mock。返す verdict を固定し、渡された opts を捕捉する。 */
+function searchReturning(verdict: JudgeVerdict): {
+  search: JudgeSearchFn;
+  captured: { opts?: Parameters<JudgeSearchFn>[0] };
 } {
-  const captured: { opts?: Parameters<JudgeGenerateFn>[0] } = {};
-  const gen: JudgeGenerateFn = async (opts) => {
+  const captured: { opts?: Parameters<JudgeSearchFn>[0] } = {};
+  const search: JudgeSearchFn = async (opts) => {
     captured.opts = opts;
     return {
       value: verdict,
       usage: { inputTokens: 1, outputTokens: 1 },
-    } as GenerateStructuredResult<JudgeVerdict>;
+    } as AgentSearchResult<JudgeVerdict>;
   };
-  return { gen, captured };
+  return { search, captured };
 }
 
 describe("buildJudgeUserContent", () => {
@@ -78,38 +78,39 @@ describe("buildJudgeUserContent", () => {
 });
 
 describe("judgeAnswer", () => {
-  it("generate の verdict を返す", async () => {
-    const { gen } = genReturning({ reasoning: "ok", level: 2 });
-    const v = await judgeAnswer(input(), { judgePrompt: fakePrompt, generate: gen });
+  it("search の verdict を返す", async () => {
+    const { search } = searchReturning({ reasoning: "ok", level: 2 });
+    const v = await judgeAnswer(input(), { judgePrompt: fakePrompt, search });
     expect(v.level).toBe(2);
   });
 
-  it("deep ロール・judgeVerdictSchema・systemPrompt・app=evals を渡す", async () => {
-    const { gen, captured } = genReturning({ reasoning: "r", level: 1 });
-    await judgeAnswer(input(), { judgePrompt: fakePrompt, generate: gen });
+  it("deep ロール・judgeVerdictSchema・systemPrompt・app=evals・採点データを渡す", async () => {
+    const { search, captured } = searchReturning({ reasoning: "r", level: 1 });
+    await judgeAnswer(input(), { judgePrompt: fakePrompt, search });
     expect(captured.opts?.role).toBe("deep");
     expect(captured.opts?.outputSchema).toBe(judgeVerdictSchema);
     expect(captured.opts?.systemPrompt).toBe("RUBRIC");
     expect(captured.opts?.app).toBe("evals");
+    // 被評価データは prompt(user)に乗る(systemPrompt はルーブリックのみ・§9.5)。
+    expect(captured.opts?.prompt).toContain("<question>");
   });
 
-  it("truncation 対策: thinking 無効 + maxTokens に余裕(silent flake 防止)", async () => {
-    const { gen, captured } = genReturning({ reasoning: "r", level: 2 });
-    await judgeAnswer(input(), { judgePrompt: fakePrompt, generate: gen });
-    expect(captured.opts?.thinking).toBe(false);
-    expect(captured.opts?.maxTokens).toBe(2048);
+  it("§9.5: ツール無し単発(allowedTools 空=読み取り/実行能力を与えない)", async () => {
+    const { search, captured } = searchReturning({ reasoning: "r", level: 2 });
+    await judgeAnswer(input(), { judgePrompt: fakePrompt, search });
+    expect(captured.opts?.allowedTools).toEqual([]);
   });
 
   it("RATE_LIMITED は再試行して成功する(withRetry, sleep 注入)", async () => {
     let calls = 0;
-    const gen: JudgeGenerateFn = async (_opts) => {
+    const search: JudgeSearchFn = async (_opts) => {
       calls += 1;
       if (calls === 1) throw new LlmError("RATE_LIMITED", "429");
       return { value: { reasoning: "ok", level: 2 }, usage: { inputTokens: 1, outputTokens: 1 } };
     };
     const v = await judgeAnswer(input(), {
       judgePrompt: fakePrompt,
-      generate: gen,
+      search,
       retry: { sleep: async () => {} },
     });
     expect(calls).toBe(2);
@@ -117,13 +118,13 @@ describe("judgeAnswer", () => {
   });
 
   it("API_ERROR は再試行せず伝播する", async () => {
-    const gen: JudgeGenerateFn = async () => {
+    const search: JudgeSearchFn = async () => {
       throw new LlmError("API_ERROR", "boom");
     };
     await expect(
       judgeAnswer(input(), {
         judgePrompt: fakePrompt,
-        generate: gen,
+        search,
         retry: { sleep: async () => {} },
       }),
     ).rejects.toMatchObject({ code: "API_ERROR" });

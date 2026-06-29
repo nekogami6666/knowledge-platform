@@ -16,17 +16,10 @@ export {
 } from "./agent.js";
 // --- エラー ---
 export { LlmError, type LlmErrorCode, RETRYABLE_LLM_CODES } from "./errors.js";
-// --- 単発 Messages ラッパ(構造化 1 ショット) ---
-export {
-  type GenerateDeps,
-  type GenerateStructuredOptions,
-  type GenerateStructuredResult,
-  generateStructured,
-  type MessagesParseFn,
-  type ParseResponse,
-} from "./messages.js";
-// --- モデル設定 / プロバイダ ---
-export { type LlmProvider, MODELS, type ModelRole, modelIdFor, resolveProvider } from "./models.js";
+// --- モデル設定 ---
+// 全 AI 操作は Claude on AWS(Agent SDK)経由に統一(ADR-0009)。第一者直叩き(@anthropic-ai/sdk・
+// generateStructured)とプロバイダ抽象(resolveProvider/LlmProvider)は撤去済み。
+export { MODELS, type ModelRole, modelIdFor } from "./models.js";
 // --- プロンプトローダ ---
 export {
   createFsPromptStore,

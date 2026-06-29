@@ -177,19 +177,24 @@ describe("buildAgentEnv (§9.1 / ADR-0006: subprocess env 絞り込み)", () => 
   const source = {
     PATH: "/usr/bin",
     HOME: "/home/bot",
-    ANTHROPIC_API_KEY: "sk-ant-xxx",
-    CLAUDE_CODE_FOO: "1",
+    // Claude on AWS 認証(ADR-0009)。ANTHROPIC_ / CLAUDE_ / AWS_ 接頭辞は素通しする。
+    CLAUDE_CODE_USE_ANTHROPIC_AWS: "1",
+    ANTHROPIC_AWS_API_KEY: "AEAA-xxx",
+    ANTHROPIC_AWS_WORKSPACE_ID: "wrkspc_xxx",
+    AWS_REGION: "ap-northeast-1",
     DISCORD_TOKEN: "raw-discord",
     GITHUB_TOKEN: "raw-github",
     SOME_OTHER_SECRET: "nope",
   };
 
-  it("許可リスト + ANTHROPIC_/CLAUDE_ 接頭辞だけを通す", () => {
+  it("許可リスト + ANTHROPIC_/CLAUDE_/AWS_ 接頭辞だけを通す", () => {
     const env = buildAgentEnv(source);
     expect(env.PATH).toBe("/usr/bin");
     expect(env.HOME).toBe("/home/bot");
-    expect(env.ANTHROPIC_API_KEY).toBe("sk-ant-xxx");
-    expect(env.CLAUDE_CODE_FOO).toBe("1");
+    expect(env.CLAUDE_CODE_USE_ANTHROPIC_AWS).toBe("1");
+    expect(env.ANTHROPIC_AWS_API_KEY).toBe("AEAA-xxx");
+    expect(env.ANTHROPIC_AWS_WORKSPACE_ID).toBe("wrkspc_xxx");
+    expect(env.AWS_REGION).toBe("ap-northeast-1");
   });
 
   it("DISCORD_TOKEN / GITHUB_TOKEN / 無関係な秘密は渡さない", () => {

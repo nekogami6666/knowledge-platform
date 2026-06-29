@@ -10,7 +10,7 @@
 import { type DestinationStream, type Logger, pino, stdSerializers } from "pino";
 
 /** (B) 値を伏字化する秘密キー名(任意深さ・配列で適用)。新しい秘密キーはここへ追加。 */
-const SECRET_KEYS = new Set(["DISCORD_TOKEN", "ANTHROPIC_API_KEY"]);
+const SECRET_KEYS = new Set(["DISCORD_TOKEN", "ANTHROPIC_AWS_API_KEY"]);
 const REDACTED = "[REDACTED]";
 const MAX_REDACT_DEPTH = 8;
 

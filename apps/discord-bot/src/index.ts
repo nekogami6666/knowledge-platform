@@ -18,14 +18,8 @@ import { isoJst } from "./time.js";
 async function main(): Promise<void> {
   const env = parseEnv();
   // §9.1: env の秘密「値」をログ最終行から伏字化(err.message 混入も捕捉。logger.ts (A))。
-  // ANTHROPIC_API_KEY は Claude Platform on AWS 時 undefined になりうる。ワークスペースキーも伏字対象に含める(ADR-0008)。
-  const logger = createLogger(
-    "info",
-    undefined,
-    [env.DISCORD_TOKEN, env.ANTHROPIC_API_KEY, env.ANTHROPIC_AWS_API_KEY].filter(
-      (v): v is string => typeof v === "string" && v.length > 0,
-    ),
-  );
+  // 全 AI 操作は Claude on AWS 経由(ADR-0009)。ワークスペースキーと Discord トークンを伏字対象にする(両者とも必須)。
+  const logger = createLogger("info", undefined, [env.DISCORD_TOKEN, env.ANTHROPIC_AWS_API_KEY]);
 
   const reader = createFsConfigReader(env.CONFIG_DIR);
   const channels = await loadChannels(reader);

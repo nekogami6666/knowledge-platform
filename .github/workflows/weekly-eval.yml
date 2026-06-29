@@ -1,7 +1,8 @@
-# 週次 golden eval(design.md §10.2)。synthetic コーパスに対し実 Claude で出典一致/回答妥当性を計測し、
-# ベースラインから 10pt 以上低下(or passCount<8)したら #stratum-ops に Discord webhook で通知する。
-# corpus は in-repo synthetic(ADR-0002 安全)。cross-repo PAT 不要。
-# 必要な secrets: ANTHROPIC_API_KEY(eval 実行)/ DISCORD_OPS_WEBHOOK(#stratum-ops 通知)。
+# 週次 golden eval(design.md §10.2 / ADR-0009)。synthetic コーパスに対し Claude on AWS(Agent SDK)で
+# 出典一致/回答妥当性を計測し、ベースラインから 10pt 以上低下(or passCount<8)したら #stratum-ops に
+# Discord webhook で通知する。corpus は in-repo synthetic(ADR-0002 安全)。cross-repo PAT 不要。
+# 必要な secrets: ANTHROPIC_AWS_API_KEY / ANTHROPIC_AWS_WORKSPACE_ID / AWS_REGION(Claude on AWS 認証・eval 実行)/
+#   DISCORD_OPS_WEBHOOK(#stratum-ops 通知)。
 name: weekly-eval
 
 on:
@@ -33,7 +34,10 @@ jobs:
       # eval 自体が失敗(API エラー等)したらここで job が落ち、GitHub の失敗通知に乗る。
       - name: Run golden eval
         env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          CLAUDE_CODE_USE_ANTHROPIC_AWS: "1"
+          ANTHROPIC_AWS_API_KEY: ${{ secrets.ANTHROPIC_AWS_API_KEY }}
+          ANTHROPIC_AWS_WORKSPACE_ID: ${{ secrets.ANTHROPIC_AWS_WORKSPACE_ID }}
+          AWS_REGION: ${{ secrets.AWS_REGION }}
         run: pnpm --filter @stratum/evals run eval:qa
 
       # ベースラインから 10pt 以上低下 or passCount<8 のとき #stratum-ops に通知(§10.2)。

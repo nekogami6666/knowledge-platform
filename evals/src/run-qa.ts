@@ -1,6 +1,7 @@
 /**
  * golden eval の実行本体(design.md §10.2)。integration テストと週次 CLI が共用する。
- * 実 Claude を使う(createQaSearch / judgeAnswer)。呼び出し側が ANTHROPIC_API_KEY を用意する。
+ * 実 Claude を使う(createQaSearch / judgeAnswer)。両者とも Claude on AWS(Agent SDK)経由(ADR-0009)。
+ * 呼び出し側が Claude on AWS の env(CLAUDE_CODE_USE_ANTHROPIC_AWS / ANTHROPIC_AWS_* / AWS_REGION)を用意する。
  * ADR-0002: corpus は synthetic のみ。
  */
 import { buildRepoManifest, createQaSearch } from "@stratum/discord-bot/qa";
