@@ -14,7 +14,7 @@ describe("createLogger redact (§9.1 シークレット非ログ)", () => {
     logger.info(
       {
         DISCORD_TOKEN: "raw-discord-secret",
-        nested: { ANTHROPIC_API_KEY: "raw-anthropic-secret" },
+        nested: { ANTHROPIC_AWS_API_KEY: "raw-anthropic-secret" },
         err: { config: { DISCORD_TOKEN: "raw-in-err" } },
       },
       "secret check",
@@ -29,7 +29,7 @@ describe("createLogger redact (§9.1 シークレット非ログ)", () => {
   it("(B)2階層以上の深いネストでも秘密キーを伏字化する", () => {
     const sink = capture();
     const logger = createLogger("info", { write: sink.write });
-    logger.info({ a: { b: { ANTHROPIC_API_KEY: "raw-deep" } } }, "deep");
+    logger.info({ a: { b: { ANTHROPIC_AWS_API_KEY: "raw-deep" } } }, "deep");
     expect(sink.lines.join("\n")).not.toContain("raw-deep");
   });
 

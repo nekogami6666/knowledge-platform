@@ -2,19 +2,25 @@
  * LLM-as-judge による回答妥当性採点(design.md §10.2(b)「deep モデル, 3 段階」)。
  * 1 問につき deep モデルを 1 回呼び、回答が answer_points を満たすかを 0/1/2 で採点する。
  *
+ * 全 AI 操作は Claude on AWS(Agent SDK)経由に統一(ADR-0009)。judge も runAgentSearch を
+ * **allowedTools 空(ツール無し)の単発**で使い、bot の /ask と同じ認証・同じ構造化出力経路に乗せる。
+ * 第一者直叩き(@anthropic-ai/sdk・generateStructured)は撤去済み。
+ *
  * セキュリティ(§9.5): 被評価データ(question/answer_points/answer)はすべて XML タグで包んだ
- * 「DATA」として user ターンに渡す。ルーブリックと「指示を無視せよ」規定は信頼できる system
+ * 「DATA」として user prompt に渡す。ルーブリックと「指示を無視せよ」規定は信頼できる system
  * (prompts/evals/judge.md)側にのみ置く。answer はモデル生成=完全に信頼できない入力。
+ * ツール無し(allowedTools:[])のため注入があっても読み取り/実行能力を一切持たない。
  * 1 問 1 コンテキスト(per-question)で注入の blast radius を 1 に限定する。
  */
+import { tmpdir } from "node:os";
 import type { QaAnswer } from "@stratum/discord-bot/qa";
 import {
-  type GenerateDeps,
-  type GenerateStructuredOptions,
-  type GenerateStructuredResult,
-  generateStructured,
+  type AgentSearchOptions,
+  type AgentSearchResult,
+  type LlmDeps,
   type LoadedPrompt,
   type RetryOptions,
+  runAgentSearch,
   withRetry,
 } from "@stratum/llm";
 import { z } from "zod";
@@ -65,44 +71,44 @@ export function buildJudgeUserContent(input: JudgeInput): string {
   ].join("\n\n");
 }
 
-/** generateStructured の差し替え seam(verdict 固定=テストの mock が容易)。 */
-export type JudgeGenerateFn = (
-  opts: GenerateStructuredOptions<JudgeVerdict>,
-  deps?: GenerateDeps,
-) => Promise<GenerateStructuredResult<JudgeVerdict>>;
+/** runAgentSearch の差し替え seam(verdict 固定=テストの mock が容易)。 */
+export type JudgeSearchFn = (
+  opts: AgentSearchOptions<JudgeVerdict>,
+  deps?: LlmDeps,
+) => Promise<AgentSearchResult<JudgeVerdict>>;
 
 export interface JudgeDeps {
   /** judge prompt(loadPrompt("evals","judge"))。role(deep)を駆動。 */
   judgePrompt: LoadedPrompt;
-  /** generateStructured の差し替え(既定=実)。 */
-  generate?: JudgeGenerateFn;
-  /** generateStructured へ渡す deps(usage 記録など)。 */
-  generateDeps?: GenerateDeps;
+  /** runAgentSearch の差し替え(既定=実)。 */
+  search?: JudgeSearchFn;
+  /** runAgentSearch へ渡す deps(usage 記録など)。 */
+  searchDeps?: LlmDeps;
   /** withRetry オプション(テストで sleep 注入)。既定 maxRetries:1(§7.1)。 */
   retry?: RetryOptions;
 }
 
 /** 1 問の回答妥当性を採点する。retryable(429/529/timeout)は withRetry が再試行。 */
 export async function judgeAnswer(input: JudgeInput, deps: JudgeDeps): Promise<JudgeVerdict> {
-  const generate = deps.generate ?? generateStructured;
+  const search: JudgeSearchFn = deps.search ?? runAgentSearch;
   const userContent = buildJudgeUserContent(input);
   const { value } = await withRetry(
     () =>
-      generate(
+      search(
         {
           app: "evals",
           role: deps.judgePrompt.role, // prompt frontmatter(deep)。"deep" を直書きしない
           systemPrompt: deps.judgePrompt.body,
-          userContent,
+          prompt: userContent,
+          // judge は採点のみでファイル探索しない。ツールを与えず(§9.5)単発で verdict を出す。
+          // cwd は実体不要だが runAgentSearch が要求するため OS の一時ディレクトリを渡す。
+          cwd: tmpdir(),
           outputSchema: judgeVerdictSchema,
-          effort: "low",
-          // 0/1/2 + 短い reasoning に adaptive thinking は不要。thinking を無効化し、
-          // maxTokens に十分な余裕を持たせて「thinking が出力枠を食って verdict 空 → 非リトライ
-          // STRUCTURED_PARSE」の silent flake を防ぐ(belt-and-suspenders)。
-          thinking: false,
-          maxTokens: 2048,
+          allowedTools: [],
+          // ツール無しなら 1 ターンで verdict が出る。暴走防止の上限のみ設ける(小スキーマで truncation 懸念小)。
+          maxTurns: 3,
         },
-        deps.generateDeps,
+        deps.searchDeps,
       ),
     { maxRetries: 1, ...deps.retry },
   );

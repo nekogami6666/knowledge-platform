@@ -2,7 +2,8 @@
 
 - **ステータス**: proposed(ADR-0007 を supersede)
 - **日付**: 2026-06-24
-- **関連**: ADR-0007(Amazon Bedrock、誤認)/ design.md §5.1(ホスティング/Agent SDK)・§5.2(モデル)・§9.1(シークレット)・§14 #2/#3 /
+- **関連**: ADR-0007(Amazon Bedrock、誤認)/ ADR-0009(全 AI 操作を Claude on AWS に統一・第一者直叩き撤去)/
+  design.md §5.1(ホスティング/Agent SDK)・§5.2(モデル)・§9.1(シークレット)・§14 #2/#3 /
   PR-8a(`feat/bedrock-provider`)・⑪/⑫(統合・構造化出力フォールバック)
 - **備考**: 採択(`accepted`)・`docs/design.md`(保護)§5.1/§5.2/§9.1 への転記は人間レビューで行う。
 
