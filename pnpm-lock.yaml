@@ -54,7 +54,14 @@ importers:
 
   apps/expertise-mapper: {}
 
-  apps/extractor: {}
+  apps/extractor:
+    dependencies:
+      '@stratum/llm':
+        specifier: workspace:*
+        version: link:../../packages/llm
+      zod:
+        specifier: ^3.25.76
+        version: 3.25.76
 
   apps/freshness-checker: {}
 
