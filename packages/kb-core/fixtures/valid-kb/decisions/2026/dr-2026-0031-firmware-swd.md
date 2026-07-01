@@ -1,14 +1,18 @@
 ---
-id: dr-2026-0031
-title: 分注ユニットのファームウェア書き込みを CAN 経由から SWD 直結に変更
+id: "dr-2026-0031"
+title: "分注ユニットのファームウェア書き込みを CAN 経由から SWD 直結に変更"
 date: "2026-06-03"
-status: accepted
-deciders: ["yamada", "sato"]
+status: "accepted"
+deciders:
+  - "yamada"
+  - "sato"
 sources:
-  - kind: meeting
-    repo: org/minutes
-    path: 2026/06/2026-06-03-hw-weekly.md
-tags: ["dispenser-x", "firmware"]
+  - kind: "meeting"
+    repo: "org/minutes"
+    path: "2026/06/2026-06-03-hw-weekly.md"
+tags:
+  - "dispenser-x"
+  - "firmware"
 ---
 
 ## 決定内容
