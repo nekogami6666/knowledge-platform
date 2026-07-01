@@ -1,0 +1,54 @@
+# 夜間ナレッジ抽出(design.md §6.3 / C2 / ADR-0009)。minutes の差分を Claude on AWS で抽出し、
+# knowledge-base に日次 PR を提案する。**実 PR は EXTRACTOR_REAL_PR=1 のときのみ**(既定 dry-run)。
+# 必要 secrets:
+#   Claude on AWS: ANTHROPIC_AWS_API_KEY / ANTHROPIC_AWS_WORKSPACE_ID / AWS_REGION
+#   GitHub 書き込み(gh-client): GH_APP_ID / GH_APP_PRIVATE_KEY / GH_APP_INSTALLATION_ID(または GH_WRITE_TOKEN)
+#     ※ secret 名に GITHUB_ 接頭辞は使えない(予約)ため GH_ 名 → GITHUB_ env に写す。
+#   任意: DISCORD_OPS_WEBHOOK(#stratum-ops 通知)
+# ⚠️ minutes は履歴が必要(last_processed_sha..HEAD の差分)。実データ運用時は minutes を fetch-depth:0 で
+#    CLONES_DIR に配置する(D11)。ADR-0002: 当面 synthetic のみ。初回は EXTRACTOR_REAL_PR 未設定=dry-run で検証。
+name: extractor-nightly
+
+on:
+  schedule:
+    - cron: "0 18 * * *" # 18:00 UTC = 03:00 JST(翌日)
+  workflow_dispatch: {}
+
+jobs:
+  extract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Enable corepack (pnpm)
+        run: corepack enable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - name: Install
+        run: pnpm install --frozen-lockfile
+      - name: Build
+        run: pnpm -r --if-present run build
+
+      # 検索対象(minutes / knowledge-base)を CLONES_DIR に用意する。
+      # 方法A: extractor.yaml に url を書き、extractor の syncer が clone(private は認証が要る)。
+      # 方法B: ここで actions/checkout(fetch-depth:0)して dir に配置し、config は url 省略。
+      # synthetic 検証では evals/fixtures/qa-corpus を git 化して配置してもよい(ADR-0002)。
+
+      - name: Run extractor
+        env:
+          CLAUDE_CODE_USE_ANTHROPIC_AWS: "1"
+          ANTHROPIC_AWS_API_KEY: ${{ secrets.ANTHROPIC_AWS_API_KEY }}
+          ANTHROPIC_AWS_WORKSPACE_ID: ${{ secrets.ANTHROPIC_AWS_WORKSPACE_ID }}
+          AWS_REGION: ${{ secrets.AWS_REGION }}
+          GITHUB_APP_ID: ${{ secrets.GH_APP_ID }}
+          GITHUB_APP_PRIVATE_KEY: ${{ secrets.GH_APP_PRIVATE_KEY }}
+          GITHUB_APP_INSTALLATION_ID: ${{ secrets.GH_APP_INSTALLATION_ID }}
+          DISCORD_OPS_WEBHOOK: ${{ secrets.DISCORD_OPS_WEBHOOK }}
+          CONFIG_DIR: apps/extractor/config
+          CLONES_DIR: .clones
+          PROMPTS_DIR: ./prompts
+          # 実 PR を出すときのみ設定(既定は dry-run)。初回検証は未設定のままにする。
+          # EXTRACTOR_REAL_PR: "1"
+        run: pnpm --filter @stratum/extractor start

@@ -1,0 +1,11 @@
+# extractor 設定の例。apps/extractor/config/extractor.yaml にコピーして実値を入れる(.gitignore 済み)。
+# リポジトリ名はここから読む(コードにハードコードしない・CLAUDE.md §12.2)。
+minutes:
+  repo: org/minutes # 出典に使う "org/name"
+  dir: minutes # CLONES_DIR 配下の clone ディレクトリ名
+  # url: https://github.com/org/minutes.git   # private は認証付き。省略時は checkout 済みの dir を使う
+kb:
+  repo: org/knowledge-base
+  dir: knowledge-base
+  # url: https://github.com/org/knowledge-base.git
+base_branch: main

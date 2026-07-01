@@ -6,8 +6,9 @@ coverage/
 .env.*
 .claude/settings.local.json
 
-# discord-bot のローカル設定(実 ID を含むためコミットしない。*.yaml.example のみ追跡)
+# discord-bot / extractor のローカル設定(実 ID を含むためコミットしない。*.yaml.example のみ追跡)
 apps/discord-bot/config/*.yaml
+apps/extractor/config/*.yaml
 
 # 週次 golden eval の生成物(§10.2。CLI が書き出す)
 evals/eval-result.json
