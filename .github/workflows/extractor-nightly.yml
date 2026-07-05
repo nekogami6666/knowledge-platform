@@ -1,12 +1,16 @@
-# 夜間ナレッジ抽出(design.md §6.3 / C2 / ADR-0009)。minutes の差分を Claude on AWS で抽出し、
+# 夜間ナレッジ抽出(design.md §6.3 / C2 / ADR-0009 / ADR-0013)。minutes の差分を Claude on AWS で抽出し、
 # knowledge-base に日次 PR を提案する。**実 PR は EXTRACTOR_REAL_PR=1 のときのみ**(既定 dry-run)。
+# 実運用の実行境界は「エフェメラル runner + 秘密の残留遮断」(ADR-0013):
+#   persist-credentials:false / clone 先 .git/config のトークン scrub(repos.ts)/ buildAgentEnv の env 遮断。
+#
 # 必要 secrets:
 #   Claude on AWS: ANTHROPIC_AWS_API_KEY / ANTHROPIC_AWS_WORKSPACE_ID / AWS_REGION
-#   GitHub 書き込み(gh-client): GH_APP_ID / GH_APP_PRIVATE_KEY / GH_APP_INSTALLATION_ID(または GH_WRITE_TOKEN)
-#     ※ secret 名に GITHUB_ 接頭辞は使えない(予約)ため GH_ 名 → GITHUB_ env に写す。
+#   GitHub 書き込み: EXTRACTOR_PAT(fine-grained・ADR-0013 D1(e)。App 発行後は GH_APP_* trio に差し替え)
+#     ※ secret 名に GITHUB_ 接頭辞は使えない(予約)ため GH_/EXTRACTOR_ 名 → GITHUB_ env に写す。
 #   任意: DISCORD_OPS_WEBHOOK(#stratum-ops 通知)
-# ⚠️ minutes は履歴が必要(last_processed_sha..HEAD の差分)。実データ運用時は minutes を fetch-depth:0 で
-#    CLONES_DIR に配置する(D11)。ADR-0002: 当面 synthetic のみ。初回は EXTRACTOR_REAL_PR 未設定=dry-run で検証。
+# 必要 vars(リポ名はハードコードしない・ADR-0013 D3):
+#   EXTRACTOR_MINUTES_REPO(例 org/minutes)/ EXTRACTOR_KB_REPO(例 org/knowledge-base)
+# 手順の詳細: docs/runbooks/extractor-real-run.md
 name: extractor-nightly
 
 on:
@@ -19,6 +23,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # ADR-0013 D1(a): GITHUB_TOKEN を .git/config に残さない(agentic Read からの漏洩遮断)。
+          persist-credentials: false
 
       - name: Enable corepack (pnpm)
         run: corepack enable
@@ -31,10 +38,27 @@ jobs:
       - name: Build
         run: pnpm -r --if-present run build
 
-      # 検索対象(minutes / knowledge-base)を CLONES_DIR に用意する。
-      # 方法A: extractor.yaml に url を書き、extractor の syncer が clone(private は認証が要る)。
-      # 方法B: ここで actions/checkout(fetch-depth:0)して dir に配置し、config は url 省略。
-      # synthetic 検証では evals/fixtures/qa-corpus を git 化して配置してもよい(ADR-0002)。
+      # extractor.yaml は gitignore 済み(実 ID を含むため)。CI では Actions vars から生成する(ADR-0013 D3)。
+      # clone URL のトークンは repos.ts が clone 直後に .git/config から scrub する(ADR-0013 D1(b))。
+      # vars 未設定(synthetic 検証等)ではスキップし、従来どおり事前配置した CLONES_DIR を使う。
+      - name: Generate extractor.yaml (from repo vars)
+        if: vars.EXTRACTOR_MINUTES_REPO != '' && vars.EXTRACTOR_KB_REPO != ''
+        env:
+          EXTRACTOR_PAT: ${{ secrets.EXTRACTOR_PAT }}
+        run: |
+          mkdir -p apps/extractor/config
+          cat > apps/extractor/config/extractor.yaml <<EOF
+          minutes:
+            repo: ${{ vars.EXTRACTOR_MINUTES_REPO }}
+            dir: minutes
+            url: https://x-access-token:${EXTRACTOR_PAT}@github.com/${{ vars.EXTRACTOR_MINUTES_REPO }}.git
+          kb:
+            repo: ${{ vars.EXTRACTOR_KB_REPO }}
+            dir: knowledge-base
+            url: https://x-access-token:${EXTRACTOR_PAT}@github.com/${{ vars.EXTRACTOR_KB_REPO }}.git
+          base_branch: main
+          EOF
+          echo "extractor.yaml generated (repos: ${{ vars.EXTRACTOR_MINUTES_REPO }}, ${{ vars.EXTRACTOR_KB_REPO }})"
 
       - name: Run extractor
         env:
@@ -42,13 +66,15 @@ jobs:
           ANTHROPIC_AWS_API_KEY: ${{ secrets.ANTHROPIC_AWS_API_KEY }}
           ANTHROPIC_AWS_WORKSPACE_ID: ${{ secrets.ANTHROPIC_AWS_WORKSPACE_ID }}
           AWS_REGION: ${{ secrets.AWS_REGION }}
+          # 認証は App trio 優先・無ければ token(ADR-0011)。暫定 PAT は GITHUB_TOKEN に写す(ADR-0013 D1(e))。
           GITHUB_APP_ID: ${{ secrets.GH_APP_ID }}
           GITHUB_APP_PRIVATE_KEY: ${{ secrets.GH_APP_PRIVATE_KEY }}
           GITHUB_APP_INSTALLATION_ID: ${{ secrets.GH_APP_INSTALLATION_ID }}
+          GITHUB_TOKEN: ${{ secrets.EXTRACTOR_PAT }}
           DISCORD_OPS_WEBHOOK: ${{ secrets.DISCORD_OPS_WEBHOOK }}
           CONFIG_DIR: apps/extractor/config
           CLONES_DIR: .clones
           PROMPTS_DIR: ./prompts
-          # 実 PR を出すときのみ設定(既定は dry-run)。初回検証は未設定のままにする。
+          # 実 PR を出すときのみ設定(既定は dry-run)。初回 GO は人間判断(ADR-0013 D1(d)・runbook 参照)。
           # EXTRACTOR_REAL_PR: "1"
         run: pnpm --filter @stratum/extractor start
