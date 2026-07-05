@@ -74,6 +74,9 @@ function makeGh(over: Partial<GhClient> = {}): GhClient {
     createPullRequest: vi.fn(async () => ({ number: 99, url: "https://github.com/o/kb/pull/99" })),
     listPullRequests: vi.fn(async (): Promise<PrSummary[]> => []),
     mergePullRequest: vi.fn(async () => {}),
+    getPullRequest: vi.fn(async () => {
+      throw new Error("not used in extractor tests");
+    }),
     getFileContents: vi.fn(async () => null),
     ...over,
   };

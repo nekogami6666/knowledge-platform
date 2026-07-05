@@ -45,6 +45,17 @@ function fakeOctokit(over: { getContent?: GetContentFn } = {}) {
           ],
         })),
         merge: vi.fn(async () => ({ data: {} })),
+        // OctokitLike の get 型で明示(mergeable_state は optional。欠落ケースのモックを許すため)。
+        get: vi.fn<OctokitLike["rest"]["pulls"]["get"]>(async () => ({
+          data: {
+            number: 7,
+            state: "open",
+            merged: false,
+            mergeable_state: "clean",
+            title: "Extract: a..b",
+            html_url: "https://github.com/o/r/pull/7",
+          },
+        })),
       },
       repos: {
         getContent: vi.fn(over.getContent ?? defaultGetContent),
@@ -210,5 +221,44 @@ describe("getFileContents", () => {
       err = e;
     }
     expect((err as GhClientError).code).toBe("API_ERROR");
+  });
+});
+
+describe("getPullRequest", () => {
+  it("state / merged / mergeable_state をマップする", async () => {
+    const oct = fakeOctokit();
+    const gh = createGhClient(oct as unknown as OctokitLike);
+    const pr = await gh.getPullRequest("o/r", 7);
+    expect(pr).toEqual({
+      number: 7,
+      state: "open",
+      merged: false,
+      mergeableState: "clean",
+      title: "Extract: a..b",
+      url: "https://github.com/o/r/pull/7",
+    });
+    expect(oct.rest.pulls.get).toHaveBeenCalledWith({ owner: "o", repo: "r", pull_number: 7 });
+  });
+
+  it("mergeable_state 欠落(算出中)は null", async () => {
+    const oct = fakeOctokit();
+    oct.rest.pulls.get.mockResolvedValueOnce({
+      data: { number: 7, state: "open", merged: false, title: "t", html_url: "u" },
+    });
+    const gh = createGhClient(oct as unknown as OctokitLike);
+    expect((await gh.getPullRequest("o/r", 7)).mergeableState).toBeNull();
+  });
+
+  it("404 は NOT_FOUND", async () => {
+    const oct = fakeOctokit();
+    oct.rest.pulls.get.mockRejectedValueOnce({ status: 404 });
+    const gh = createGhClient(oct as unknown as OctokitLike);
+    let err: unknown;
+    try {
+      await gh.getPullRequest("o/r", 999);
+    } catch (e) {
+      err = e;
+    }
+    expect((err as GhClientError).code).toBe("NOT_FOUND");
   });
 });

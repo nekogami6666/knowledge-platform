@@ -1,0 +1,4 @@
+# 👍 代理マージ(§6.3 / C1 拡張)の設定例。ops.yaml にコピーして実値を入れる(.gitignore 済み)。
+# 両方を設定して初めて有効になる(未設定=機能 OFF)。GitHub 認証(GITHUB_TOKEN か App trio)も必要。
+channel_id: "123456789012345678" # extractor が PR 通知を投稿する #stratum-ops のチャンネル ID
+kb_repo: org/knowledge-base # マージを許可する唯一のリポ(他リポの PR URL は拒否)

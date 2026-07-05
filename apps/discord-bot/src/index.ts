@@ -4,9 +4,10 @@
  * 組み立てて /ask を配線し、Discord にログインする。
  */
 import { randomUUID } from "node:crypto";
+import { createGhClientFromEnv, type GhClient } from "@stratum/gh-client";
 import { createFsPromptStore, nullUsageRecorder } from "@stratum/llm";
 import { type AskDeps, handleAskRequest } from "./ask.js";
-import { createFsConfigReader, loadChannels, loadMembers, loadRepos } from "./config.js";
+import { createFsConfigReader, loadChannels, loadMembers, loadOps, loadRepos } from "./config.js";
 import { type AskHandler, createBot } from "./discord.js";
 import { parseEnv } from "./env.js";
 import { createLogger, withCorrelation } from "./logger.js";
@@ -18,18 +19,39 @@ import { isoJst } from "./time.js";
 async function main(): Promise<void> {
   const env = parseEnv();
   // §9.1: env の秘密「値」をログ最終行から伏字化(err.message 混入も捕捉。logger.ts (A))。
-  // 全 AI 操作は Claude on AWS 経由(ADR-0009)。ワークスペースキーと Discord トークンを伏字対象にする(両者とも必須)。
-  const logger = createLogger("info", undefined, [env.DISCORD_TOKEN, env.ANTHROPIC_AWS_API_KEY]);
+  // 全 AI 操作は Claude on AWS 経由(ADR-0009)。GitHub 認証(任意)も対象に含める。
+  const secrets = [
+    env.DISCORD_TOKEN,
+    env.ANTHROPIC_AWS_API_KEY,
+    env.GITHUB_TOKEN,
+    env.GITHUB_APP_PRIVATE_KEY,
+  ].filter((v): v is string => typeof v === "string" && v.length > 0);
+  const logger = createLogger("info", undefined, secrets);
 
   const reader = createFsConfigReader(env.CONFIG_DIR);
   const channels = await loadChannels(reader);
   const members = await loadMembers(reader);
   const reposConfig = await loadRepos(reader);
+  const ops = await loadOps(reader);
+
+  // 👍 代理マージ(§6.3): ops.yaml と GitHub 認証が両方揃ったときだけ有効(既定 OFF)。
+  // 認証未整備(AUTH エラー)は機能 OFF として起動を続ける(bot の主務は /ask)。
+  let gh: GhClient | undefined;
+  if (ops.channel_id !== null && ops.kb_repo !== null) {
+    try {
+      gh = createGhClientFromEnv();
+    } catch {
+      logger.warn(
+        "ops.yaml はあるが GitHub 認証(GITHUB_TOKEN か App trio)が無いため 👍 代理マージは無効です(ADR-0011)。",
+      );
+    }
+  }
   logger.info(
     {
       allowedChannels: channels.allow.length,
       members: members.members.length,
       repos: reposConfig.repos.length,
+      proxyMerge: gh !== undefined,
     },
     "config loaded",
   );
@@ -73,7 +95,7 @@ async function main(): Promise<void> {
     );
   };
 
-  const bot = createBot({ logger, channels, store, onAsk, guildId: env.DISCORD_GUILD_ID });
+  const bot = createBot({ logger, channels, store, onAsk, guildId: env.DISCORD_GUILD_ID, ops, gh });
   await bot.login(env.DISCORD_TOKEN);
   logger.info("discord-bot started");
 }

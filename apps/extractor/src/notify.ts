@@ -36,7 +36,7 @@ export function createWebhookNotifier(webhookUrl: string | undefined, fetchFn?: 
         `📥 抽出 PR を作成しました: ${msg.prUrl}`,
         `新規 ${c.new} / 追記 ${c.append} / 矛盾 ${c.supersede} / skip ${c.skip} / 未解決の問い ${c.openQuestions}`,
         msg.people.length > 0 ? `関係者: ${msg.people.join(", ")}` : "",
-        "問題なければ 👍(将来 bot が代理マージ)、修正は PR で直接編集してください。",
+        "問題なければ 👍(bot が代理マージ)、修正は PR で直接編集してください。",
       ]
         .filter((l) => l.length > 0)
         .join("\n");

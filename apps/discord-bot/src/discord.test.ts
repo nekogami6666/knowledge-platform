@@ -1,8 +1,9 @@
-import type { ButtonInteraction } from "discord.js";
+import type { GhClient, PrDetail } from "@stratum/gh-client";
+import type { ButtonInteraction, MessageReaction, User } from "discord.js";
 import { GatewayIntentBits } from "discord.js";
 import type { Logger } from "pino";
-import { describe, expect, it } from "vitest";
-import type { ChannelsConfig } from "./config.js";
+import { describe, expect, it, vi } from "vitest";
+import type { ChannelsConfig, OpsConfig } from "./config.js";
 import type { BotStore } from "./db.js";
 import {
   askCommand,
@@ -12,7 +13,10 @@ import {
   denyReason,
   feedbackButtons,
   handleButton,
+  handleProxyMergeReaction,
   parseFeedbackCustomId,
+  parseGithubPrUrl,
+  proxyMergeDecision,
   windowKey,
 } from "./discord.js";
 
@@ -174,8 +178,220 @@ describe("askCommand (/ask の登録定義)", () => {
 });
 
 describe("BOT_INTENTS (§9.5 最小権限)", () => {
-  it("Guilds のみ。privileged な MessageContent は要求しない", () => {
-    expect([...BOT_INTENTS]).toEqual([GatewayIntentBits.Guilds]);
-    expect([...BOT_INTENTS]).not.toContain(GatewayIntentBits.MessageContent);
+  it("Guilds + リアクション + MessageContent(👍 代理マージ・§6.3)。GuildMessages は要求しない", () => {
+    // MessageContent は privileged だが、webhook 通知の本文から PR URL を読むために必要
+    // (§9.2 L620 が Portal での有効化を想定済み)。メッセージ作成イベント自体は購読しない。
+    expect([...BOT_INTENTS]).toEqual([
+      GatewayIntentBits.Guilds,
+      GatewayIntentBits.GuildMessageReactions,
+      GatewayIntentBits.MessageContent,
+    ]);
+    expect([...BOT_INTENTS]).not.toContain(GatewayIntentBits.GuildMessages);
+  });
+});
+
+describe("parseGithubPrUrl", () => {
+  it("本文中の PR URL から repo と番号を取り出す", () => {
+    expect(
+      parseGithubPrUrl(
+        "📥 抽出 PR を作成しました: https://github.com/org/knowledge-base/pull/12\n新規 3",
+      ),
+    ).toEqual({ repo: "org/knowledge-base", number: 12 });
+  });
+  it("PR URL が無い・別ホスト・issue URL は null", () => {
+    expect(parseGithubPrUrl("no url here")).toBeNull();
+    expect(parseGithubPrUrl("https://example.com/org/repo/pull/1")).toBeNull();
+    expect(parseGithubPrUrl("https://github.com/org/repo/issues/5")).toBeNull();
+  });
+});
+
+const opsOn: OpsConfig = { channel_id: "OPS", kb_repo: "org/knowledge-base" };
+
+describe("proxyMergeDecision (§6.3 のガード判定)", () => {
+  const base = {
+    emojiName: "👍" as string | null,
+    channelId: "OPS",
+    messageWebhookId: "WH1" as string | null,
+    reactorIsBot: false,
+    content: "📥 抽出 PR を作成しました: https://github.com/org/knowledge-base/pull/12",
+    ops: opsOn,
+  };
+  it("全ガードを満たすと merge(repo と番号を返す)", () => {
+    expect(proxyMergeDecision(base)).toEqual({
+      merge: true,
+      repo: "org/knowledge-base",
+      number: 12,
+    });
+  });
+  it("ops 未設定(null)は機能 OFF", () => {
+    expect(proxyMergeDecision({ ...base, ops: { channel_id: null, kb_repo: null } })).toEqual({
+      merge: false,
+      reason: "ops-config-off",
+    });
+  });
+  it("👍 以外の絵文字は無視", () => {
+    expect(proxyMergeDecision({ ...base, emojiName: "🎉" })).toEqual({
+      merge: false,
+      reason: "not-thumbsup",
+    });
+  });
+  it("ops チャンネル以外は無視", () => {
+    expect(proxyMergeDecision({ ...base, channelId: "OTHER" })).toEqual({
+      merge: false,
+      reason: "not-ops-channel",
+    });
+  });
+  it("webhook でない通常メッセージは無視(人の雑談に反応しない)", () => {
+    expect(proxyMergeDecision({ ...base, messageWebhookId: null })).toEqual({
+      merge: false,
+      reason: "not-webhook-message",
+    });
+  });
+  it("bot のリアクションは無視", () => {
+    expect(proxyMergeDecision({ ...base, reactorIsBot: true })).toEqual({
+      merge: false,
+      reason: "bot-reactor",
+    });
+  });
+  it("kb_repo 以外のリポの PR URL は拒否", () => {
+    expect(
+      proxyMergeDecision({
+        ...base,
+        content: "https://github.com/org/other-repo/pull/9",
+      }),
+    ).toEqual({ merge: false, reason: "repo-not-allowed" });
+  });
+});
+
+/** handleProxyMergeReaction 用の最小 fake(webhook 通知メッセージ + 人間のリアクション)。 */
+function fakeReaction(
+  over: {
+    emoji?: string | null;
+    channelId?: string;
+    webhookId?: string | null;
+    content?: string;
+    userBot?: boolean;
+  } = {},
+): { reaction: MessageReaction; user: User; replies: string[] } {
+  const replies: string[] = [];
+  const message = {
+    partial: false,
+    channelId: over.channelId ?? "OPS",
+    webhookId: over.webhookId !== undefined ? over.webhookId : "WH1",
+    content:
+      over.content ?? "📥 抽出 PR を作成しました: https://github.com/org/knowledge-base/pull/12",
+    id: "MSG1",
+    reply: async (s: string) => {
+      replies.push(s);
+    },
+  };
+  const reaction = {
+    partial: false,
+    emoji: { name: over.emoji !== undefined ? over.emoji : "👍" },
+    message,
+  };
+  const user = { partial: false, bot: over.userBot ?? false, id: "U1" };
+  return {
+    reaction: reaction as unknown as MessageReaction,
+    user: user as unknown as User,
+    replies,
+  };
+}
+
+function fakeGh(
+  over: Partial<PrDetail> = {},
+  opts: { throwOnMerge?: boolean } = {},
+): { gh: GhClient; getPr: ReturnType<typeof vi.fn>; merge: ReturnType<typeof vi.fn> } {
+  const detail: PrDetail = {
+    number: 12,
+    state: "open",
+    merged: false,
+    mergeableState: "clean",
+    title: "Extract: a..b",
+    url: "https://github.com/org/knowledge-base/pull/12",
+    ...over,
+  };
+  const getPr = vi.fn(async () => detail);
+  const merge = vi.fn(async () => {
+    if (opts.throwOnMerge) throw new Error("boom");
+  });
+  return {
+    gh: { getPullRequest: getPr, mergePullRequest: merge } as unknown as GhClient,
+    getPr,
+    merge,
+  };
+}
+
+describe("handleProxyMergeReaction (§6.3 👍 代理マージ)", () => {
+  const mkDeps = (logger: Logger, store: BotStore, gh?: GhClient, ops?: OpsConfig): BotDeps => ({
+    logger,
+    channels: channels(),
+    store,
+    ops: ops ?? opsOn,
+    gh,
+  });
+
+  it("clean な PR は squash マージ + 監査行(pr_merge)+ ✅ reply", async () => {
+    const { logger } = fakeLogger();
+    const { store, queued } = fakeStore();
+    const { gh, merge } = fakeGh();
+    const { reaction, user, replies } = fakeReaction();
+    await handleProxyMergeReaction(reaction, user, mkDeps(logger, store, gh));
+    expect(merge).toHaveBeenCalledWith({ repo: "org/knowledge-base", number: 12 });
+    expect(queued).toHaveLength(1);
+    expect((queued[0] as { type: string }).type).toBe("pr_merge");
+    expect(replies[0]).toContain("✅");
+  });
+
+  it("gh 未設定(認証なし)は完全 no-op", async () => {
+    const { logger } = fakeLogger();
+    const { store, queued } = fakeStore();
+    const { reaction, user, replies } = fakeReaction();
+    await handleProxyMergeReaction(reaction, user, mkDeps(logger, store, undefined));
+    expect(queued).toHaveLength(0);
+    expect(replies).toHaveLength(0);
+  });
+
+  it("マージ済みは冪等(merge を呼ばず案内 reply)", async () => {
+    const { logger } = fakeLogger();
+    const { store } = fakeStore();
+    const { gh, merge } = fakeGh({ merged: true });
+    const { reaction, user, replies } = fakeReaction();
+    await handleProxyMergeReaction(reaction, user, mkDeps(logger, store, gh));
+    expect(merge).not.toHaveBeenCalled();
+    expect(replies[0]).toContain("既に");
+  });
+
+  it("mergeable_state が clean でなければマージしない(ADR-0004 D2)", async () => {
+    const { logger } = fakeLogger();
+    const { store } = fakeStore();
+    const { gh, merge } = fakeGh({ mergeableState: "unstable" });
+    const { reaction, user, replies } = fakeReaction();
+    await handleProxyMergeReaction(reaction, user, mkDeps(logger, store, gh));
+    expect(merge).not.toHaveBeenCalled();
+    expect(replies[0]).toContain("⛔");
+  });
+
+  it("👍 以外・対象外メッセージは gh に触れない", async () => {
+    const { logger } = fakeLogger();
+    const { store } = fakeStore();
+    const { gh, getPr } = fakeGh();
+    for (const over of [{ emoji: "🎉" }, { webhookId: null }, { channelId: "OTHER" }]) {
+      const { reaction, user } = fakeReaction(over);
+      await handleProxyMergeReaction(reaction, user, mkDeps(logger, store, gh));
+    }
+    expect(getPr).not.toHaveBeenCalled();
+  });
+
+  it("merge throw でも例外を外へ漏らさず log.error + ❌ reply 試行", async () => {
+    const { logger, errors } = fakeLogger();
+    const { store } = fakeStore();
+    const { gh } = fakeGh({}, { throwOnMerge: true });
+    const { reaction, user, replies } = fakeReaction();
+    await expect(
+      handleProxyMergeReaction(reaction, user, mkDeps(logger, store, gh)),
+    ).resolves.toBeUndefined();
+    expect(errors).toHaveLength(1);
+    expect(replies.some((r) => r.includes("❌"))).toBe(true);
   });
 });

@@ -5,6 +5,7 @@ import {
   isChannelAllowed,
   loadChannels,
   loadMembers,
+  loadOps,
   loadRepos,
 } from "./config.js";
 
@@ -64,5 +65,23 @@ describe("githubForDiscord", () => {
     );
     expect(githubForDiscord(m, "123")).toBe("yamada");
     expect(githubForDiscord(m, "999")).toBeUndefined();
+  });
+});
+
+describe("loadOps (👍 代理マージ設定・§6.3)", () => {
+  it("ファイルが無ければ両方 null(機能 OFF)", async () => {
+    const ops = await loadOps(reader({}));
+    expect(ops).toEqual({ channel_id: null, kb_repo: null });
+  });
+  it("ops.yaml の実値を読む", async () => {
+    const ops = await loadOps(
+      reader({ "ops.yaml": "channel_id: '123'\nkb_repo: org/knowledge-base" }),
+    );
+    expect(ops).toEqual({ channel_id: "123", kb_repo: "org/knowledge-base" });
+  });
+  it("片方だけの設定も許す(有効化判定は呼び出し側)", async () => {
+    const ops = await loadOps(reader({ "ops.yaml": "channel_id: '123'" }));
+    expect(ops.channel_id).toBe("123");
+    expect(ops.kb_repo).toBeNull();
   });
 });

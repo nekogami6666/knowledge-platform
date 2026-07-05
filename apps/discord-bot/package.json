@@ -15,6 +15,7 @@
     "start": "node dist/index.js"
   },
   "dependencies": {
+    "@stratum/gh-client": "workspace:*",
     "@stratum/kb-core": "workspace:*",
     "@stratum/llm": "workspace:*",
     "better-sqlite3": "^12.11.1",

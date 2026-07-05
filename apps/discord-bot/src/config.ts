@@ -37,6 +37,20 @@ export const reposConfigSchema = z
   .default({ repos: [] });
 export type ReposConfig = z.infer<typeof reposConfigSchema>;
 
+/**
+ * 👍 代理マージ(§6.3 / C1 拡張)の設定。両方が設定されて初めて機能が有効になる(既定 OFF)。
+ * - channel_id: extractor が PR 通知を投稿する #stratum-ops のチャンネル ID。
+ * - kb_repo: マージを許可する唯一のリポ("org/knowledge-base")。他リポの URL は拒否。
+ * 承認者はチャンネルに入れる人間なら誰でも(チャンネル参加=信頼境界。members.yaml 整備後に締める)。
+ */
+export const opsConfigSchema = z
+  .object({
+    channel_id: z.string().nullable().default(null),
+    kb_repo: z.string().nullable().default(null),
+  })
+  .default({ channel_id: null, kb_repo: null });
+export type OpsConfig = z.infer<typeof opsConfigSchema>;
+
 /** 設定ファイルの読み取り口。ファイルが無ければ null を返す(= 既定値を使う)。 */
 export interface ConfigReader {
   read(name: string): Promise<string | null>;
@@ -71,6 +85,12 @@ export async function loadRepos(reader: ConfigReader): Promise<ReposConfig> {
   const text = await reader.read("repos.yaml");
   const data = text === null ? undefined : yaml.load(text);
   return reposConfigSchema.parse(data ?? undefined);
+}
+
+export async function loadOps(reader: ConfigReader): Promise<OpsConfig> {
+  const text = await reader.read("ops.yaml");
+  const data = text === null ? undefined : yaml.load(text);
+  return opsConfigSchema.parse(data ?? undefined);
 }
 
 /** §9.2 default-deny: allow に含まれ、かつ permanent_exclude に含まれないチャンネルのみ許可。 */

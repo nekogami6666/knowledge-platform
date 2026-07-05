@@ -18,6 +18,7 @@ export {
   type ListPrOptions,
   type MergePrOptions,
   type OctokitLike,
+  type PrDetail,
   type PrSummary,
   splitRepo,
 } from "./client.js";

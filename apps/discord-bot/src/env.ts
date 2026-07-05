@@ -21,6 +21,11 @@ const envSchema = z
     AWS_REGION: z.string().min(1),
     /** スラッシュコマンド登録先ギルド(任意。未指定はグローバル登録)。 */
     DISCORD_GUILD_ID: z.string().optional(),
+    // GitHub 認証(👍 代理マージ用・gh-client。App trio か token。未整備なら機能 OFF・ADR-0011)。
+    GITHUB_APP_ID: z.string().optional(),
+    GITHUB_APP_PRIVATE_KEY: z.string().optional(),
+    GITHUB_APP_INSTALLATION_ID: z.string().optional(),
+    GITHUB_TOKEN: z.string().optional(),
     /** 検索対象リポの clone ルート(cwd)。 */
     CLONES_DIR: z.string().default("./.clones"),
     /** SQLite ファイルパス。 */

@@ -47,6 +47,20 @@ export interface MergePrOptions {
   commitTitle?: string;
 }
 
+/** PR の現在状態(bot 代理マージの事前確認用・§6.3)。 */
+export interface PrDetail {
+  number: number;
+  state: "open" | "closed";
+  merged: boolean;
+  /**
+   * GitHub の mergeable_state("clean"=チェック緑・競合なし、"dirty"=競合、"blocked"=保護ルール、
+   * "unstable"=チェック失敗あり 等)。算出中は null。マージ可否の判断は "clean" のみを可とする(ADR-0004 D2)。
+   */
+  mergeableState: string | null;
+  title: string;
+  url: string;
+}
+
 export interface GetFileOptions {
   repo: string;
   path: string;
@@ -61,6 +75,8 @@ export interface GhClient {
   listPullRequests(repo: string, opts?: ListPrOptions): Promise<PrSummary[]>;
   /** PR をマージする(既定 squash)。 */
   mergePullRequest(opts: MergePrOptions): Promise<void>;
+  /** PR の現在状態を取得する(マージ前の clean 確認・冪等判定用)。404 は NOT_FOUND。 */
+  getPullRequest(repo: string, number: number): Promise<PrDetail>;
   /** ファイル内容と blob SHA を取得する。存在しなければ null(id-allocator CAS 用)。 */
   getFileContents(opts: GetFileOptions): Promise<{ content: string; sha: string } | null>;
 }
@@ -121,6 +137,16 @@ export interface OctokitLike {
         merge_method?: string;
         commit_title?: string;
       }): Promise<{ data: unknown }>;
+      get(p: { owner: string; repo: string; pull_number: number }): Promise<{
+        data: {
+          number: number;
+          state: string;
+          merged: boolean;
+          mergeable_state?: string | null;
+          title: string;
+          html_url: string;
+        };
+      }>;
     };
     repos: {
       getContent(p: { owner: string; repo: string; path: string; ref?: string }): Promise<{
@@ -240,6 +266,25 @@ export function createGhClient(octokit: OctokitLike): GhClient {
         throw new GhClientError(code, `PR マージに失敗しました(${opts.repo}#${opts.number})`, {
           cause: e,
         });
+      }
+    },
+
+    async getPullRequest(repo, number) {
+      const { owner, repo: name } = splitRepo(repo);
+      try {
+        const res = await octokit.rest.pulls.get({ owner, repo: name, pull_number: number });
+        const d = res.data;
+        return {
+          number: d.number,
+          state: d.state === "closed" ? "closed" : "open",
+          merged: d.merged,
+          mergeableState: d.mergeable_state ?? null,
+          title: d.title,
+          url: d.html_url,
+        };
+      } catch (e) {
+        const code = statusOf(e) === 404 ? "NOT_FOUND" : "API_ERROR";
+        throw new GhClientError(code, `PR 取得に失敗しました(${repo}#${number})`, { cause: e });
       }
     },
 
