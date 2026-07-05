@@ -89,6 +89,9 @@ importers:
       '@stratum/discord-bot':
         specifier: workspace:*
         version: link:../apps/discord-bot
+      '@stratum/extractor':
+        specifier: workspace:*
+        version: link:../apps/extractor
       '@stratum/llm':
         specifier: workspace:*
         version: link:../packages/llm

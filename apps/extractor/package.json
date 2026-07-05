@@ -3,6 +3,24 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
+  "exports": {
+    "./extract": {
+      "types": "./dist/extract.d.ts",
+      "default": "./dist/extract.js"
+    },
+    "./candidate": {
+      "types": "./dist/candidate.d.ts",
+      "default": "./dist/candidate.js"
+    },
+    "./domains": {
+      "types": "./dist/domains.d.ts",
+      "default": "./dist/domains.js"
+    },
+    "./concurrency": {
+      "types": "./dist/concurrency.d.ts",
+      "default": "./dist/concurrency.js"
+    }
+  },
   "scripts": {
     "typecheck": "tsc --noEmit",
     "build": "tsc -p tsconfig.build.json",

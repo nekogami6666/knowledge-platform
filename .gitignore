@@ -15,3 +15,6 @@ apps/extractor/config/*.yaml
 
 # 週次 golden eval の生成物(§10.2。CLI が書き出す)
 evals/eval-result.json
+
+# 抽出品質レビュー表(§10.3。実議事録の内容を含むためコミット禁止・ADR-0012)
+evals/.review/

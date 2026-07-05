@@ -6,10 +6,12 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "build": "tsc -p tsconfig.build.json",
-    "eval:qa": "node dist/run-qa-cli.js"
+    "eval:qa": "node dist/run-qa-cli.js",
+    "eval:extract-review": "node dist/run-extract-review-cli.js"
   },
   "dependencies": {
     "@stratum/discord-bot": "workspace:*",
+    "@stratum/extractor": "workspace:*",
     "@stratum/llm": "workspace:*",
     "js-yaml": "^4.2.0",
     "zod": "^3.25.76"
