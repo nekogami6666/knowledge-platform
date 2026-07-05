@@ -10,5 +10,8 @@ coverage/
 apps/discord-bot/config/*.yaml
 apps/extractor/config/*.yaml
 
+# extractor のローカル clone(実 minutes / knowledge-base を含むためコミットしない)
+.clones/
+
 # 週次 golden eval の生成物(§10.2。CLI が書き出す)
 evals/eval-result.json

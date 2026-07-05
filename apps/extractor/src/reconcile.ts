@@ -33,6 +33,8 @@ export interface ReconcileDeps {
   search?: ReconcileSearchFn;
   usage?: UsageRecorder;
   retry?: RetryOptions;
+  /** LLM タイムアウト(ms)。既定 300s(実 KB の agentic search が既定 120s を超えうる)。 */
+  timeoutMs?: number;
 }
 
 /** 候補を突合プロンプト用のテキストに要約する(agent が KB を検索する手掛かり)。 */
@@ -84,6 +86,7 @@ export async function reconcileCandidate(
           prompt: candidateSummary(candidate),
           cwd: kbCwd,
           outputSchema: verdictSchema,
+          timeoutMs: deps.timeoutMs ?? 300_000,
           // allowedTools は既定(Read/Grep/Glob)。KB clone を探索して既存エントリを探す。
         },
         { usage },

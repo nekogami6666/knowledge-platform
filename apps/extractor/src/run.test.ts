@@ -11,7 +11,7 @@ import type { Verdict } from "./verdict.js";
 const HEAD = "abcdef1234567890"; // 小文字 hex(pr-title の正規表現に一致)
 
 const config: ExtractorConfig = {
-  minutes: { repo: "org/minutes", dir: "minutes" },
+  minutes: { repo: "org/minutes", dir: "minutes", exclude: ["transcript.md"] },
   kb: { repo: "org/knowledge-base", dir: "knowledge-base" },
   base_branch: "main",
 };
@@ -48,6 +48,26 @@ const oneLearning: ExtractionResult = {
   ],
   openQuestions: [],
 };
+
+function extractionWithDomain(domain: string): ExtractionResult {
+  return {
+    decisions: [],
+    learnings: [
+      {
+        kind: "learning",
+        title: "t",
+        body: "b",
+        entryType: "fact",
+        domain,
+        people: ["yamada"],
+        tags: [],
+        confidence: "high",
+        slug: "t",
+      },
+    ],
+    openQuestions: [],
+  };
+}
 
 function makeGh(over: Partial<GhClient> = {}): GhClient {
   return {
@@ -94,10 +114,12 @@ function makeDeps(over: Partial<RunDeps> = {}): RunDeps {
     },
     writeFile: async () => {},
     exec: async () => ({ stdout: "2026/06/x.md\n" }),
+    readdir: async () => [],
     notifier: { notifyPrCreated: vi.fn(async () => {}) },
     now: () => new Date("2026-07-01T00:00:00Z"),
     logger: createLogger([], () => {}),
     realPr: true,
+    reconcileConcurrency: 4,
     ...over,
   };
 }
@@ -117,6 +139,38 @@ describe("runExtractor", () => {
     expect(paths.some((p) => p.startsWith("knowledge/hardware/kb-2026-0144"))).toBe(true);
     expect(arg?.title).toContain("init..abcdef1");
     expect(notifier.notifyPrCreated).toHaveBeenCalledTimes(1);
+    expect(r.domains.candidateCount).toBe(1);
+    expect(r.domains.newDomains).toContain("hardware");
+    expect(r.domains.reusedDomainCount).toBe(0);
+  });
+
+  it("既存 domain に載る新規 learning は再利用としてカウント", async () => {
+    const r = await runExtractor(
+      makeDeps({ readdir: async () => [{ name: "hardware", isDirectory: () => true }] }),
+    );
+    expect(r.domains.reusedDomainCount).toBe(1);
+    expect(r.domains.newDomains).toEqual([]);
+  });
+
+  it("新設 domain が既存に近いと nearDuplicates + 警告ログ", async () => {
+    const logs: string[] = [];
+    const r = await runExtractor(
+      makeDeps({
+        readdir: async () => [{ name: "hardware", isDirectory: () => true }],
+        extractDeps: {
+          promptStore: { read: async () => "---\nrole: standard\n---\nR" },
+          search: async () => ({
+            value: extractionWithDomain("hardware-verification"),
+            usage: { inputTokens: 1, outputTokens: 1 },
+          }),
+        },
+        logger: createLogger([], (l) => logs.push(l)),
+      }),
+    );
+    expect(r.domains.nearDuplicates).toEqual([
+      { domain: "hardware-verification", near: "hardware" },
+    ]);
+    expect(logs.some((l) => l.includes("近い"))).toBe(true);
   });
 
   it("変更なし → PR を作成しない", async () => {
@@ -159,5 +213,69 @@ describe("runExtractor", () => {
     expect(r.reason).toBe("dry-run");
     expect(gh.createPullRequest).not.toHaveBeenCalled();
     expect(gh.listPullRequests).not.toHaveBeenCalled();
+  });
+
+  it("reconcile 失敗の候補は skip+記録し、他は materialize して継続(並列・§2-E)", async () => {
+    const twoLearnings: ExtractionResult = {
+      decisions: [],
+      learnings: [
+        {
+          kind: "learning",
+          title: "a",
+          body: "b",
+          entryType: "fact",
+          domain: "hardware",
+          people: ["x"],
+          tags: [],
+          confidence: "high",
+          slug: "a",
+        },
+        {
+          kind: "learning",
+          title: "c",
+          body: "d",
+          entryType: "fact",
+          domain: "firmware",
+          people: ["y"],
+          tags: [],
+          confidence: "high",
+          slug: "c",
+        },
+      ],
+      openQuestions: [],
+    };
+    const prompt = { read: async () => "---\nrole: standard\n---\nR" };
+    const r = await runExtractor(
+      makeDeps({
+        extractDeps: {
+          promptStore: prompt,
+          search: async () => ({
+            value: twoLearnings,
+            usage: { inputTokens: 1, outputTokens: 1 },
+          }),
+        },
+        reconcileDeps: {
+          promptStore: prompt,
+          search: async (opts) => {
+            if (opts.prompt.includes("firmware")) throw new Error("boom");
+            return {
+              value: { classification: "new", reason: "ok" } as Verdict,
+              usage: { inputTokens: 1, outputTokens: 1 },
+            };
+          },
+        },
+      }),
+    );
+    expect(r.created).toBe(true);
+    expect(r.counts.new).toBe(1);
+    expect(r.counts.skip).toBe(1);
+  });
+
+  it("段階別 timings を計測する(monotonicMs 注入)", async () => {
+    let t = 0;
+    const r = await runExtractor(makeDeps({ monotonicMs: () => (t += 5) }));
+    expect(r.timings).toBeDefined();
+    expect(typeof r.timings?.reconcileMs).toBe("number");
+    expect(r.timings?.reconcileMs).toBeGreaterThanOrEqual(0);
   });
 });

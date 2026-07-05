@@ -44,6 +44,11 @@ describe("buildExtractPrompt", () => {
     expect(p).toContain("L1: # HW 定例");
     expect(p).toContain("40%RH");
   });
+  it("existingDomains を提示して再利用を促す", () => {
+    const p = buildExtractPrompt(minutes, ["hardware", "firmware"]);
+    expect(p).toContain("既存 domain");
+    expect(p).toContain("hardware, firmware");
+  });
 });
 
 describe("extractFromMinutes", () => {

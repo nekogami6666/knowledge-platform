@@ -3,7 +3,12 @@
  * 実 PR は EXTRACTOR_REAL_PR 時のみ(既定 dry-run)。GitHub 認証は実 PR 時のみ構築(dry-run を壊さない)。
  */
 import { execFile } from "node:child_process";
-import { readFile as fsReadFile, writeFile as fsWriteFile, mkdir } from "node:fs/promises";
+import {
+  readdir as fsReaddir,
+  readFile as fsReadFile,
+  writeFile as fsWriteFile,
+  mkdir,
+} from "node:fs/promises";
 import { dirname } from "node:path";
 import { promisify } from "node:util";
 import { createGhClientFromEnv, type GhClient } from "@stratum/gh-client";
@@ -11,7 +16,7 @@ import { createLocalIdCounterStore, validateRepo } from "@stratum/kb-core";
 import { createFsPromptStore, nullUsageRecorder } from "@stratum/llm";
 import { createFsConfigReader, loadExtractorConfig } from "./config.js";
 import type { GitExec } from "./diff.js";
-import { isRealPr, parseEnv } from "./env.js";
+import { isRealPr, parseEnv, parsePositiveInt } from "./env.js";
 import { createLogger } from "./logger.js";
 import { createWebhookNotifier } from "./notify.js";
 import { createGitRepoSyncer } from "./repos.js";
@@ -48,13 +53,18 @@ async function main(): Promise<void> {
   const realPr = isRealPr(env);
   const config = await loadExtractorConfig(createFsConfigReader(env.CONFIG_DIR));
   const promptStore = createFsPromptStore(env.PROMPTS_DIR);
+  const timeout = parsePositiveInt(env.EXTRACTOR_TIMEOUT_MS, 300_000);
+  if (timeout.warning !== undefined) logger.warn(timeout.warning, { env: "EXTRACTOR_TIMEOUT_MS" });
+  const concurrency = parsePositiveInt(env.EXTRACTOR_RECONCILE_CONCURRENCY, 4);
+  if (concurrency.warning !== undefined)
+    logger.warn(concurrency.warning, { env: "EXTRACTOR_RECONCILE_CONCURRENCY" });
 
   const summary = await runExtractor({
     config,
     syncer: createGitRepoSyncer(config, env.CLONES_DIR, gitExec),
     gh: realPr ? createGhClientFromEnv() : nullGhClient(),
-    extractDeps: { promptStore, usage: nullUsageRecorder },
-    reconcileDeps: { promptStore, usage: nullUsageRecorder },
+    extractDeps: { promptStore, usage: nullUsageRecorder, timeoutMs: timeout.value },
+    reconcileDeps: { promptStore, usage: nullUsageRecorder, timeoutMs: timeout.value },
     makeIdStore: (kbRoot) => createLocalIdCounterStore(kbRoot),
     validate: (kbRoot) => validateRepo(kbRoot),
     readFile: (p) => fsReadFile(p, "utf8"),
@@ -63,10 +73,12 @@ async function main(): Promise<void> {
       await fsWriteFile(p, content, "utf8");
     },
     exec: gitExec,
+    readdir: (dir) => fsReaddir(dir, { withFileTypes: true }),
     notifier: createWebhookNotifier(env.DISCORD_OPS_WEBHOOK),
     now: () => new Date(),
     logger,
     realPr,
+    reconcileConcurrency: concurrency.value,
   });
   logger.info("extractor 完了", {
     created: summary.created,

@@ -17,15 +17,21 @@ const repoSpecSchema = z.object({
   url: z.string().optional(),
 });
 
+/** minutes は抽出対象から外す basename を持てる(既定 transcript.md。生書き起こしは重く冗長)。 */
+const minutesSpecSchema = repoSpecSchema.extend({
+  exclude: z.array(z.string()).default(["transcript.md"]),
+});
+
 export const extractorConfigSchema = z
   .object({
-    minutes: repoSpecSchema,
+    minutes: minutesSpecSchema,
     kb: repoSpecSchema,
     base_branch: z.string().default("main"),
   })
   .strict();
 export type ExtractorConfig = z.infer<typeof extractorConfigSchema>;
 export type RepoSpec = z.infer<typeof repoSpecSchema>;
+export type MinutesSpec = z.infer<typeof minutesSpecSchema>;
 
 export interface ConfigReader {
   read(name: string): Promise<string | null>;

@@ -3,6 +3,7 @@
 minutes:
   repo: org/minutes # 出典に使う "org/name"
   dir: minutes # CLONES_DIR 配下の clone ディレクトリ名
+  # exclude: [transcript.md]   # 抽出対象から外す basename(既定 transcript.md。生書き起こしは重く冗長)
   # url: https://github.com/org/minutes.git   # private は認証付き。省略時は checkout 済みの dir を使う
 kb:
   repo: org/knowledge-base

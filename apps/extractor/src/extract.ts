@@ -35,6 +35,10 @@ export interface ExtractDeps {
   usage?: UsageRecorder;
   /** withRetry オプション(テストで sleep 注入)。既定 maxRetries:1(§6.2)。 */
   retry?: RetryOptions;
+  /** LLM タイムアウト(ms)。実議事録は密で既定 120s を超えうるため既定 300s。 */
+  timeoutMs?: number;
+  /** 既存 domain の一覧(⑱・§2-C)。プロンプトに提示して learning の domain 再利用を促す(乱立抑制)。 */
+  existingDomains?: readonly string[];
 }
 
 export interface MinutesInput {
@@ -57,11 +61,19 @@ export function numberLines(content: string): string {
 }
 
 /** 議事録本文を user prompt に組み立てる(本文はインライン。ツールで読みにいかない)。 */
-export function buildExtractPrompt(input: MinutesInput): string {
+export function buildExtractPrompt(
+  input: MinutesInput,
+  existingDomains: readonly string[] = [],
+): string {
+  const domainLine =
+    existingDomains.length > 0
+      ? `既存 domain(learning の domain はなるべくこの中から選ぶ・無ければ新設可): ${existingDomains.join(", ")}`
+      : "既存 domain: (まだ無し。適切な粒度で新設してよい)";
   return [
     "以下は1つの会議議事録です。決定 / 学び / 未解決の問い を抽出してください。",
     `repo: ${input.repo}`,
     `path: ${input.path}`,
+    domainLine,
     "各行頭の `L{n}:` は行番号です。根拠の行範囲を lines(例 L12-L18)で示してください。",
     "--- 議事録ここから ---",
     numberLines(input.content),
@@ -84,10 +96,11 @@ export async function extractFromMinutes(
           app: "extractor",
           role: prompt.role, // prompt frontmatter(standard)。"standard" を直書きしない
           systemPrompt: prompt.body,
-          prompt: buildExtractPrompt(input),
+          prompt: buildExtractPrompt(input, deps.existingDomains ?? []),
           cwd: input.cwd,
           outputSchema: extractionResultSchema,
           allowedTools: [],
+          timeoutMs: deps.timeoutMs ?? 300_000,
         },
         { usage },
       ),

@@ -20,6 +20,20 @@ describe("loadExtractorConfig", () => {
     expect(cfg.kb.dir).toBe("knowledge-base");
     expect(cfg.base_branch).toBe("main");
   });
+  it("minutes.exclude は既定 transcript.md、明示指定で上書きできる", async () => {
+    const def = await loadExtractorConfig(reader({ "extractor.yaml": validYaml }));
+    expect(def.minutes.exclude).toEqual(["transcript.md"]);
+    const overridden = `minutes:
+  repo: org/minutes
+  dir: minutes
+  exclude: [transcript.md, notes.md]
+kb:
+  repo: org/knowledge-base
+  dir: knowledge-base
+`;
+    const cfg = await loadExtractorConfig(reader({ "extractor.yaml": overridden }));
+    expect(cfg.minutes.exclude).toEqual(["transcript.md", "notes.md"]);
+  });
   it("extractor.yaml が無ければ throw", async () => {
     await expect(loadExtractorConfig(reader({}))).rejects.toThrow();
   });

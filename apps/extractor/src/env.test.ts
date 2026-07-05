@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { isRealPr, parseEnv } from "./env.js";
+import { isRealPr, parseEnv, parsePositiveInt } from "./env.js";
 
 const base = {
   CLAUDE_CODE_USE_ANTHROPIC_AWS: "1",
@@ -28,5 +28,22 @@ describe("isRealPr", () => {
     expect(isRealPr(parseEnv({ ...base, EXTRACTOR_REAL_PR: "1" }))).toBe(true);
     expect(isRealPr(parseEnv({ ...base, EXTRACTOR_REAL_PR: "true" }))).toBe(true);
     expect(isRealPr(parseEnv(base))).toBe(false);
+  });
+});
+
+describe("parsePositiveInt", () => {
+  it("正の整数はそのまま採用(warning なし)", () => {
+    expect(parsePositiveInt("120000", 300_000)).toEqual({ value: 120_000 });
+  });
+  it("未設定/空は既定値(warning なし=通常運用)", () => {
+    expect(parsePositiveInt(undefined, 300_000)).toEqual({ value: 300_000 });
+    expect(parsePositiveInt("   ", 300_000)).toEqual({ value: 300_000 });
+  });
+  it("NaN・非整数・0・負値は既定にフォールバックし warning を返す", () => {
+    for (const bad of ["abc", "12.5", "0", "-5"]) {
+      const r = parsePositiveInt(bad, 300_000);
+      expect(r.value).toBe(300_000);
+      expect(r.warning).toContain(bad);
+    }
   });
 });
