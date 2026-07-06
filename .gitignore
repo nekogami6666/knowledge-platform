@@ -6,9 +6,10 @@ coverage/
 .env.*
 .claude/settings.local.json
 
-# discord-bot / extractor のローカル設定(実 ID を含むためコミットしない。*.yaml.example のみ追跡)
+# discord-bot / extractor / gap-tracker のローカル設定(実 ID を含むためコミットしない。*.yaml.example のみ追跡)
 apps/discord-bot/config/*.yaml
 apps/extractor/config/*.yaml
+apps/gap-tracker/config/*.yaml
 
 # extractor のローカル clone(実 minutes / knowledge-base を含むためコミットしない)
 .clones/

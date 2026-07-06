@@ -1,0 +1,13 @@
+# gap-tracker 設定の例。apps/gap-tracker/config/gap.yaml にコピーして実値を入れる(.gitignore 済み)。
+# リポ名・回答者はここから読む(コードにハードコードしない・CLAUDE.md §12.2)。
+kb_repo: org/knowledge-base # 質問ログの commit 先 "org/name"
+kb_dir: knowledge-base # CLONES_DIR 配下の clone ディレクトリ名
+# kb_url: https://x-access-token:<PAT>@github.com/org/knowledge-base.git
+#   本番は kb_url を設定する(毎回 fetch+reset でクリーン同期。トークンは .git/config に残さない)。
+base_branch: main
+# 回答者候補(§6.5: ラウンドロビン + 週3件/人上限)。expertise.yaml(Phase 4)整備までの暫定。
+assignees:
+  - github: yamada
+    discord: "123456789012345678"
+  - github: suzuki
+    discord: "234567890123456789"

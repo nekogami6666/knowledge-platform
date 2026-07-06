@@ -1,0 +1,12 @@
+# gap-tracker の起動タイマー(§6.5 L496: 平日 10:00 JST。依頼が深夜に飛ばないように)。
+# VM のタイムゾーンが UTC の場合も動くよう Asia/Tokyo を明示する。
+# 配置: ~/.config/systemd/user/stratum-gap-tracker.timer → `systemctl --user enable --now` で有効化。
+[Unit]
+Description=Run stratum gap-tracker on weekday mornings (JST)
+
+[Timer]
+OnCalendar=Mon..Fri 10:00 Asia/Tokyo
+Persistent=true
+
+[Install]
+WantedBy=timers.target

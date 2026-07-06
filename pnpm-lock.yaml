@@ -81,7 +81,27 @@ importers:
 
   apps/freshness-checker: {}
 
-  apps/gap-tracker: {}
+  apps/gap-tracker:
+    dependencies:
+      '@stratum/discord-bot':
+        specifier: workspace:*
+        version: link:../discord-bot
+      '@stratum/gh-client':
+        specifier: workspace:*
+        version: link:../../packages/gh-client
+      '@stratum/kb-core':
+        specifier: workspace:*
+        version: link:../../packages/kb-core
+      js-yaml:
+        specifier: ^4.2.0
+        version: 4.2.0
+      zod:
+        specifier: ^3.25.76
+        version: 3.25.76
+    devDependencies:
+      '@types/js-yaml':
+        specifier: ^4.0.9
+        version: 4.0.9
 
   apps/interview-kit: {}
 
