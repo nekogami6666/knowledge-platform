@@ -40,7 +40,7 @@ export interface QueryRecord {
 /** 確認ボタン等の保留アクション(§4.6 pending_actions)。Phase 1 は question_queue を使う。 */
 export interface PendingAction {
   id: string;
-  /** "question_queue" | "freshness" | "gap" など。 */
+  /** "question_queue" | "gap_answer" | "pr_merge" | "freshness" など。 */
   type: string;
   queryId: string | null;
   payloadJson: string | null;

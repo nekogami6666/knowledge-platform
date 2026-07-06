@@ -1,5 +1,5 @@
 import type { GhClient, PrDetail } from "@stratum/gh-client";
-import type { ButtonInteraction, MessageReaction, User } from "discord.js";
+import type { ButtonInteraction, Message, MessageReaction, User } from "discord.js";
 import { GatewayIntentBits } from "discord.js";
 import type { Logger } from "pino";
 import { describe, expect, it, vi } from "vitest";
@@ -11,8 +11,11 @@ import {
   type BotDeps,
   DENY_MESSAGE,
   denyReason,
+  extractQuestionId,
   feedbackButtons,
+  gapAnswerDecision,
   handleButton,
+  handleGapAnswer,
   handleProxyMergeReaction,
   parseFeedbackCustomId,
   parseGithubPrUrl,
@@ -178,15 +181,15 @@ describe("askCommand (/ask の登録定義)", () => {
 });
 
 describe("BOT_INTENTS (§9.5 最小権限)", () => {
-  it("Guilds + リアクション + MessageContent(👍 代理マージ・§6.3)。GuildMessages は要求しない", () => {
-    // MessageContent は privileged だが、webhook 通知の本文から PR URL を読むために必要
-    // (§9.2 L620 が Portal での有効化を想定済み)。メッセージ作成イベント自体は購読しない。
+  it("Guilds + GuildMessages + リアクション + MessageContent(§6.3 代理マージ・§6.5 gap 回答捕捉)", () => {
+    // GuildMessages は gap 依頼への「返信」検知(PR-D2)、GuildMessageReactions は 👍 代理マージ、
+    // MessageContent(privileged)は webhook 本文の PR URL / q-ID 読み取りに必要(§9.2 が Portal 有効化を想定)。
     expect([...BOT_INTENTS]).toEqual([
       GatewayIntentBits.Guilds,
+      GatewayIntentBits.GuildMessages,
       GatewayIntentBits.GuildMessageReactions,
       GatewayIntentBits.MessageContent,
     ]);
-    expect([...BOT_INTENTS]).not.toContain(GatewayIntentBits.GuildMessages);
   });
 });
 
@@ -393,5 +396,153 @@ describe("handleProxyMergeReaction (§6.3 👍 代理マージ)", () => {
     ).resolves.toBeUndefined();
     expect(errors).toHaveLength(1);
     expect(replies.some((r) => r.includes("❌"))).toBe(true);
+  });
+});
+
+describe("extractQuestionId", () => {
+  it("依頼本文の (q-YYYY-NNNN) を取り出す", () => {
+    expect(extractQuestionId("山田 さんが「湿度」を探していました。\n(q-2026-0007)")).toBe(
+      "q-2026-0007",
+    );
+  });
+  it("q-ID が無い・形式違いは null", () => {
+    expect(extractQuestionId("ただの雑談です")).toBeNull();
+    expect(extractQuestionId("q-26-7 は形式違い")).toBeNull();
+  });
+});
+
+describe("gapAnswerDecision (§6.5 ④UI のガード判定)", () => {
+  const base = {
+    authorIsBot: false,
+    referencedWebhookId: "WH1" as string | null,
+    referencedContent: "山田 さんが「湿度」を探していました。\n(q-2026-0007)",
+  };
+  it("人間 × webhook 依頼 × q-ID → capture", () => {
+    expect(gapAnswerDecision(base)).toEqual({ capture: true, questionId: "q-2026-0007" });
+  });
+  it("bot の返信は無視", () => {
+    expect(gapAnswerDecision({ ...base, authorIsBot: true })).toEqual({
+      capture: false,
+      reason: "bot-author",
+    });
+  });
+  it("返信元が webhook でない(通常メッセージ)は無視", () => {
+    expect(gapAnswerDecision({ ...base, referencedWebhookId: null })).toEqual({
+      capture: false,
+      reason: "not-webhook-reference",
+    });
+  });
+  it("返信元に q-ID が無ければ無視(他の webhook 通知に反応しない)", () => {
+    expect(
+      gapAnswerDecision({
+        ...base,
+        referencedContent: "📥 抽出 PR: https://github.com/org/knowledge-base/pull/3",
+      }),
+    ).toEqual({ capture: false, reason: "no-question-id" });
+  });
+});
+
+/** handleGapAnswer 用の最小 fake(gap 依頼 webhook への返信メッセージ)。 */
+function fakeMessage(
+  over: {
+    authorBot?: boolean;
+    isReply?: boolean;
+    referencedWebhookId?: string | null;
+    referencedContent?: string;
+    content?: string;
+    fetchThrows?: boolean;
+    reactThrows?: boolean;
+  } = {},
+): { message: Message; reacted: string[] } {
+  const reacted: string[] = [];
+  const referenced = {
+    webhookId: over.referencedWebhookId !== undefined ? over.referencedWebhookId : "WH1",
+    content: over.referencedContent ?? "山田 さんが「湿度」を探していました。\n(q-2026-0007)",
+  };
+  const message = {
+    author: { bot: over.authorBot ?? false, id: "U1" },
+    reference: over.isReply === false ? null : { messageId: "REQ1" },
+    content: over.content ?? "湿度が高いと Y 軸が脱調します。",
+    url: "https://discord.com/channels/1/2/3",
+    fetchReference: async () => {
+      if (over.fetchThrows) throw new Error("unknown message");
+      return referenced;
+    },
+    react: async (emoji: string) => {
+      if (over.reactThrows) throw new Error("missing permissions");
+      reacted.push(emoji);
+    },
+  };
+  return { message: message as unknown as Message, reacted };
+}
+
+describe("handleGapAnswer (§6.5 ④UI 捕捉 / 例外封じ込め)", () => {
+  const deps = (logger: Logger, store: BotStore): BotDeps => ({
+    logger,
+    channels: channels(),
+    store,
+  });
+
+  it("依頼への人間の返信 → gap_answer をキュー(payload)+ ✅ ack", async () => {
+    const { logger } = fakeLogger();
+    const { store, queued } = fakeStore();
+    const { message, reacted } = fakeMessage();
+    await handleGapAnswer(message, deps(logger, store));
+    expect(queued).toHaveLength(1);
+    const a = queued[0] as { type: string; state: string; payloadJson: string };
+    expect(a.type).toBe("gap_answer");
+    expect(a.state).toBe("pending");
+    expect(JSON.parse(a.payloadJson)).toMatchObject({
+      questionId: "q-2026-0007",
+      authorId: "U1",
+      content: "湿度が高いと Y 軸が脱調します。",
+      messageUrl: "https://discord.com/channels/1/2/3",
+    });
+    expect(reacted).toEqual(["✅"]);
+  });
+
+  it("返信でないメッセージは fetch せず何もしない", async () => {
+    const { logger } = fakeLogger();
+    const { store, queued } = fakeStore();
+    const { message, reacted } = fakeMessage({ isReply: false });
+    await handleGapAnswer(message, deps(logger, store));
+    expect(queued).toHaveLength(0);
+    expect(reacted).toHaveLength(0);
+  });
+
+  it("bot の返信は無視(webhook 同士の連鎖に反応しない)", async () => {
+    const { logger } = fakeLogger();
+    const { store, queued } = fakeStore();
+    const { message } = fakeMessage({ authorBot: true });
+    await handleGapAnswer(message, deps(logger, store));
+    expect(queued).toHaveLength(0);
+  });
+
+  it("返信元が webhook でない / q-ID が無い → キューしない", async () => {
+    const { logger } = fakeLogger();
+    const { store, queued } = fakeStore();
+    for (const over of [{ referencedWebhookId: null }, { referencedContent: "q-ID なし" }]) {
+      const { message } = fakeMessage(over);
+      await handleGapAnswer(message, deps(logger, store));
+    }
+    expect(queued).toHaveLength(0);
+  });
+
+  it("fetchReference が throw(削除済み等)でも例外を漏らさず log.error", async () => {
+    const { logger, errors } = fakeLogger();
+    const { store, queued } = fakeStore();
+    const { message } = fakeMessage({ fetchThrows: true });
+    await expect(handleGapAnswer(message, deps(logger, store))).resolves.toBeUndefined();
+    expect(queued).toHaveLength(0);
+    expect(errors).toHaveLength(1);
+  });
+
+  it("react が throw でも封じ込め(キューは積まれ、例外は漏れない)", async () => {
+    const { logger, errors } = fakeLogger();
+    const { store, queued } = fakeStore();
+    const { message } = fakeMessage({ reactThrows: true });
+    await expect(handleGapAnswer(message, deps(logger, store))).resolves.toBeUndefined();
+    expect(queued).toHaveLength(1);
+    expect(errors).toHaveLength(1);
   });
 });

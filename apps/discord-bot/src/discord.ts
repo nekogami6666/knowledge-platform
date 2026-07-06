@@ -5,6 +5,7 @@
  */
 import { randomUUID } from "node:crypto";
 import type { GhClient } from "@stratum/gh-client";
+import { qIdSchema } from "@stratum/kb-core";
 import {
   ActionRowBuilder,
   ButtonBuilder,
@@ -15,6 +16,7 @@ import {
   Events,
   GatewayIntentBits,
   type Interaction,
+  type Message,
   type MessageReaction,
   type PartialMessageReaction,
   Partials,
@@ -107,14 +109,16 @@ const stubHandler: AskHandler = async () => ({
 });
 
 /**
- * Gateway intents(§9.5 最小権限)。/ask と 👍👎 ボタンは interaction なので `Guilds` で足りるが、
- * 👍 代理マージ(§6.3 / C1 拡張)は extractor の webhook 通知メッセージへのリアクションを拾い
- * 本文から PR URL を解析するため、`GuildMessageReactions` と privileged な `MessageContent`
- * (Developer Portal で有効化・§9.2 が想定済み)を要求する。`GuildMessages` は不要
- * (メッセージ作成イベントは購読せず、リアクション時に REST fetch する)。
+ * Gateway intents(§9.5 最小権限)。/ask と 👍👎 ボタンは interaction なので `Guilds` で足りる。追加分:
+ * - `GuildMessageReactions`: 👍 代理マージ(§6.3)が extractor の webhook 通知への 👍 を拾う。
+ * - `GuildMessages`: gap 回答捕捉(§6.5 ④UI・PR-D2)が依頼メッセージへの「返信」を MessageCreate で検知する
+ *   (非 privileged)。
+ * - `MessageContent`(privileged・Developer Portal で有効化。§9.2 が想定済み): 代理マージの PR URL と
+ *   gap 依頼の q-ID を webhook 本文から読むために必要。
  */
 export const BOT_INTENTS = [
   GatewayIntentBits.Guilds,
+  GatewayIntentBits.GuildMessages,
   GatewayIntentBits.GuildMessageReactions,
   GatewayIntentBits.MessageContent,
 ] as const;
@@ -163,6 +167,11 @@ export function createBot(deps: BotDeps): Client {
   // §6.3: #stratum-ops の extractor 通知への 👍 で PR を代理マージ(ops/gh 未設定なら実質 no-op)。
   client.on(Events.MessageReactionAdd, async (reaction, user) => {
     await handleProxyMergeReaction(reaction, user, deps);
+  });
+
+  // §6.5 ④UI(PR-D2): gap 依頼(webhook)への「返信」を捕捉して gap_answer をキューへ。
+  client.on(Events.MessageCreate, async (message) => {
+    await handleGapAnswer(message, deps);
   });
 
   return client;
@@ -331,6 +340,92 @@ export async function handleProxyMergeReaction(
     } catch {
       // noop: 通知自体が失敗。ログ済みなのでこれ以上は何もしない。
     }
+  }
+}
+
+// --- gap 回答捕捉(§6.5 ④UI / PR-D2)-----------------------------------------
+
+/**
+ * 依頼メッセージ(gap-tracker が webhook で投稿・末尾に q-ID)本文から q-ID を取り出す。
+ * 抽出は本文スキャン、妥当性は kb-core の qIdSchema(型の唯一の正・CLAUDE.md §12.2)で確定する。
+ */
+export function extractQuestionId(text: string): string | null {
+  const m = /q-\d{4}-\d{4}/.exec(text);
+  if (m === null) return null;
+  const parsed = qIdSchema.safeParse(m[0]);
+  return parsed.success ? parsed.data : null;
+}
+
+/** gap 回答判定の入力(discord.js から必要な値だけを剥がした純粋データ)。 */
+export interface GapAnswerInput {
+  /** 返信者が bot かどうか(bot / webhook の投稿は回答として扱わない)。 */
+  authorIsBot: boolean;
+  /** 返信元(依頼)メッセージが webhook 投稿なら webhook ID、通常メッセージは null。 */
+  referencedWebhookId: string | null;
+  /** 返信元メッセージの本文(q-ID を抽出する)。 */
+  referencedContent: string;
+}
+
+export type GapAnswerDecision =
+  | { capture: true; questionId: string }
+  | { capture: false; reason: string };
+
+/**
+ * gap 回答捕捉のガード判定(§6.5 ④UI・純関数)。すべて満たす場合のみ capture:
+ * 人間の返信 / 返信元が webhook(依頼)投稿 / 返信元本文に q-ID がある。
+ * この3点で「依頼への人間の返信」だけを拾う(extractor の PR 通知など他の webhook は q-ID を持たない)。
+ */
+export function gapAnswerDecision(input: GapAnswerInput): GapAnswerDecision {
+  if (input.authorIsBot) return { capture: false, reason: "bot-author" };
+  if (input.referencedWebhookId === null) {
+    return { capture: false, reason: "not-webhook-reference" };
+  }
+  const questionId = extractQuestionId(input.referencedContent);
+  if (questionId === null) return { capture: false, reason: "no-question-id" };
+  return { capture: true, questionId };
+}
+
+/**
+ * 依頼メッセージへの「返信」を捕捉して gap_answer を pending_actions へ積む(§6.5 ④UI / PR-D2)。
+ * MessageCreate は全メッセージに発火するため、返信でない/bot の投稿は REST fetch 前に早期 return する。
+ * gap-tracker(PR-D3)がこのキューを読み、KB エントリ化 → PR → answered 移動を行う。
+ * 例外は封じ込め(catch → log)。ここで throw すると Gateway リスナが不安定になる。
+ */
+export async function handleGapAnswer(message: Message, deps: BotDeps): Promise<void> {
+  try {
+    // bot / webhook 自身の投稿と、返信でないメッセージは対象外(REST fetch を避けて早期 return)。
+    if (message.author.bot) return;
+    const referenceId = message.reference?.messageId;
+    if (referenceId === undefined) return;
+
+    // 返信元(依頼メッセージ)を取得。削除済みなどは fetchReference が throw → catch で握る。
+    const referenced = await message.fetchReference();
+    const decision = gapAnswerDecision({
+      authorIsBot: message.author.bot,
+      referencedWebhookId: referenced.webhookId ?? null,
+      referencedContent: referenced.content,
+    });
+    if (!decision.capture) return;
+
+    const log = withCorrelation(deps.logger, decision.questionId);
+    // 回答の出典は Discord permalink(PR-D3 が Source kind:"discord" として使う)。
+    deps.store.queueAction({
+      id: randomUUID(),
+      type: "gap_answer",
+      queryId: null,
+      payloadJson: JSON.stringify({
+        questionId: decision.questionId,
+        authorId: message.author.id,
+        content: message.content,
+        messageUrl: message.url,
+      }),
+      state: "pending",
+      createdAt: isoJst(),
+    });
+    await message.react("✅"); // 回答者へ「受け取った」ことを示す ack(§6.5 ④UI)
+    log.info({ authorId: message.author.id }, "gap answer captured");
+  } catch (err) {
+    withCorrelation(deps.logger, "gap-answer").error({ err }, "gap answer capture failed");
   }
 }
 
