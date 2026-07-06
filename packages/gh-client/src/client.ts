@@ -75,6 +75,8 @@ export interface CommitFilesOptions {
   branch: string;
   message: string;
   files: readonly FileChange[];
+  /** 同じ commit で削除するパス(open→answered の移動等・§6.5)。既定なし。 */
+  deletions?: readonly string[];
 }
 
 /** gh-client が公開する最小操作(F1 extractor / bot 代理マージ / C5 gap-tracker が消費)。 */
@@ -101,7 +103,8 @@ interface TreeItem {
   path: string;
   mode: "100644";
   type: "blob";
-  sha: string;
+  /** blob SHA。null は Git Data API でそのパスを削除する(ファイル移動の open→answered 等・§6.5)。 */
+  sha: string | null;
 }
 
 /**
@@ -202,6 +205,7 @@ async function buildCommit(
   baseSha: string,
   files: readonly FileChange[],
   message: string,
+  deletions: readonly string[] = [],
 ): Promise<string> {
   const tree: TreeItem[] = [];
   for (const f of files) {
@@ -212,6 +216,10 @@ async function buildCommit(
       encoding: "base64",
     });
     tree.push({ path: f.path, mode: "100644", type: "blob", sha: blob.data.sha });
+  }
+  // sha: null で base_tree から当該パスを削除する(open→answered のようなファイル移動用・§6.5)。
+  for (const path of deletions) {
+    tree.push({ path, mode: "100644", type: "blob", sha: null });
   }
   const treeRes = await octokit.rest.git.createTree({ owner, repo, base_tree: baseSha, tree });
   const commit = await octokit.rest.git.createCommit({
@@ -275,6 +283,7 @@ export function createGhClient(octokit: OctokitLike): GhClient {
           ref.data.object.sha,
           opts.files,
           opts.message,
+          opts.deletions ?? [],
         );
         // fast-forward 前提の updateRef(force しない)。先端が動いていたら 422 → CONFLICT。
         await octokit.rest.git.updateRef({

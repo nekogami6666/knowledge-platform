@@ -289,6 +289,27 @@ describe("commitFiles(§6.5 質問ログの直接 commit)", () => {
     expect(oct.rest.pulls.create).not.toHaveBeenCalled(); // PR も作らない
   });
 
+  it("deletions は sha:null の tree エントリで削除する(open→answered の移動・§6.5)", async () => {
+    const oct = fakeOctokit();
+    const gh = createGhClient(oct as unknown as OctokitLike);
+    await gh.commitFiles({
+      repo: "o/r",
+      branch: "main",
+      message: "chore(gap): move q-2026-0001 to answered",
+      files: [{ path: "questions/answered/q-2026-0001.md", content: "y" }],
+      deletions: ["questions/open/q-2026-0001.md"],
+    });
+    // fake createTree は無引数 vi.fn のため calls の要素型が空タプル。regular 配列へ cast して読む。
+    const calls = oct.rest.git.createTree.mock.calls as unknown as {
+      tree: { path: string; sha: string | null }[];
+    }[][];
+    const tree = calls[0]?.[0]?.tree ?? [];
+    const added = tree.find((t) => t.path === "questions/answered/q-2026-0001.md");
+    const deleted = tree.find((t) => t.path === "questions/open/q-2026-0001.md");
+    expect(added?.sha).toEqual(expect.any(String)); // blob 追加
+    expect(deleted).toEqual(expect.objectContaining({ sha: null })); // 削除エントリ
+  });
+
   it("updateRef の 422(non-fast-forward)は CONFLICT", async () => {
     const oct = fakeOctokit();
     oct.rest.git.updateRef.mockRejectedValueOnce({ status: 422 });

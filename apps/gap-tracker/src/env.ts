@@ -1,8 +1,9 @@
 /**
  * gap-tracker の環境変数検証(design.md §6.5 / §9.1 / ADR-0014)。
- * bot と同じ VM で動く systemd timer(ADR-0014 D1)。LLM は使わない(依頼文は決定論テンプレ。
- * 回答のナレッジ化=LLM は PR-D3 で追加)。
- * シークレット(GITHUB_TOKEN / GITHUB_APP_PRIVATE_KEY / DISCORD_GAP_WEBHOOK)はログに出さない。
+ * bot と同じ VM で動く systemd timer(ADR-0014 D1)。依頼文は決定論テンプレ(LLM 不要)だが、
+ * 回答のナレッジ化(PR-D3a)は Claude on AWS(Agent SDK・ADR-0009)を使うため PROMPTS_DIR が要る。
+ * 全 AI は Agent SDK 経由で bot と同じ Claude on AWS env(process.env の CLAUDE_/ANTHROPIC_/AWS_ 群)を継承する。
+ * シークレット(GITHUB_TOKEN / GITHUB_APP_PRIVATE_KEY / DISCORD_GAP_WEBHOOK / DISCORD_OPS_WEBHOOK)はログに出さない。
  */
 import { z } from "zod";
 
@@ -11,6 +12,8 @@ const envSchema = z.object({
   DB_PATH: z.string().min(1),
   /** 回答依頼を投稿する Discord webhook(§6.5 step3)。 */
   DISCORD_GAP_WEBHOOK: z.string().min(1),
+  /** ナレッジ化 PR を通知する #stratum-ops の Discord webhook(§6.3 の 👍 代理マージが拾う)。任意。 */
+  DISCORD_OPS_WEBHOOK: z.string().optional(),
   // GitHub 認証(gh-client。App trio か token・ADR-0011)。実 commit(GAP_TRACKER_REAL)時のみ必須。
   GITHUB_APP_ID: z.string().optional(),
   GITHUB_APP_PRIVATE_KEY: z.string().optional(),
@@ -20,6 +23,8 @@ const envSchema = z.object({
   GAP_TRACKER_REAL: z.string().optional(),
   CLONES_DIR: z.string().default("./.clones"),
   CONFIG_DIR: z.string().default("./config"),
+  /** gap/entry.md 等のプロンプト置き場(§8.1)。回答のナレッジ化(PR-D3a)で使う。 */
+  PROMPTS_DIR: z.string().default("./prompts"),
 });
 
 export type Env = z.infer<typeof envSchema>;
