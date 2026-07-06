@@ -54,6 +54,21 @@ describe("createMemoryStore: pending_actions", () => {
     expect(s.listPendingActions("question_queue")).toHaveLength(1);
     expect(s.listPendingActions("question_queue")[0]?.id).toBe("a1");
   });
+
+  it("markActionDone で state=done に前進(未知 id は no-op・§6.5 gap-tracker の消費)", () => {
+    const s = createMemoryStore();
+    s.queueAction({
+      id: "a1",
+      type: "question_queue",
+      queryId: "q1",
+      payloadJson: null,
+      state: "pending",
+      createdAt: "t",
+    });
+    s.markActionDone("a1");
+    expect(s.listPendingActions("question_queue")[0]?.state).toBe("done");
+    s.markActionDone("unknown"); // no-op(throw しない)
+  });
 });
 
 describe("createMemoryStore: feedback / answerStatus", () => {

@@ -65,6 +65,11 @@ export interface BotStore {
 
   queueAction(a: PendingAction): void;
   listPendingActions(type?: string): PendingAction[];
+  /**
+   * 保留アクションを処理済み(state="done")にする(§6.5。gap-tracker が消費後に呼ぶ)。
+   * これが無いとバッチが毎回同じキューを再処理する。未知 id は no-op。
+   */
+  markActionDone(id: string): void;
 
   /**
    * (subject, kind, windowStart) の利用を1回数え、count<=limit なら allowed=true を返す(§6.2 直列+制御)。
@@ -100,6 +105,10 @@ export function createMemoryStore(): BotStore {
     },
     listPendingActions(type) {
       return actions.filter((a) => type === undefined || a.type === type);
+    },
+    markActionDone(id) {
+      const a = actions.find((row) => row.id === id);
+      if (a) a.state = "done";
     },
     hitRateLimit(subject, kind, windowStart, limit) {
       const key = `${subject}|${kind}|${windowStart}`;

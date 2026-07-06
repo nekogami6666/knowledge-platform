@@ -115,4 +115,20 @@ describe.skipIf(!sqliteAvailable())("createSqliteStore(:memory:)", () => {
     expect(qq[0]?.queryId).toBe("q1");
     s.close();
   });
+
+  it("markActionDone で state=done(未知 id は no-op)", () => {
+    const s = createStore(":memory:");
+    s.queueAction({
+      id: "a1",
+      type: "question_queue",
+      queryId: "q1",
+      payloadJson: null,
+      state: "pending",
+      createdAt: "t",
+    });
+    s.markActionDone("a1");
+    expect(s.listPendingActions("question_queue")[0]?.state).toBe("done");
+    s.markActionDone("unknown");
+    s.close();
+  });
 });

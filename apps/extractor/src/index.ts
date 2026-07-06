@@ -38,6 +38,7 @@ function nullGhClient(): GhClient {
     listPullRequests: async () => fail(),
     mergePullRequest: async () => fail(),
     getPullRequest: async () => fail(),
+    commitFiles: async () => fail(),
     getFileContents: async () => fail(),
   };
 }

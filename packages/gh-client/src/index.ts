@@ -8,6 +8,7 @@
 export { createOctokit, type GhAuth, normalizePrivateKey, resolveGhAuthFromEnv } from "./auth.js";
 // --- クライアント ---
 export {
+  type CommitFilesOptions,
   type CreatePrOptions,
   createGhClient,
   createGhClientFromAuth,

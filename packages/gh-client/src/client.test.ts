@@ -29,6 +29,7 @@ function fakeOctokit(over: { getContent?: GetContentFn } = {}) {
         createTree: vi.fn(async () => ({ data: { sha: "TREESHA" } })),
         createCommit: vi.fn(async () => ({ data: { sha: "COMMITSHA" } })),
         createRef: vi.fn(async () => ({ data: {} })),
+        updateRef: vi.fn(async () => ({ data: {} })),
       },
       pulls: {
         create: vi.fn(async () => ({
@@ -260,5 +261,44 @@ describe("getPullRequest", () => {
       err = e;
     }
     expect((err as GhClientError).code).toBe("NOT_FOUND");
+  });
+});
+
+describe("commitFiles(§6.5 質問ログの直接 commit)", () => {
+  it("既存ブランチ先端に blob→tree→commit を積み updateRef で前進させる", async () => {
+    const oct = fakeOctokit();
+    const gh = createGhClient(oct as unknown as OctokitLike);
+    const r = await gh.commitFiles({
+      repo: "o/r",
+      branch: "main",
+      message: "chore: add question q-2026-0001",
+      files: [{ path: "questions/open/q-2026-0001.md", content: "x" }],
+    });
+    expect(r).toEqual({ sha: "COMMITSHA" });
+    expect(oct.rest.git.getRef).toHaveBeenCalledWith({ owner: "o", repo: "r", ref: "heads/main" });
+    expect(oct.rest.git.createCommit).toHaveBeenCalledWith(
+      expect.objectContaining({ message: "chore: add question q-2026-0001", parents: ["BASESHA"] }),
+    );
+    expect(oct.rest.git.updateRef).toHaveBeenCalledWith({
+      owner: "o",
+      repo: "r",
+      ref: "heads/main",
+      sha: "COMMITSHA",
+    });
+    expect(oct.rest.git.createRef).not.toHaveBeenCalled(); // 新ブランチは作らない
+    expect(oct.rest.pulls.create).not.toHaveBeenCalled(); // PR も作らない
+  });
+
+  it("updateRef の 422(non-fast-forward)は CONFLICT", async () => {
+    const oct = fakeOctokit();
+    oct.rest.git.updateRef.mockRejectedValueOnce({ status: 422 });
+    const gh = createGhClient(oct as unknown as OctokitLike);
+    let err: unknown;
+    try {
+      await gh.commitFiles({ repo: "o/r", branch: "main", message: "m", files: [] });
+    } catch (e) {
+      err = e;
+    }
+    expect((err as GhClientError).code).toBe("CONFLICT");
   });
 });

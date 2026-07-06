@@ -77,6 +77,9 @@ function makeGh(over: Partial<GhClient> = {}): GhClient {
     getPullRequest: vi.fn(async () => {
       throw new Error("not used in extractor tests");
     }),
+    commitFiles: vi.fn(async () => {
+      throw new Error("not used in extractor tests");
+    }),
     getFileContents: vi.fn(async () => null),
     ...over,
   };

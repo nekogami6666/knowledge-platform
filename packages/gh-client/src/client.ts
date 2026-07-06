@@ -67,7 +67,17 @@ export interface GetFileOptions {
   ref?: string;
 }
 
-/** gh-client が公開する最小操作(F1 extractor / 将来の bot 自動マージが消費)。 */
+/** 既存ブランチへ複数ファイルを1コミットで積むオプション(§6.5 質問ログの直接 commit 用)。 */
+export interface CommitFilesOptions {
+  /** "org/name"。 */
+  repo: string;
+  /** commit 先の既存ブランチ(例 "main")。 */
+  branch: string;
+  message: string;
+  files: readonly FileChange[];
+}
+
+/** gh-client が公開する最小操作(F1 extractor / bot 代理マージ / C5 gap-tracker が消費)。 */
 export interface GhClient {
   /** 複数ファイルを1コミットにまとめた PR を作成する(Git Data API)。 */
   createPullRequest(opts: CreatePrOptions): Promise<{ number: number; url: string }>;
@@ -77,6 +87,12 @@ export interface GhClient {
   mergePullRequest(opts: MergePrOptions): Promise<void>;
   /** PR の現在状態を取得する(マージ前の clean 確認・冪等判定用)。404 は NOT_FOUND。 */
   getPullRequest(repo: string, number: number): Promise<PrDetail>;
+  /**
+   * 既存ブランチへ複数ファイルを1コミットで積む(Git Data API + updateRef)。
+   * §6.5: questions/open のログ commit 用(PR を経ない。呼び出し側が事前に validateRepo で防御する)。
+   * ブランチ先端が動いた場合の updateRef 失敗(non-fast-forward)は CONFLICT。
+   */
+  commitFiles(opts: CommitFilesOptions): Promise<{ sha: string }>;
   /** ファイル内容と blob SHA を取得する。存在しなければ null(id-allocator CAS 用)。 */
   getFileContents(opts: GetFileOptions): Promise<{ content: string; sha: string } | null>;
 }
@@ -115,6 +131,9 @@ export interface OctokitLike {
         parents: string[];
       }): Promise<{ data: { sha: string } }>;
       createRef(p: { owner: string; repo: string; ref: string; sha: string }): Promise<{
+        data: unknown;
+      }>;
+      updateRef(p: { owner: string; repo: string; ref: string; sha: string }): Promise<{
         data: unknown;
       }>;
     };
@@ -175,6 +194,36 @@ function statusOf(e: unknown): number | undefined {
   return undefined;
 }
 
+/** baseSha の上に files を1コミットとして積み、その commit SHA を返す(Git Data API 共通配管)。 */
+async function buildCommit(
+  octokit: OctokitLike,
+  owner: string,
+  repo: string,
+  baseSha: string,
+  files: readonly FileChange[],
+  message: string,
+): Promise<string> {
+  const tree: TreeItem[] = [];
+  for (const f of files) {
+    const blob = await octokit.rest.git.createBlob({
+      owner,
+      repo,
+      content: Buffer.from(f.content, "utf8").toString("base64"),
+      encoding: "base64",
+    });
+    tree.push({ path: f.path, mode: "100644", type: "blob", sha: blob.data.sha });
+  }
+  const treeRes = await octokit.rest.git.createTree({ owner, repo, base_tree: baseSha, tree });
+  const commit = await octokit.rest.git.createCommit({
+    owner,
+    repo,
+    message,
+    tree: treeRes.data.sha,
+    parents: [baseSha],
+  });
+  return commit.data.sha;
+}
+
 /** Octokit を注入して {@link GhClient} を組み立てる(テストは fake を渡す)。 */
 export function createGhClient(octokit: OctokitLike): GhClient {
   return {
@@ -183,35 +232,19 @@ export function createGhClient(octokit: OctokitLike): GhClient {
       const base = opts.base ?? "main";
       try {
         const baseRef = await octokit.rest.git.getRef({ owner, repo, ref: `heads/${base}` });
-        const baseSha = baseRef.data.object.sha;
-        const tree: TreeItem[] = [];
-        for (const f of opts.files) {
-          const blob = await octokit.rest.git.createBlob({
-            owner,
-            repo,
-            content: Buffer.from(f.content, "utf8").toString("base64"),
-            encoding: "base64",
-          });
-          tree.push({ path: f.path, mode: "100644", type: "blob", sha: blob.data.sha });
-        }
-        const treeRes = await octokit.rest.git.createTree({
+        const commitSha = await buildCommit(
+          octokit,
           owner,
           repo,
-          base_tree: baseSha,
-          tree,
-        });
-        const commit = await octokit.rest.git.createCommit({
-          owner,
-          repo,
-          message: opts.title,
-          tree: treeRes.data.sha,
-          parents: [baseSha],
-        });
+          baseRef.data.object.sha,
+          opts.files,
+          opts.title,
+        );
         await octokit.rest.git.createRef({
           owner,
           repo,
           ref: `refs/heads/${opts.head}`,
-          sha: commit.data.sha,
+          sha: commitSha,
         });
         const pr = await octokit.rest.pulls.create({
           owner,
@@ -226,6 +259,35 @@ export function createGhClient(octokit: OctokitLike): GhClient {
         if (e instanceof GhClientError) throw e;
         const code = statusOf(e) === 409 || statusOf(e) === 422 ? "CONFLICT" : "API_ERROR";
         throw new GhClientError(code, `PR 作成に失敗しました(${opts.repo} ${opts.head})`, {
+          cause: e,
+        });
+      }
+    },
+
+    async commitFiles(opts) {
+      const { owner, repo } = splitRepo(opts.repo);
+      try {
+        const ref = await octokit.rest.git.getRef({ owner, repo, ref: `heads/${opts.branch}` });
+        const commitSha = await buildCommit(
+          octokit,
+          owner,
+          repo,
+          ref.data.object.sha,
+          opts.files,
+          opts.message,
+        );
+        // fast-forward 前提の updateRef(force しない)。先端が動いていたら 422 → CONFLICT。
+        await octokit.rest.git.updateRef({
+          owner,
+          repo,
+          ref: `heads/${opts.branch}`,
+          sha: commitSha,
+        });
+        return { sha: commitSha };
+      } catch (e) {
+        if (e instanceof GhClientError) throw e;
+        const code = statusOf(e) === 409 || statusOf(e) === 422 ? "CONFLICT" : "API_ERROR";
+        throw new GhClientError(code, `commit に失敗しました(${opts.repo} ${opts.branch})`, {
           cause: e,
         });
       }

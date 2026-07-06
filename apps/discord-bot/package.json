@@ -7,6 +7,14 @@
     "./qa": {
       "types": "./dist/qa-search.d.ts",
       "default": "./dist/qa-search.js"
+    },
+    "./store": {
+      "types": "./dist/db.d.ts",
+      "default": "./dist/db.js"
+    },
+    "./sqlite-store": {
+      "types": "./dist/sqlite-store.d.ts",
+      "default": "./dist/sqlite-store.js"
     }
   },
   "scripts": {
