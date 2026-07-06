@@ -6,6 +6,7 @@
 import { randomUUID } from "node:crypto";
 import type { GhClient } from "@stratum/gh-client";
 import { qIdSchema } from "@stratum/kb-core";
+import type { PromptStore } from "@stratum/llm";
 import {
   ActionRowBuilder,
   ButtonBuilder,
@@ -26,8 +27,14 @@ import {
 } from "discord.js";
 import type { Logger } from "pino";
 import type { AskResult } from "./ask.js";
+import { handleLightbulb } from "./capture.js";
 import { SerialQueue } from "./concurrency.js";
-import { type ChannelsConfig, isChannelAllowed, type OpsConfig } from "./config.js";
+import {
+  type ChannelsConfig,
+  isChannelAllowed,
+  type MembersConfig,
+  type OpsConfig,
+} from "./config.js";
 import type { BotStore } from "./db.js";
 import { withCorrelation } from "./logger.js";
 import { isoJst } from "./time.js";
@@ -59,8 +66,14 @@ export interface BotDeps {
   guildId?: string;
   /** 👍 代理マージの設定(§6.3)。未設定(または channel_id/kb_repo が null)なら機能 OFF。 */
   ops?: OpsConfig;
-  /** GitHub クライアント(代理マージ用)。認証未整備なら undefined = 機能 OFF。 */
+  /** GitHub クライアント(代理マージ・💡 捕捉用)。認証未整備なら undefined = 機能 OFF。 */
   gh?: GhClient;
+  /** members.yaml(💡 捕捉の owner 写像・§6.4)。未整備なら空で可。 */
+  members?: MembersConfig;
+  /** プロンプトローダ(💡 捕捉の triage/draft・§6.4)。未指定なら 💡 捕捉 OFF。 */
+  promptStore?: PromptStore;
+  /** Agent SDK の cwd(💡 捕捉はツール無し単発だが必須項目)。bot は CLONES_DIR。 */
+  clonesDir?: string;
 }
 
 /** §9.2 default-deny: 許可されないチャンネルへの拒否メッセージ。許可なら null。 */
@@ -110,9 +123,10 @@ const stubHandler: AskHandler = async () => ({
 
 /**
  * Gateway intents(§9.5 最小権限)。/ask と 👍👎 ボタンは interaction なので `Guilds` で足りる。追加分:
- * - `GuildMessageReactions`: 👍 代理マージ(§6.3)が extractor の webhook 通知への 👍 を拾う。
+ * - `GuildMessageReactions`: 👍 代理マージ(§6.3)と 💡 捕捉(§6.4)が guild のリアクションを拾う。
  * - `GuildMessages`: gap 回答捕捉(§6.5 ④UI・PR-D2)が依頼メッセージへの「返信」を MessageCreate で検知する
  *   (非 privileged)。
+ * - `DirectMessageReactions`: 💡 捕捉のレビュー DM への 👍(§6.4・PR-E1b)を拾う(非 privileged)。
  * - `MessageContent`(privileged・Developer Portal で有効化。§9.2 が想定済み): 代理マージの PR URL と
  *   gap 依頼の q-ID を webhook 本文から読むために必要。
  */
@@ -120,14 +134,21 @@ export const BOT_INTENTS = [
   GatewayIntentBits.Guilds,
   GatewayIntentBits.GuildMessages,
   GatewayIntentBits.GuildMessageReactions,
+  GatewayIntentBits.DirectMessageReactions,
   GatewayIntentBits.MessageContent,
 ] as const;
 
 /**
- * Partials(§6.3 代理マージ)。webhook 通知は bot のキャッシュに無いメッセージなので、
- * リアクションイベントが partial で届く。fetch で実体化するために宣言が必須。
+ * Partials(§6.3 代理マージ / §6.4 💡 DM)。webhook 通知や DM は bot のキャッシュに無いメッセージ・
+ * チャンネルなので、リアクションイベントが partial で届く。fetch で実体化するために宣言が必須
+ * (DM チャンネルは `Partials.Channel` が無いとイベント自体が発火しない)。
  */
-export const BOT_PARTIALS = [Partials.Message, Partials.Reaction, Partials.User] as const;
+export const BOT_PARTIALS = [
+  Partials.Message,
+  Partials.Reaction,
+  Partials.User,
+  Partials.Channel,
+] as const;
 
 /** Bot クライアントを構築する(login はしない。呼び出し側で client.login する)。 */
 export function createBot(deps: BotDeps): Client {
@@ -165,8 +186,19 @@ export function createBot(deps: BotDeps): Client {
   });
 
   // §6.3: #stratum-ops の extractor 通知への 👍 で PR を代理マージ(ops/gh 未設定なら実質 no-op)。
+  // §6.4 ③-a: 💡 でナレッジ候補を捕捉(kb_repo/gh/promptStore が無ければ実質 no-op)。
   client.on(Events.MessageReactionAdd, async (reaction, user) => {
     await handleProxyMergeReaction(reaction, user, deps);
+    await handleLightbulb(reaction, user, {
+      logger: deps.logger,
+      channels: deps.channels,
+      store: deps.store,
+      members: deps.members ?? { members: [] },
+      cwd: deps.clonesDir ?? ".",
+      ops: deps.ops,
+      gh: deps.gh,
+      promptStore: deps.promptStore,
+    });
   });
 
   // §6.5 ④UI(PR-D2): gap 依頼(webhook)への「返信」を捕捉して gap_answer をキューへ。
@@ -246,6 +278,10 @@ export interface ProxyMergeInput {
   reactorIsBot: boolean;
   content: string;
   ops: OpsConfig;
+  /** DM ルート(§6.4 💡 capture のレビュー DM)。既定 false=guild の ops ルート(§6.3)。 */
+  isDm?: boolean;
+  /** メッセージが自 bot の投稿か(DM ルートの信頼境界。capture が送った DM のみ対象)。 */
+  messageAuthorIsSelf?: boolean;
 }
 
 export type ProxyMergeDecision =
@@ -253,19 +289,27 @@ export type ProxyMergeDecision =
   | { merge: false; reason: string };
 
 /**
- * 👍 代理マージのガード判定(§6.3・純関数)。すべて満たす場合のみ merge:
- * 👍 である / ops 設定済み / #stratum-ops チャンネル / webhook(extractor 通知)のメッセージ /
- * 人間のリアクション / 本文の PR URL が ops.kb_repo のもの。
+ * 👍 代理マージのガード判定(§6.3 ops ルート / §6.4 DM ルート・純関数)。共通で
+ * 👍 である / 人間のリアクション / 本文の PR URL が ops.kb_repo のもの、を要求する。ルート別:
+ * - ops ルート(guild): #stratum-ops チャンネル + webhook 投稿(extractor / gap-tracker 通知)。
+ * - DM ルート(§6.4): bot が起票者に送った capture レビュー DM(自 bot の投稿)。DM チャンネル自体が
+ *   bot↔本人の信頼境界のため、チャンネル一致・webhook 判定は不要。
  */
 export function proxyMergeDecision(input: ProxyMergeInput): ProxyMergeDecision {
   const { ops } = input;
-  if (ops.channel_id === null || ops.kb_repo === null) {
-    return { merge: false, reason: "ops-config-off" };
-  }
+  if (ops.kb_repo === null) return { merge: false, reason: "ops-config-off" };
   if (input.emojiName !== "👍") return { merge: false, reason: "not-thumbsup" };
-  if (input.channelId !== ops.channel_id) return { merge: false, reason: "not-ops-channel" };
-  if (input.messageWebhookId === null) return { merge: false, reason: "not-webhook-message" };
   if (input.reactorIsBot) return { merge: false, reason: "bot-reactor" };
+
+  if (input.isDm === true) {
+    // DM は bot と本人の 2 者しか居ない。capture が送った DM(自 bot 投稿)のみを承認導線とする。
+    if (input.messageAuthorIsSelf !== true) return { merge: false, reason: "not-self-dm" };
+  } else {
+    if (ops.channel_id === null) return { merge: false, reason: "ops-config-off" };
+    if (input.channelId !== ops.channel_id) return { merge: false, reason: "not-ops-channel" };
+    if (input.messageWebhookId === null) return { merge: false, reason: "not-webhook-message" };
+  }
+
   const pr = parseGithubPrUrl(input.content);
   if (pr === null) return { merge: false, reason: "no-pr-url" };
   if (pr.repo !== ops.kb_repo) return { merge: false, reason: "repo-not-allowed" };
@@ -273,7 +317,7 @@ export function proxyMergeDecision(input: ProxyMergeInput): ProxyMergeDecision {
 }
 
 /**
- * #stratum-ops の extractor 通知への 👍 で PR を代理マージする(§6.3 / C1 拡張)。
+ * 👍 代理マージ(§6.3 ops ルート / §6.4 💡 capture の DM ルート)。
  * validate 赤(mergeable_state != clean)はマージしない(ADR-0004 D2)。マージ済みは冪等に案内のみ。
  * 例外は handleButton と同じ封じ込め(catch → log + 返信試行)。
  */
@@ -285,7 +329,7 @@ export async function handleProxyMergeReaction(
   const { ops, gh } = deps;
   if (ops === undefined || gh === undefined) return; // 機能 OFF(設定か認証が無い)
   try {
-    // webhook メッセージはキャッシュ外で partial として届くため、実体を fetch してから判定する。
+    // webhook メッセージ・DM はキャッシュ外で partial として届くため、実体を fetch してから判定する。
     const r = reaction.partial ? await reaction.fetch() : reaction;
     const message = r.message.partial ? await r.message.fetch() : r.message;
     const reactor = user.partial ? await user.fetch() : user;
@@ -296,6 +340,10 @@ export async function handleProxyMergeReaction(
       reactorIsBot: reactor.bot,
       content: message.content,
       ops,
+      // guildId=null は DM。messageAuthorIsSelf は capture が送った DM(自 bot 投稿)かの判定。
+      isDm: message.guildId === null,
+      messageAuthorIsSelf:
+        message.author?.id !== undefined && message.author.id === message.client?.user?.id,
     });
     if (!decision.merge) return; // 対象外のリアクションには反応しない(通常運用で大量に発生する)
 

@@ -181,13 +181,15 @@ describe("askCommand (/ask の登録定義)", () => {
 });
 
 describe("BOT_INTENTS (§9.5 最小権限)", () => {
-  it("Guilds + GuildMessages + リアクション + MessageContent(§6.3 代理マージ・§6.5 gap 回答捕捉)", () => {
-    // GuildMessages は gap 依頼への「返信」検知(PR-D2)、GuildMessageReactions は 👍 代理マージ、
-    // MessageContent(privileged)は webhook 本文の PR URL / q-ID 読み取りに必要(§9.2 が Portal 有効化を想定)。
+  it("Guilds + GuildMessages + リアクション(guild/DM)+ MessageContent(§6.3/§6.4/§6.5)", () => {
+    // GuildMessages は gap 依頼への「返信」検知(PR-D2)、GuildMessageReactions は 👍 代理マージ + 💡 捕捉、
+    // DirectMessageReactions は 💡 レビュー DM の 👍(PR-E1)、MessageContent(privileged)は webhook 本文の
+    // PR URL / q-ID 読み取りに必要(§9.2 が Portal 有効化を想定)。
     expect([...BOT_INTENTS]).toEqual([
       GatewayIntentBits.Guilds,
       GatewayIntentBits.GuildMessages,
       GatewayIntentBits.GuildMessageReactions,
+      GatewayIntentBits.DirectMessageReactions,
       GatewayIntentBits.MessageContent,
     ]);
   });
@@ -266,7 +268,45 @@ describe("proxyMergeDecision (§6.3 のガード判定)", () => {
   });
 });
 
-/** handleProxyMergeReaction 用の最小 fake(webhook 通知メッセージ + 人間のリアクション)。 */
+describe("proxyMergeDecision — DM ルート(§6.4 💡 capture)", () => {
+  const dmBase = {
+    emojiName: "👍" as string | null,
+    channelId: "DM",
+    messageWebhookId: null as string | null,
+    reactorIsBot: false,
+    content: "💡 PR: https://github.com/org/knowledge-base/pull/12",
+    ops: opsOn,
+    isDm: true,
+    messageAuthorIsSelf: true,
+  };
+  it("自 bot の DM(capture のレビュー DM)への 👍 は merge(webhook 不要)", () => {
+    expect(proxyMergeDecision(dmBase)).toEqual({
+      merge: true,
+      repo: "org/knowledge-base",
+      number: 12,
+    });
+  });
+  it("自 bot の投稿でない DM は無視(他人の DM に反応しない)", () => {
+    expect(proxyMergeDecision({ ...dmBase, messageAuthorIsSelf: false })).toEqual({
+      merge: false,
+      reason: "not-self-dm",
+    });
+  });
+  it("DM ルートはチャンネル一致を要求しない(DM 自体が信頼境界)", () => {
+    expect(proxyMergeDecision({ ...dmBase, channelId: "ANYTHING" })).toEqual({
+      merge: true,
+      repo: "org/knowledge-base",
+      number: 12,
+    });
+  });
+  it("DM でも kb_repo 以外のリポは拒否", () => {
+    expect(
+      proxyMergeDecision({ ...dmBase, content: "https://github.com/org/other/pull/1" }),
+    ).toEqual({ merge: false, reason: "repo-not-allowed" });
+  });
+});
+
+/** handleProxyMergeReaction 用の最小 fake(webhook 通知メッセージ or 💡 DM + 人間のリアクション)。 */
 function fakeReaction(
   over: {
     emoji?: string | null;
@@ -274,6 +314,12 @@ function fakeReaction(
     webhookId?: string | null;
     content?: string;
     userBot?: boolean;
+    /** null で DM(§6.4)。既定は guild("G1")。 */
+    guildId?: string | null;
+    /** メッセージ投稿者 ID(DM ルートの自 bot 判定用)。 */
+    authorId?: string;
+    /** client.user.id(自 bot ID)。authorId と一致すれば messageAuthorIsSelf=true。 */
+    selfId?: string;
   } = {},
 ): { reaction: MessageReaction; user: User; replies: string[] } {
   const replies: string[] = [];
@@ -284,6 +330,9 @@ function fakeReaction(
     content:
       over.content ?? "📥 抽出 PR を作成しました: https://github.com/org/knowledge-base/pull/12",
     id: "MSG1",
+    guildId: over.guildId !== undefined ? over.guildId : "G1",
+    author: over.authorId !== undefined ? { id: over.authorId } : undefined,
+    client: over.selfId !== undefined ? { user: { id: over.selfId } } : undefined,
     reply: async (s: string) => {
       replies.push(s);
     },
@@ -353,6 +402,38 @@ describe("handleProxyMergeReaction (§6.3 👍 代理マージ)", () => {
     await handleProxyMergeReaction(reaction, user, mkDeps(logger, store, undefined));
     expect(queued).toHaveLength(0);
     expect(replies).toHaveLength(0);
+  });
+
+  it("💡 capture の DM(自 bot 投稿)への 👍 でマージ(§6.4 DM ルート)", async () => {
+    const { logger } = fakeLogger();
+    const { store, queued } = fakeStore();
+    const { gh, merge } = fakeGh();
+    const { reaction, user, replies } = fakeReaction({
+      guildId: null, // DM
+      webhookId: null, // DM は webhook ではない
+      authorId: "BOT", // capture が送った DM(自 bot 投稿)
+      selfId: "BOT",
+      content: "💡 をナレッジ化する PR: https://github.com/org/knowledge-base/pull/12",
+    });
+    await handleProxyMergeReaction(reaction, user, mkDeps(logger, store, gh));
+    expect(merge).toHaveBeenCalledWith({ repo: "org/knowledge-base", number: 12 });
+    expect((queued[0] as { type: string }).type).toBe("pr_merge");
+    expect(replies[0]).toContain("✅");
+  });
+
+  it("他人の DM(自 bot 投稿でない)への 👍 は gh に触れない", async () => {
+    const { logger } = fakeLogger();
+    const { store } = fakeStore();
+    const { gh, getPr } = fakeGh();
+    const { reaction, user } = fakeReaction({
+      guildId: null,
+      webhookId: null,
+      authorId: "SOMEONE", // 自 bot ではない
+      selfId: "BOT",
+      content: "https://github.com/org/knowledge-base/pull/12",
+    });
+    await handleProxyMergeReaction(reaction, user, mkDeps(logger, store, gh));
+    expect(getPr).not.toHaveBeenCalled();
   });
 
   it("マージ済みは冪等(merge を呼ばず案内 reply)", async () => {

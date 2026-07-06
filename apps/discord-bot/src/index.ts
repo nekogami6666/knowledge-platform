@@ -95,7 +95,19 @@ async function main(): Promise<void> {
     );
   };
 
-  const bot = createBot({ logger, channels, store, onAsk, guildId: env.DISCORD_GUILD_ID, ops, gh });
+  const bot = createBot({
+    logger,
+    channels,
+    store,
+    onAsk,
+    guildId: env.DISCORD_GUILD_ID,
+    ops,
+    gh,
+    // §6.4 💡 捕捉: owner 写像 + triage/draft プロンプト + Agent SDK cwd(kb_repo/gh が無ければ OFF)。
+    members,
+    promptStore,
+    clonesDir: env.CLONES_DIR,
+  });
   await bot.login(env.DISCORD_TOKEN);
   logger.info("discord-bot started");
 }
