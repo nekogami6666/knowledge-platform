@@ -65,8 +65,23 @@ GitHub → Settings → Developer settings → Fine-grained personal access toke
 - 月次で `修正マージ率 = edited-before-merge 数 ÷ extractor PR 総数` を確認し、悪化したら
   extract-review(過去10件評価)を再実施してプロンプトを改善する。
 
-## GitHub App への移行(§14 #9 決定後)
+## GitHub App(PR/書き込み)+ PAT(clone/読み取り)の hybrid(ADR-0013 D4)
 
-App 発行・組織インストール後: secrets に `GH_APP_ID` / `GH_APP_PRIVATE_KEY` / `GH_APP_INSTALLATION_ID` を
-投入(App trio は PAT より優先される・ADR-0011)→ 動作確認 → `EXTRACTOR_PAT` を削除し PAT を revoke。
-コード変更は不要。
+**方針**: PR 作成・commit・API(gh-client 経由すべて)= GitHub App / git clone・fetch = 個人 PAT。
+App の秘密鍵は clone URL に使えないため clone は PAT を継続し、書き込みだけ組織所有の App にする。
+
+App 発行・組織インストール後の手順:
+
+1. **App 権限**: knowledge-base = **Contents: Read and write** + **Pull requests: Read and write**。
+   minutes は App 不要(PAT で clone するだけ)。
+2. **Installation ID** を控える(App の Configure ページ URL 末尾、または Settings → Installations)。
+3. **secrets 投入**: `GH_APP_ID` / `GH_APP_PRIVATE_KEY`(.pem 全文)/ `GH_APP_INSTALLATION_ID`。
+   秘密鍵は `normalizePrivateKey` が両対応(PEM 全文 / `\n` 埋め込み / base64 いずれも可)。
+4. **`EXTRACTOR_PAT` は残す**(clone 用)。fine-grained・minutes = Contents read(KB を clone するなら read も)。
+5. 動作確認: `workflow_dispatch` で dry-run → 実 PR は `EXTRACTOR_REAL_PR=1` で監督付き1回(D1(d))。
+   PR の作成者が **App**(bot 名義)になっていれば hybrid 成立。
+
+ワークフローは `GITHUB_TOKEN`(PAT)フォールバックを張らないため、App trio が欠けると gh-client が
+AUTH で fail-loud する(誤って個人 PAT で PR を立てない)。コード変更は不要。
+将来 clone も App にするなら `actions/create-github-app-token` を1ステップ足して installation token を
+clone URL に使う(§14 #9 完全移行時の follow-up)。

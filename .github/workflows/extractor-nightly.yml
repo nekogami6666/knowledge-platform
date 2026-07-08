@@ -66,11 +66,12 @@ jobs:
           ANTHROPIC_AWS_API_KEY: ${{ secrets.ANTHROPIC_AWS_API_KEY }}
           ANTHROPIC_AWS_WORKSPACE_ID: ${{ secrets.ANTHROPIC_AWS_WORKSPACE_ID }}
           AWS_REGION: ${{ secrets.AWS_REGION }}
-          # 認証は App trio 優先・無ければ token(ADR-0011)。暫定 PAT は GITHUB_TOKEN に写す(ADR-0013 D1(e))。
+          # hybrid(ADR-0013 D4): PR/commit/API は GitHub App のみ。gh-client は App trio が揃えば App を使う。
+          # GITHUB_TOKEN(PAT)フォールバックは張らない=App 未設定なら fail-loud(誤って個人 PAT で PR を立てない)。
+          # git clone は PAT(上の Generate extractor.yaml の URL)。read=PAT / write=App。
           GITHUB_APP_ID: ${{ secrets.GH_APP_ID }}
           GITHUB_APP_PRIVATE_KEY: ${{ secrets.GH_APP_PRIVATE_KEY }}
           GITHUB_APP_INSTALLATION_ID: ${{ secrets.GH_APP_INSTALLATION_ID }}
-          GITHUB_TOKEN: ${{ secrets.EXTRACTOR_PAT }}
           DISCORD_OPS_WEBHOOK: ${{ secrets.DISCORD_OPS_WEBHOOK }}
           CONFIG_DIR: apps/extractor/config
           CLONES_DIR: .clones
