@@ -50,9 +50,12 @@ describe("materializeOne — new", () => {
   it("learning → knowledge/<domain>/kb-2026-0144-<slug>.md(meeting 出典・round-trip)", async () => {
     const input: MaterializeInput = {
       kbRoot: "/kb",
-      minutesRepo: "org/minutes",
-      minutesPath: "2026/06/2026-06-10-hw-weekly.md",
-      minutesRef: "abc123",
+      source: {
+        kind: "meeting",
+        repo: "org/minutes",
+        path: "2026/06/2026-06-10-hw-weekly.md",
+        ref: "abc123",
+      },
       fallbackPeople: ["yamada"],
       candidate: {
         kind: "learning",
@@ -90,9 +93,7 @@ describe("materializeOne — new", () => {
     const r = await materializeOne(
       {
         kbRoot: "/kb",
-        minutesRepo: "org/minutes",
-        minutesPath: "m.md",
-        minutesRef: "sha",
+        source: { kind: "meeting", repo: "org/minutes", path: "m.md", ref: "sha" },
         fallbackPeople: [],
         candidate: {
           kind: "decision",
@@ -121,9 +122,7 @@ describe("materializeOne — new", () => {
     const r = await materializeOne(
       {
         kbRoot: "/kb",
-        minutesRepo: "org/minutes",
-        minutesPath: "m.md",
-        minutesRef: "sha",
+        source: { kind: "meeting", repo: "org/minutes", path: "m.md", ref: "sha" },
         fallbackPeople: [],
         candidate: { kind: "decision", title: "x", decision: "y", deciders: [], confidence: "low" },
         verdict: { classification: "new", reason: "新規" },
@@ -138,9 +137,7 @@ describe("materializeOne — new", () => {
 describe("materializeOne — duplicate", () => {
   const dupInput = (minutesPath: string): MaterializeInput => ({
     kbRoot: "/kb",
-    minutesRepo: "org/minutes",
-    minutesPath,
-    minutesRef: "sha2",
+    source: { kind: "meeting", repo: "org/minutes", path: minutesPath, ref: "sha2" },
     fallbackPeople: [],
     candidate: {
       kind: "learning",
@@ -184,6 +181,39 @@ describe("materializeOne — duplicate", () => {
     const parsed = parseEntry(r.files[0]?.content ?? "", "knowledge");
     expect(parsed.frontmatter.sources).toHaveLength(1);
   });
+
+  it("pr 出典も kind 別の同一性で重複判定する(PR-P2 汎用化)", async () => {
+    // 既存が pr 出典を1件持つエントリ。同一 repo+number は追記せず、異なる number は追記する。
+    const withPr = existing0142.replace(
+      'sources:\n  - kind: meeting\n    repo: org/minutes\n    path: 2026/06/2026-06-03-hw-weekly.md\n    lines: "L120-L141"',
+      "sources:\n  - kind: pr\n    repo: org/dev-repo\n    number: 42",
+    );
+    const base = dupInput("ignored.md");
+    const same: MaterializeInput = {
+      ...base,
+      source: { kind: "pr", repo: "org/dev-repo", number: 42 },
+    };
+    const diff: MaterializeInput = {
+      ...base,
+      source: { kind: "pr", repo: "org/dev-repo", number: 43 },
+    };
+    const rSame = await materializeOne(same, {
+      idStore: memStore(SEED),
+      now: NOW,
+      readFile: async () => withPr,
+    });
+    expect(parseEntry(rSame.files[0]?.content ?? "", "knowledge").frontmatter.sources).toHaveLength(
+      1,
+    );
+    const rDiff = await materializeOne(diff, {
+      idStore: memStore(SEED),
+      now: NOW,
+      readFile: async () => withPr,
+    });
+    expect(parseEntry(rDiff.files[0]?.content ?? "", "knowledge").frontmatter.sources).toHaveLength(
+      2,
+    );
+  });
 });
 
 describe("materializeOne — contradiction", () => {
@@ -191,9 +221,12 @@ describe("materializeOne — contradiction", () => {
     const r = await materializeOne(
       {
         kbRoot: "/kb",
-        minutesRepo: "org/minutes",
-        minutesPath: "2026/06/2026-06-10-hw-weekly.md",
-        minutesRef: "sha3",
+        source: {
+          kind: "meeting",
+          repo: "org/minutes",
+          path: "2026/06/2026-06-10-hw-weekly.md",
+          ref: "sha3",
+        },
         fallbackPeople: ["yamada"],
         candidate: {
           kind: "learning",

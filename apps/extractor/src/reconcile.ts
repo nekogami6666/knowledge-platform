@@ -35,6 +35,8 @@ export interface ReconcileDeps {
   retry?: RetryOptions;
   /** LLM タイムアウト(ms)。既定 300s(実 KB の agentic search が既定 120s を超えうる)。 */
   timeoutMs?: number;
+  /** コスト記録のアプリ名(§7.3)。既定 "extractor"。pr-miner 等が流用する際に上書きする。 */
+  app?: string;
 }
 
 /** 候補を突合プロンプト用のテキストに要約する(agent が KB を検索する手掛かり)。 */
@@ -80,7 +82,7 @@ export async function reconcileCandidate(
     () =>
       search(
         {
-          app: "extractor",
+          app: deps.app ?? "extractor",
           role: prompt.role,
           systemPrompt: prompt.body,
           prompt: candidateSummary(candidate),

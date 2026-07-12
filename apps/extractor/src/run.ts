@@ -8,7 +8,7 @@
 import { join } from "node:path";
 import { performance } from "node:perf_hooks";
 import type { FileChange, GhClient } from "@stratum/gh-client";
-import type { IdCounterStore } from "@stratum/kb-core";
+import type { IdCounterStore, Source } from "@stratum/kb-core";
 import type { DecisionCandidate, LearningCandidate } from "./candidate.js";
 import { mapWithLimit } from "./concurrency.js";
 import type { ExtractorConfig } from "./config.js";
@@ -266,12 +266,18 @@ export async function runExtractor(deps: RunDeps): Promise<RunSummary> {
         });
         continue;
       }
+      // 出典 = 議事録(meeting)。lines は候補ごとに異なるためここで合成する。
+      const source: Source = {
+        kind: "meeting",
+        repo: config.minutes.repo,
+        path,
+        ref: headSha,
+        ...(c.lines !== undefined ? { lines: c.lines } : {}),
+      };
       const change = await materializeOne(
         {
           kbRoot,
-          minutesRepo: config.minutes.repo,
-          minutesPath: path,
-          minutesRef: headSha,
+          source,
           fallbackPeople: participants,
           candidate: c,
           verdict: r.verdict,

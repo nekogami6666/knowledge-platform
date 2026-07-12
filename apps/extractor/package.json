@@ -19,6 +19,18 @@
     "./concurrency": {
       "types": "./dist/concurrency.d.ts",
       "default": "./dist/concurrency.js"
+    },
+    "./reconcile": {
+      "types": "./dist/reconcile.d.ts",
+      "default": "./dist/reconcile.js"
+    },
+    "./materialize": {
+      "types": "./dist/materialize.d.ts",
+      "default": "./dist/materialize.js"
+    },
+    "./verdict": {
+      "types": "./dist/verdict.d.ts",
+      "default": "./dist/verdict.js"
     }
   },
   "scripts": {
