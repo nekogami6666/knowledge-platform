@@ -1,0 +1,102 @@
+# 週次 PR マイニング(design.md §6.4 ③-c / C4 / ADR-0009 / ADR-0013)。対象リポの直近マージ済み PR から
+# 設計判断・ハマりどころを抽出し、knowledge-base に週次 PR を提案する。**実 PR は PR_MINER_REAL=1 のときのみ**
+# (既定 dry-run)。実行境界は extractor-nightly と同じ(ADR-0013: persist-credentials:false / トークン非残留)。
+#
+# extractor との差(意図的な簡素化): pr-miner は KB を「読むだけ」で PR は gh-client(App)が API で作るため、
+# アプリ内 clone を持たず KB を actions/checkout で配置し KB_ROOT で渡す(depth 1 で足りる)。
+#
+# 必要 secrets:
+#   Claude on AWS: ANTHROPIC_AWS_API_KEY / ANTHROPIC_AWS_WORKSPACE_ID / AWS_REGION
+#   GitHub 書き込み(KB への PR): GH_APP_ID / GH_APP_PRIVATE_KEY / GH_APP_INSTALLATION_ID(§14#9 の App)
+#   KB clone(読み取り): EXTRACTOR_PAT(fine-grained・KB に Contents: Read)
+#   任意: DISCORD_OPS_WEBHOOK(#stratum-ops 通知)
+# 必要 vars(リポ名はハードコードしない・ADR-0013 D3):
+#   PR_MINER_KB_REPO(例 org/knowledge-base)/ PR_MINER_TARGETS(カンマ区切り。空 = 機能 OFF・§14#5)
+# 前提(人間・runbook 参照): GitHub App が対象リポに Pull requests: Read + Issues: Read を持つこと。
+# 手順の詳細: docs/runbooks/pr-miner-weekly.md
+name: pr-miner-weekly
+
+on:
+  schedule:
+    - cron: "0 22 * * 0" # 22:00 UTC 日曜 = 07:00 JST 月曜
+  workflow_dispatch: {}
+
+jobs:
+  mine:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Enable corepack (pnpm)
+        run: corepack enable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - name: Install
+        run: pnpm install --frozen-lockfile
+      - name: Build
+        run: pnpm -r --if-present run build
+
+      # KB は checkout して読むだけ(reconcile の agentic search が探索。PR は API で作る)。
+      # persist-credentials:false でトークンを .git/config に残さない(ADR-0013 D1(a))。
+      # PR_MINER_KB_REPO 未設定ならスキップ(= 機能 OFF。以降のステップも同ガードで no-op)。
+      - name: Checkout knowledge-base
+        if: vars.PR_MINER_KB_REPO != ''
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ vars.PR_MINER_KB_REPO }}
+          token: ${{ secrets.EXTRACTOR_PAT }}
+          path: .clones/knowledge-base
+          persist-credentials: false
+          fetch-depth: 1
+
+      # pr-miner.yaml は gitignore 済み。CI では Actions vars から生成(ADR-0013 D3)。
+      # PR_MINER_TARGETS(カンマ区切り)を targets 配列に展開。空なら targets: [] = 機能 OFF。
+      - name: Generate pr-miner.yaml (from repo vars)
+        if: vars.PR_MINER_KB_REPO != ''
+        run: |
+          mkdir -p apps/pr-miner/config
+          # targets を組み立て(空なら "[]" を明示。裸の `targets:` は YAML null になり schema が拒否する)。
+          TARGETS_YAML=""
+          IFS=',' read -ra REPOS <<< "${{ vars.PR_MINER_TARGETS }}"
+          for r in "${REPOS[@]}"; do
+            r="$(echo "$r" | xargs)"
+            [ -n "$r" ] && TARGETS_YAML="${TARGETS_YAML}  - ${r}"$'\n'
+          done
+          {
+            if [ -z "$TARGETS_YAML" ]; then
+              echo "targets: []"
+            else
+              echo "targets:"
+              printf '%s' "$TARGETS_YAML"
+            fi
+            echo "kb:"
+            echo "  repo: ${{ vars.PR_MINER_KB_REPO }}"
+            echo "base_branch: main"
+            echo "window_days: 7"
+          } > apps/pr-miner/config/pr-miner.yaml
+          echo "pr-miner.yaml generated:"
+          cat apps/pr-miner/config/pr-miner.yaml
+
+      - name: Run pr-miner
+        if: vars.PR_MINER_KB_REPO != ''
+        env:
+          CLAUDE_CODE_USE_ANTHROPIC_AWS: "1"
+          ANTHROPIC_AWS_API_KEY: ${{ secrets.ANTHROPIC_AWS_API_KEY }}
+          ANTHROPIC_AWS_WORKSPACE_ID: ${{ secrets.ANTHROPIC_AWS_WORKSPACE_ID }}
+          AWS_REGION: ${{ secrets.AWS_REGION }}
+          # hybrid(ADR-0013 D4): PR/API は GitHub App のみ。GITHUB_TOKEN フォールバックは張らない
+          # (App 未設定なら fail-loud。誤って個人 PAT で PR を立てない)。KB clone は上の PAT。
+          GITHUB_APP_ID: ${{ secrets.GH_APP_ID }}
+          GITHUB_APP_PRIVATE_KEY: ${{ secrets.GH_APP_PRIVATE_KEY }}
+          GITHUB_APP_INSTALLATION_ID: ${{ secrets.GH_APP_INSTALLATION_ID }}
+          DISCORD_OPS_WEBHOOK: ${{ secrets.DISCORD_OPS_WEBHOOK }}
+          CONFIG_DIR: apps/pr-miner/config
+          PROMPTS_DIR: ./prompts
+          KB_ROOT: .clones/knowledge-base
+          # 実 PR を出すときのみ設定(既定は dry-run)。初回 GO は人間判断(ADR-0013 D1(d)・runbook 参照)。
+          # PR_MINER_REAL: "1"
+        run: pnpm --filter @stratum/pr-miner start
