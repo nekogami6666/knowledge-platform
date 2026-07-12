@@ -51,6 +51,25 @@ export const opsConfigSchema = z
   .default({ channel_id: null, kb_repo: null });
 export type OpsConfig = z.infer<typeof opsConfigSchema>;
 
+/**
+ * voice-memo(§6.4 ③-b / ADR-0015)の設定。channel_id が設定されて初めて機能が有効になる(既定 OFF)。
+ * - channel_id: 音声メモ専用チャンネル(#voice-memo)。channels.yaml の allow にも入れること(§9.2)。
+ * - max_attachment_bytes: 受け付ける音声添付の上限(ADR-0015 D6。既定 25MB = OpenAI API の上限)。
+ * - daily_limit: user 1 日あたりの受付件数(💡 capture と同じ乱用対策)。
+ */
+export const voiceConfigSchema = z
+  .object({
+    channel_id: z.string().nullable().default(null),
+    max_attachment_bytes: z
+      .number()
+      .int()
+      .positive()
+      .default(25 * 1024 * 1024),
+    daily_limit: z.number().int().positive().default(3),
+  })
+  .default({ channel_id: null, max_attachment_bytes: 25 * 1024 * 1024, daily_limit: 3 });
+export type VoiceConfig = z.infer<typeof voiceConfigSchema>;
+
 /** 設定ファイルの読み取り口。ファイルが無ければ null を返す(= 既定値を使う)。 */
 export interface ConfigReader {
   read(name: string): Promise<string | null>;
@@ -91,6 +110,12 @@ export async function loadOps(reader: ConfigReader): Promise<OpsConfig> {
   const text = await reader.read("ops.yaml");
   const data = text === null ? undefined : yaml.load(text);
   return opsConfigSchema.parse(data ?? undefined);
+}
+
+export async function loadVoice(reader: ConfigReader): Promise<VoiceConfig> {
+  const text = await reader.read("voice.yaml");
+  const data = text === null ? undefined : yaml.load(text);
+  return voiceConfigSchema.parse(data ?? undefined);
 }
 
 /** §9.2 default-deny: allow に含まれ、かつ permanent_exclude に含まれないチャンネルのみ許可。 */

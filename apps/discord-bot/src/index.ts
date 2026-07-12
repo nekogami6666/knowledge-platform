@@ -7,7 +7,14 @@ import { randomUUID } from "node:crypto";
 import { createGhClientFromEnv, type GhClient } from "@stratum/gh-client";
 import { createFsPromptStore, nullUsageRecorder } from "@stratum/llm";
 import { type AskDeps, handleAskRequest } from "./ask.js";
-import { createFsConfigReader, loadChannels, loadMembers, loadOps, loadRepos } from "./config.js";
+import {
+  createFsConfigReader,
+  loadChannels,
+  loadMembers,
+  loadOps,
+  loadRepos,
+  loadVoice,
+} from "./config.js";
 import { type AskHandler, createBot } from "./discord.js";
 import { parseEnv } from "./env.js";
 import { createLogger, withCorrelation } from "./logger.js";
@@ -33,6 +40,7 @@ async function main(): Promise<void> {
   const members = await loadMembers(reader);
   const reposConfig = await loadRepos(reader);
   const ops = await loadOps(reader);
+  const voice = await loadVoice(reader);
 
   // 👍 代理マージ(§6.3): ops.yaml と GitHub 認証が両方揃ったときだけ有効(既定 OFF)。
   // 認証未整備(AUTH エラー)は機能 OFF として起動を続ける(bot の主務は /ask)。
@@ -52,6 +60,7 @@ async function main(): Promise<void> {
       members: members.members.length,
       repos: reposConfig.repos.length,
       proxyMerge: gh !== undefined,
+      voiceMemo: voice.channel_id !== null,
     },
     "config loaded",
   );
@@ -107,6 +116,8 @@ async function main(): Promise<void> {
     members,
     promptStore,
     clonesDir: env.CLONES_DIR,
+    // §6.4 ③-b voice-memo: 検知・受付(channel_id が null なら OFF・PR-V1)。
+    voice,
   });
   await bot.login(env.DISCORD_TOKEN);
   logger.info("discord-bot started");

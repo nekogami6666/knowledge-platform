@@ -34,10 +34,12 @@ import {
   isChannelAllowed,
   type MembersConfig,
   type OpsConfig,
+  type VoiceConfig,
 } from "./config.js";
 import type { BotStore } from "./db.js";
 import { withCorrelation } from "./logger.js";
 import { isoJst } from "./time.js";
+import { handleVoiceMemo } from "./voice.js";
 
 /** /ask コマンド定義(登録は別途 REST で行う)。 */
 export const askCommand = new SlashCommandBuilder()
@@ -74,6 +76,8 @@ export interface BotDeps {
   promptStore?: PromptStore;
   /** Agent SDK の cwd(💡 捕捉はツール無し単発だが必須項目)。bot は CLONES_DIR。 */
   clonesDir?: string;
+  /** voice-memo(§6.4 ③-b)。未指定または channel_id が null なら機能 OFF。 */
+  voice?: VoiceConfig;
 }
 
 /** §9.2 default-deny: 許可されないチャンネルへの拒否メッセージ。許可なら null。 */
@@ -202,8 +206,15 @@ export function createBot(deps: BotDeps): Client {
   });
 
   // §6.5 ④UI(PR-D2): gap 依頼(webhook)への「返信」を捕捉して gap_answer をキューへ。
+  // §6.4 ③-b(PR-V1): #voice-memo への音声投稿を検知して voice_memo をキューへ(voice 未設定なら no-op)。
   client.on(Events.MessageCreate, async (message) => {
     await handleGapAnswer(message, deps);
+    await handleVoiceMemo(message, {
+      logger: deps.logger,
+      channels: deps.channels,
+      store: deps.store,
+      ...(deps.voice !== undefined ? { voice: deps.voice } : {}),
+    });
   });
 
   return client;
