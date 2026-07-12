@@ -11,10 +11,13 @@ RUN corepack enable
 COPY . .
 # frozen install → better-sqlite3 の native を明示ビルド(pnpm 10 は既定で install scripts を抑止)
 # → 全 workspace を build → discord-bot を prod 依存だけに刈り込んで /app へ deploy。
+# pnpm 10 の deploy は --legacy が必要(inject-workspace-packages 既定化で失敗する。VM 実証 2026-07-12)。
+# deploy 後の /app は native が欠ける(スクリプト抑止が deploy にも効く)ため /app 内で焼き直す(同実証)。
 RUN pnpm install --frozen-lockfile \
   && pnpm rebuild better-sqlite3 \
   && pnpm -r --if-present run build \
-  && pnpm --filter @stratum/discord-bot deploy --prod /app
+  && pnpm --filter @stratum/discord-bot deploy --prod --legacy /app \
+  && cd /app && npm rebuild better-sqlite3 --foreground-scripts
 
 # --- runtime 段: 最小イメージ + 非 root(ADR-0006: 余分な秘密/ツールを置かない)---
 FROM node:22-bookworm-slim AS runtime
@@ -28,6 +31,7 @@ ENV PROMPTS_DIR=/app/prompts \
     CONFIG_DIR=/config \
     CLONES_DIR=/clones \
     DB_PATH=/data/bot.db
-# 秘密(DISCORD_TOKEN / ANTHROPIC_API_KEY)は実行時 env で渡す。イメージにもレイヤにも焼かない(§9.1)。
+# 秘密(DISCORD_TOKEN / Claude on AWS の 4 変数 CLAUDE_CODE_USE_ANTHROPIC_AWS・ANTHROPIC_AWS_API_KEY・
+# ANTHROPIC_AWS_WORKSPACE_ID・AWS_REGION)は実行時 env で渡す。イメージにもレイヤにも焼かない(§9.1・ADR-0009)。
 USER node
 CMD ["node", "dist/index.js"]

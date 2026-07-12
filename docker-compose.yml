@@ -1,0 +1,28 @@
+# stratum 常駐 bot — 社内 VM の rootless Docker 用 compose(ADR-0016)。
+# 手順は docs/deploy/README.md。rootful Docker や他ホストへ**そのまま流用しないこと**
+# (`user: "0"` は rootless 前提の設定 — 下のコメント参照)。
+services:
+  bot:
+    build: .
+    image: stratum-bot
+    init: true # node を PID 1 にしない(シグナル処理・ゾンビ回収)
+    restart: unless-stopped # 自動復帰は rootless docker.service(systemd --user)+ linger と合わせて成立
+    # rootless では uid 0 = ホストユーザ(特権昇格なし・ADR-0016 D2)。bind mount(data/clones)の
+    # 所有をホストユーザに保ち、gap-tracker(ホスト側 systemd・ADR-0014)と bot.db を共有するため。
+    # イメージ既定の USER node は rootful/K8s 向けにそのまま残している。
+    user: "0"
+    # FS 封じ込め(ADR-0016 D1/D3・ADR-0006): rootfs は読み取り専用、書き込みは明示した所だけ。
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    # 受信ポートは開けない(外向き通信のみ・ADR-0010 D2)。ports は定義しない。
+    env_file:
+      - ${STRATUM_ENV:-~/stratum/stratum.env} # chmod 600(§9.1)
+    tmpfs:
+      - /tmp
+      - /root # HOME(uid 0)。Agent SDK subprocess が ~/.claude に書くため書き込み可の tmpfs にする
+    volumes:
+      # config は compose ファイルと同じ repo checkout 内(ro)。実値 yaml は .gitignore 済み。
+      - ./apps/discord-bot/config:/config:ro
+      - ${STRATUM_CLONES:-~/stratum/clones}:/clones # 起動時に git 同期するため rw
+      - ${STRATUM_DATA:-~/stratum/data}:/data # bot.db(gap-tracker と共有・WAL)

@@ -1,59 +1,45 @@
 #!/usr/bin/env bash
-# stratum Q&A bot — 常駐デプロイ(社内 Ubuntu VM / no-root / no-Docker / systemd user)。ADR-0010。
+# stratum Q&A bot — 常駐デプロイ(社内 Ubuntu VM / rootless Docker + compose)。ADR-0016。
 #
 # 使い方:
 #   1) このリポジトリを VM に git clone する
 #   2) リポジトリのルートで:  ./docs/deploy/deploy.sh
 #   3) 初回は ~/stratum/stratum.env の雛形が作られるので鍵を埋めて、もう一度実行する
 #
-# このスクリプトがやること: Node 22 確認 → pnpm(corepack)→ install+build →
-#   ~/stratum/{data,clones} 作成 → env 雛形 → systemd user unit 設置 → 起動。
+# このスクリプトがやること: rootless Docker 確認 → ~/stratum/{data,clones} 作成 → env 雛形 →
+#   compose 変数(.env)生成 → docker compose build → up -d。
+# gap-tracker(systemd 側・ADR-0014)はこのスクリプトの対象外(README の gap-tracker 節参照)。
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel)"
 DATA_DIR="$HOME/stratum"
 ENV_FILE="$DATA_DIR/stratum.env"
-UNIT_DIR="$HOME/.config/systemd/user"
-UNIT_FILE="$UNIT_DIR/stratum-bot.service"
 
 cd "$REPO_DIR"
 
-echo "==> [1/6] Node 22 を確認"
-if ! command -v node >/dev/null 2>&1; then
+echo "==> [1/5] rootless Docker + compose を確認"
+if ! command -v docker >/dev/null 2>&1; then
   cat >&2 <<'EOF'
-ERROR: node が見つかりません。先に nvm で Node 22 を導入してください(root 不要):
-  curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.1/install.sh | bash
-  exec $SHELL
-  nvm install 22 && corepack enable
+ERROR: docker が見つかりません。rootless Docker の導入(root を要する一度きり作業を含む)は
+ADR-0016 の背景と README の「前提(VM 側)」を参照してください(未導入なら IT に依頼)。
 EOF
   exit 1
 fi
-NODE_BIN="$(command -v node)"
-NODE_MAJOR="$(node -p 'process.versions.node.split(".")[0]')"
-if [ "$NODE_MAJOR" -lt 22 ]; then
-  echo "ERROR: Node 22 以上が必要です(現在 $(node -v))。'nvm install 22' を実行してください。" >&2
+if ! docker info --format '{{join .SecurityOptions ","}}' 2>/dev/null | grep -q rootless; then
+  echo "WARN: この Docker は rootless に見えません。compose の user: \"0\" は rootless 前提です(ADR-0016 D2)。" >&2
+fi
+if ! docker compose version >/dev/null 2>&1; then
+  echo "ERROR: docker compose plugin がありません(~/.docker/cli-plugins/ へ導入。README 前提参照)。" >&2
   exit 1
 fi
-echo "    node = $NODE_BIN ($(node -v))"
+echo "    docker = $(docker --version)"
 
-echo "==> [2/6] pnpm(corepack)を有効化"
-corepack enable >/dev/null 2>&1 || true
-if ! command -v pnpm >/dev/null 2>&1; then
-  echo "ERROR: pnpm が使えません。'corepack enable' を確認してください。" >&2
-  exit 1
-fi
-echo "    pnpm = $(pnpm -v)"
-
-echo "==> [3/6] 依存インストール + ビルド(数分かかることがあります)"
-pnpm install --frozen-lockfile
-pnpm -r build
-
-echo "==> [4/6] データ用ディレクトリを作成"
+echo "==> [2/5] データ用ディレクトリを作成"
 mkdir -p "$DATA_DIR/data" "$DATA_DIR/clones"
 echo "    $DATA_DIR/{data,clones}"
 
-echo "==> [5/6] シークレット env ファイルを確認"
+echo "==> [3/5] シークレット env ファイルを確認"
 if [ ! -f "$ENV_FILE" ]; then
   cp "$REPO_DIR/docs/deploy/env.example" "$ENV_FILE"
   chmod 600 "$ENV_FILE"
@@ -76,27 +62,31 @@ fi
 chmod 600 "$ENV_FILE"
 echo "    OK: $ENV_FILE"
 
-echo "==> [6/6] systemd ユーザサービスを設置 + 起動"
-mkdir -p "$UNIT_DIR"
-sed -e "s|__REPO_DIR__|$REPO_DIR|g" \
-    -e "s|__DATA_DIR__|$DATA_DIR|g" \
-    -e "s|__ENV_FILE__|$ENV_FILE|g" \
-    -e "s|__NODE_BIN__|$NODE_BIN|g" \
-    "$REPO_DIR/docs/deploy/stratum-bot.service" >"$UNIT_FILE"
-systemctl --user daemon-reload
-systemctl --user enable --now stratum-bot.service
+echo "==> [4/5] compose 変数(.env)を生成"
+# docker-compose.yml の ${STRATUM_*} を絶対パスで固定する(~ 展開に依存しない)。.gitignore 済み。
+cat >"$REPO_DIR/.env" <<EOF
+STRATUM_ENV=$ENV_FILE
+STRATUM_DATA=$DATA_DIR/data
+STRATUM_CLONES=$DATA_DIR/clones
+EOF
+echo "    $REPO_DIR/.env"
 
-cat <<EOF
+echo "==> [5/5] イメージを build して起動"
+docker compose build
+docker compose up -d
+
+cat <<'EOF'
 
 ✅ 起動しました。
 
-再起動後も動かす(初回のみ・1コマンド):
+再起動後も動かす(初回のみ):
     loginctl enable-linger "$USER"
   確認:  loginctl show-user "$USER" | grep Linger   # => Linger=yes
+         systemctl --user is-enabled docker          # => enabled
 
 状態とログ:
-    systemctl --user status stratum-bot
-    journalctl --user -u stratum-bot -f
+    docker compose ps
+    docker compose logs -f bot
 
 ログに 'slash commands registered' と 'discord-bot started' が出れば成功です。
 Discord の許可チャンネルで /ask を試してください。

@@ -11,6 +11,9 @@ apps/discord-bot/config/*.yaml
 apps/extractor/config/*.yaml
 apps/gap-tracker/config/*.yaml
 
+# discord-bot のローカル実行が作る SQLite(bot.db とその WAL)
+apps/discord-bot/data/
+
 # extractor のローカル clone(実 minutes / knowledge-base を含むためコミットしない)
 .clones/
 

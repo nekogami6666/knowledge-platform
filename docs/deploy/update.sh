@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# stratum Q&A bot — 更新(git pull → install → build → 再起動)。ADR-0010。
+# stratum — 更新(git pull → ホスト build(gap-tracker 用)→ compose build → up -d)。ADR-0016。
 # 使い方:  ./docs/deploy/update.sh
 set -euo pipefail
 
@@ -10,13 +10,20 @@ cd "$REPO_DIR"
 echo "==> git pull (fast-forward only)"
 git pull --ff-only
 
-echo "==> install + build"
-corepack enable >/dev/null 2>&1 || true
-pnpm install --frozen-lockfile
-pnpm -r build
+# gap-tracker(systemd 側・ADR-0014)はホストの dist を実行するため、ホストでも build する。
+# Node が無い(bot 専用 VM)場合はスキップ。
+if command -v node >/dev/null 2>&1; then
+  echo "==> host install + build(gap-tracker 用)"
+  corepack enable >/dev/null 2>&1 || true
+  pnpm install --frozen-lockfile
+  pnpm -r build
+else
+  echo "==> host build をスキップ(node なし。gap-tracker を使う場合は Node 22 が必要)"
+fi
 
-echo "==> restart service"
-systemctl --user restart stratum-bot.service
+echo "==> docker compose build + up -d(bot)"
+docker compose build
+docker compose up -d
 
 echo ""
-echo "✅ 更新して再起動しました。ログ:  journalctl --user -u stratum-bot -f"
+echo "✅ 更新して再起動しました。ログ:  docker compose logs -f bot"
