@@ -1,0 +1,8 @@
+# pr-miner(§6.4 ③-c)の設定例。pr-miner.yaml にコピーして実値を入れる(.gitignore 済み)。
+# targets が空の間は機能 OFF(§14#5 の対象リポ決定前でも安全にマージできる)。
+# CI では Actions vars(PR_MINER_TARGETS カンマ区切り)からこのファイルを生成する(ADR-0013 D3 の流儀)。
+targets: [] # 例: ["queeenb-com/knowledge-platform", "queeenb-com/QB-Meeting-Ops"]
+kb:
+  repo: org/knowledge-base # 提案 PR を出す KB リポ
+base_branch: main
+window_days: 7 # カーソル無し(初回)のとき遡る日数
