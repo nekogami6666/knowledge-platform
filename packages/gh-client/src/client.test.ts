@@ -18,7 +18,30 @@ const defaultGetContent: GetContentFn = async () => ({
   },
 });
 
-function fakeOctokit(over: { getContent?: GetContentFn } = {}) {
+type ListFn = OctokitLike["rest"]["pulls"]["list"];
+type ReviewCommentsFn = OctokitLike["rest"]["pulls"]["listReviewComments"];
+type ListFilesFn = OctokitLike["rest"]["pulls"]["listFiles"];
+type IssueCommentsFn = OctokitLike["rest"]["issues"]["listComments"];
+
+function fakeOctokit(
+  over: {
+    getContent?: GetContentFn;
+    list?: ListFn;
+    listReviewComments?: ReviewCommentsFn;
+    listFiles?: ListFilesFn;
+    listComments?: IssueCommentsFn;
+  } = {},
+) {
+  const defaultList: ListFn = async () => ({
+    data: [
+      {
+        number: 7,
+        title: "Extract: a..b",
+        head: { ref: "extract/x" },
+        html_url: "https://github.com/o/r/pull/7",
+      },
+    ],
+  });
   return {
     rest: {
       git: {
@@ -35,16 +58,7 @@ function fakeOctokit(over: { getContent?: GetContentFn } = {}) {
         create: vi.fn(async () => ({
           data: { number: 42, html_url: "https://github.com/o/r/pull/42" },
         })),
-        list: vi.fn(async () => ({
-          data: [
-            {
-              number: 7,
-              title: "Extract: a..b",
-              head: { ref: "extract/x" },
-              html_url: "https://github.com/o/r/pull/7",
-            },
-          ],
-        })),
+        list: vi.fn<ListFn>(over.list ?? defaultList),
         merge: vi.fn(async () => ({ data: {} })),
         // OctokitLike の get 型で明示(mergeable_state は optional。欠落ケースのモックを許すため)。
         get: vi.fn<OctokitLike["rest"]["pulls"]["get"]>(async () => ({
@@ -57,6 +71,13 @@ function fakeOctokit(over: { getContent?: GetContentFn } = {}) {
             html_url: "https://github.com/o/r/pull/7",
           },
         })),
+        listReviewComments: vi.fn<ReviewCommentsFn>(
+          over.listReviewComments ?? (async () => ({ data: [] })),
+        ),
+        listFiles: vi.fn<ListFilesFn>(over.listFiles ?? (async () => ({ data: [] }))),
+      },
+      issues: {
+        listComments: vi.fn<IssueCommentsFn>(over.listComments ?? (async () => ({ data: [] }))),
       },
       repos: {
         getContent: vi.fn(over.getContent ?? defaultGetContent),
@@ -321,5 +342,209 @@ describe("commitFiles(§6.5 質問ログの直接 commit)", () => {
       err = e;
     }
     expect((err as GhClientError).code).toBe("CONFLICT");
+  });
+});
+
+// --- PR マイニング用の読み取り API(§6.4 ③-c / PR-P1)---
+
+type PrRow = {
+  number: number;
+  title: string;
+  head: { ref: string };
+  html_url: string;
+  body?: string | null;
+  merged_at?: string | null;
+  updated_at?: string;
+  user?: { login: string } | null;
+};
+
+function prRow(over: Partial<PrRow> & { number: number }): PrRow {
+  return {
+    title: `PR ${over.number}`,
+    head: { ref: `feat/${over.number}` },
+    html_url: `https://github.com/o/r/pull/${over.number}`,
+    body: "body",
+    merged_at: "2026-07-05T00:00:00Z",
+    updated_at: "2026-07-05T00:00:00Z",
+    user: { login: "yamada" },
+    ...over,
+  };
+}
+
+describe("listMergedPullRequests", () => {
+  it("since 以降にマージされた PR を返し、未マージ close と期間外を除外する", async () => {
+    const list: ListFn = async () => ({
+      data: [
+        prRow({
+          number: 10,
+          merged_at: "2026-07-06T00:00:00Z",
+          updated_at: "2026-07-06T00:00:00Z",
+        }),
+        prRow({ number: 11, merged_at: null, updated_at: "2026-07-06T00:00:00Z" }), // 未マージ close
+        prRow({
+          number: 12,
+          merged_at: "2026-07-01T00:00:00Z",
+          updated_at: "2026-07-06T00:00:00Z",
+        }), // since より前にマージ
+      ],
+    });
+    const oct = fakeOctokit({ list });
+    const gh = createGhClient(oct as unknown as OctokitLike);
+    const prs = await gh.listMergedPullRequests("o/r", { since: "2026-07-03T00:00:00Z" });
+    expect(prs.map((p) => p.number)).toEqual([10]);
+    expect(prs[0]).toMatchObject({
+      number: 10,
+      body: "body",
+      author: "yamada",
+      mergedAt: "2026-07-06T00:00:00Z",
+      url: "https://github.com/o/r/pull/10",
+    });
+  });
+
+  it("updated_at < since に到達したら以降のページを取得しない(早期打ち切り)", async () => {
+    const list = vi.fn<ListFn>(async (p) => {
+      if (p.page === 1) {
+        return {
+          data: [
+            prRow({
+              number: 20,
+              updated_at: "2026-07-06T00:00:00Z",
+              merged_at: "2026-07-06T00:00:00Z",
+            }),
+            // 2 件目で since より古い更新 → ここで打ち切り。3 件目以降・2 ページ目は見ない。
+            prRow({
+              number: 21,
+              updated_at: "2026-06-01T00:00:00Z",
+              merged_at: "2026-06-01T00:00:00Z",
+            }),
+            prRow({
+              number: 22,
+              updated_at: "2026-07-06T00:00:00Z",
+              merged_at: "2026-07-06T00:00:00Z",
+            }),
+          ],
+        };
+      }
+      throw new Error("2 ページ目を取得してはいけない");
+    });
+    const oct = fakeOctokit({ list });
+    const gh = createGhClient(oct as unknown as OctokitLike);
+    const prs = await gh.listMergedPullRequests("o/r", { since: "2026-07-03T00:00:00Z" });
+    expect(prs.map((p) => p.number)).toEqual([20]);
+    expect(list).toHaveBeenCalledTimes(1);
+  });
+
+  it("since 境界は >=(同時刻を含む)", async () => {
+    const list: ListFn = async () => ({
+      data: [
+        prRow({
+          number: 30,
+          merged_at: "2026-07-03T00:00:00Z",
+          updated_at: "2026-07-03T00:00:00Z",
+        }),
+      ],
+    });
+    const oct = fakeOctokit({ list });
+    const gh = createGhClient(oct as unknown as OctokitLike);
+    const prs = await gh.listMergedPullRequests("o/r", { since: "2026-07-03T00:00:00Z" });
+    expect(prs.map((p) => p.number)).toEqual([30]);
+  });
+
+  it("フルページが続く限りページングし、maxPages で打ち切る", async () => {
+    const list = vi.fn<ListFn>(async (p) => ({
+      data: Array.from({ length: p.per_page ?? 100 }, (_, i) =>
+        prRow({ number: (p.page ?? 1) * 1000 + i }),
+      ),
+    }));
+    const oct = fakeOctokit({ list });
+    const gh = createGhClient(oct as unknown as OctokitLike);
+    const prs = await gh.listMergedPullRequests("o/r", {
+      since: "2026-01-01T00:00:00Z",
+      perPage: 2,
+      maxPages: 3,
+    });
+    expect(list).toHaveBeenCalledTimes(3);
+    expect(prs).toHaveLength(6); // 2 件 × 3 ページ
+  });
+
+  it("body/author の欠落は '' / null に正規化する", async () => {
+    const list: ListFn = async () => ({
+      data: [prRow({ number: 40, body: null, user: null })],
+    });
+    const oct = fakeOctokit({ list });
+    const gh = createGhClient(oct as unknown as OctokitLike);
+    const prs = await gh.listMergedPullRequests("o/r", { since: "2026-07-01T00:00:00Z" });
+    expect(prs[0]).toMatchObject({ body: "", author: null });
+  });
+
+  it("API エラーは API_ERROR", async () => {
+    const oct = fakeOctokit();
+    oct.rest.pulls.list.mockRejectedValueOnce({ status: 500 });
+    const gh = createGhClient(oct as unknown as OctokitLike);
+    await expect(
+      gh.listMergedPullRequests("o/r", { since: "2026-07-01T00:00:00Z" }),
+    ).rejects.toMatchObject({ code: "API_ERROR" });
+  });
+});
+
+describe("listPullRequestComments", () => {
+  it("会話コメントと diff 行コメントを統合し createdAt 昇順で返す", async () => {
+    const listComments: IssueCommentsFn = async () => ({
+      data: [{ body: "会話2", created_at: "2026-07-05T10:00:00Z", user: { login: "a" } }],
+    });
+    const listReviewComments: ReviewCommentsFn = async () => ({
+      data: [
+        { body: "行1", path: "src/x.ts", created_at: "2026-07-05T09:00:00Z", user: { login: "b" } },
+      ],
+    });
+    const oct = fakeOctokit({ listComments, listReviewComments });
+    const gh = createGhClient(oct as unknown as OctokitLike);
+    const comments = await gh.listPullRequestComments("o/r", 7);
+    expect(comments).toEqual([
+      {
+        kind: "review",
+        author: "b",
+        body: "行1",
+        createdAt: "2026-07-05T09:00:00Z",
+        path: "src/x.ts",
+      },
+      { kind: "issue", author: "a", body: "会話2", createdAt: "2026-07-05T10:00:00Z" },
+    ]);
+  });
+
+  it("404 は NOT_FOUND", async () => {
+    const oct = fakeOctokit();
+    oct.rest.issues.listComments.mockRejectedValueOnce({ status: 404 });
+    const gh = createGhClient(oct as unknown as OctokitLike);
+    await expect(gh.listPullRequestComments("o/r", 7)).rejects.toMatchObject({
+      code: "NOT_FOUND",
+    });
+  });
+});
+
+describe("listPullRequestFiles", () => {
+  it("path/status/±行数のみを返す(patch は含まない)", async () => {
+    const listFiles: ListFilesFn = async () => ({
+      data: [
+        { filename: "src/a.ts", status: "modified", additions: 10, deletions: 3 },
+        { filename: "src/b.ts", status: "added", additions: 20, deletions: 0 },
+      ],
+    });
+    const oct = fakeOctokit({ listFiles });
+    const gh = createGhClient(oct as unknown as OctokitLike);
+    const files = await gh.listPullRequestFiles("o/r", 7);
+    expect(files).toEqual([
+      { path: "src/a.ts", status: "modified", additions: 10, deletions: 3 },
+      { path: "src/b.ts", status: "added", additions: 20, deletions: 0 },
+    ]);
+    // patch フィールドが型にも値にも無いこと(diff 非知識化)
+    expect(Object.keys(files[0] ?? {})).not.toContain("patch");
+  });
+
+  it("404 は NOT_FOUND", async () => {
+    const oct = fakeOctokit();
+    oct.rest.pulls.listFiles.mockRejectedValueOnce({ status: 404 });
+    const gh = createGhClient(oct as unknown as OctokitLike);
+    await expect(gh.listPullRequestFiles("o/r", 7)).rejects.toMatchObject({ code: "NOT_FOUND" });
   });
 });

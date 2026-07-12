@@ -79,6 +79,52 @@ export interface CommitFilesOptions {
   deletions?: readonly string[];
 }
 
+/** マージ済み PR の列挙オプション(§6.4 ③-c pr-miner)。 */
+export interface ListMergedPrOptions {
+  /** この時刻以降にマージされた PR のみ返す(ISO 8601)。カーソル由来。 */
+  since: string;
+  /** 1 ページの取得件数。既定 100(GitHub 上限)。 */
+  perPage?: number;
+  /** ページングの安全上限(暴走防止)。既定 10。 */
+  maxPages?: number;
+}
+
+/** マージ済み PR の要約(pr-miner の抽出入力・§6.4 ③-c)。 */
+export interface MergedPrSummary {
+  number: number;
+  title: string;
+  /** PR 本文(null は "" に正規化)。 */
+  body: string;
+  /** 作成者の GitHub ユーザ名(取得不能は null)。 */
+  author: string | null;
+  /** マージ時刻(ISO 8601)。 */
+  mergedAt: string;
+  url: string;
+}
+
+/** PR のコメント1件(会話 or diff 行コメント)。 */
+export interface PrCommentItem {
+  /** "issue"=会話タブのコメント、"review"=diff 行に付いたレビューコメント。 */
+  kind: "issue" | "review";
+  author: string | null;
+  body: string;
+  createdAt: string | null;
+  /** review コメントの対象ファイル(issue コメントは undefined)。 */
+  path?: string;
+}
+
+/**
+ * PR で変更されたファイルの要約(§6.4 ③-c: diff サマリのみ)。
+ * patch(diff 本文)は**あえて持たない** — 「コードは Git にある。判断と理由だけを取る」を型で担保する。
+ */
+export interface PrFileSummary {
+  path: string;
+  /** "added" / "modified" / "removed" / "renamed" 等。 */
+  status: string;
+  additions: number;
+  deletions: number;
+}
+
 /** gh-client が公開する最小操作(F1 extractor / bot 代理マージ / C5 gap-tracker が消費)。 */
 export interface GhClient {
   /** 複数ファイルを1コミットにまとめた PR を作成する(Git Data API)。 */
@@ -97,6 +143,16 @@ export interface GhClient {
   commitFiles(opts: CommitFilesOptions): Promise<{ sha: string }>;
   /** ファイル内容と blob SHA を取得する。存在しなければ null(id-allocator CAS 用)。 */
   getFileContents(opts: GetFileOptions): Promise<{ content: string; sha: string } | null>;
+  /**
+   * `since` 以降にマージされた PR を新しい順に列挙する(§6.4 ③-c pr-miner)。
+   * closed PR を updated 降順でページングし、`updated_at < since` で打ち切る
+   * (merged_at ≤ updated_at のため取りこぼさない)。未マージ close は除外。
+   */
+  listMergedPullRequests(repo: string, opts: ListMergedPrOptions): Promise<MergedPrSummary[]>;
+  /** PR の会話コメント + diff 行レビューコメントを統合して時系列で返す。404 は NOT_FOUND。 */
+  listPullRequestComments(repo: string, number: number): Promise<PrCommentItem[]>;
+  /** PR の変更ファイル要約(path/status/±行数のみ。diff 本文は取らない)。404 は NOT_FOUND。 */
+  listPullRequestFiles(repo: string, number: number): Promise<PrFileSummary[]>;
 }
 
 interface TreeItem {
@@ -149,8 +205,26 @@ export interface OctokitLike {
         head: string;
         base: string;
       }): Promise<{ data: { number: number; html_url: string } }>;
-      list(p: { owner: string; repo: string; state?: string; per_page?: number }): Promise<{
-        data: Array<{ number: number; title: string; head: { ref: string }; html_url: string }>;
+      // 追加フィールドはすべて optional。既存 fake(listPullRequests 用)を壊さない(§6.4 ③-c)。
+      list(p: {
+        owner: string;
+        repo: string;
+        state?: string;
+        sort?: string;
+        direction?: string;
+        per_page?: number;
+        page?: number;
+      }): Promise<{
+        data: Array<{
+          number: number;
+          title: string;
+          head: { ref: string };
+          html_url: string;
+          body?: string | null;
+          merged_at?: string | null;
+          updated_at?: string;
+          user?: { login: string } | null;
+        }>;
       }>;
       merge(p: {
         owner: string;
@@ -168,6 +242,44 @@ export interface OctokitLike {
           title: string;
           html_url: string;
         };
+      }>;
+      listReviewComments(p: {
+        owner: string;
+        repo: string;
+        pull_number: number;
+        per_page?: number;
+        page?: number;
+      }): Promise<{
+        data: Array<{
+          body?: string | null;
+          path?: string;
+          created_at?: string | null;
+          user?: { login: string } | null;
+        }>;
+      }>;
+      listFiles(p: {
+        owner: string;
+        repo: string;
+        pull_number: number;
+        per_page?: number;
+        page?: number;
+      }): Promise<{
+        data: Array<{ filename: string; status: string; additions: number; deletions: number }>;
+      }>;
+    };
+    issues: {
+      listComments(p: {
+        owner: string;
+        repo: string;
+        issue_number: number;
+        per_page?: number;
+        page?: number;
+      }): Promise<{
+        data: Array<{
+          body?: string | null;
+          created_at?: string | null;
+          user?: { login: string } | null;
+        }>;
       }>;
     };
     repos: {
@@ -382,6 +494,136 @@ export function createGhClient(octokit: OctokitLike): GhClient {
         if (statusOf(e) === 404) return null;
         if (e instanceof GhClientError) throw e;
         throw new GhClientError("API_ERROR", `ファイル取得に失敗しました: ${opts.path}`, {
+          cause: e,
+        });
+      }
+    },
+
+    async listMergedPullRequests(repo, opts) {
+      const { owner, repo: name } = splitRepo(repo);
+      const perPage = opts.perPage ?? 100;
+      const maxPages = opts.maxPages ?? 10;
+      const out: MergedPrSummary[] = [];
+      try {
+        for (let page = 1; page <= maxPages; page++) {
+          const res = await octokit.rest.pulls.list({
+            owner,
+            repo: name,
+            state: "closed",
+            sort: "updated",
+            direction: "desc",
+            per_page: perPage,
+            page,
+          });
+          const rows = res.data;
+          let reachedOld = false;
+          for (const p of rows) {
+            // updated 降順なので、since より古い更新に到達したら以降は全て対象外(早期打ち切り)。
+            // merged_at ≤ updated_at のため、この判定で取りこぼしは起きない。
+            if (p.updated_at !== undefined && p.updated_at < opts.since) {
+              reachedOld = true;
+              break;
+            }
+            const mergedAt = p.merged_at ?? null;
+            if (mergedAt === null || mergedAt < opts.since) continue; // 未マージ close / 期間外
+            out.push({
+              number: p.number,
+              title: p.title,
+              body: p.body ?? "",
+              author: p.user?.login ?? null,
+              mergedAt,
+              url: p.html_url,
+            });
+          }
+          if (reachedOld || rows.length < perPage) break; // 打ち切り or 最終ページ
+        }
+        return out;
+      } catch (e) {
+        throw new GhClientError("API_ERROR", `マージ済み PR の列挙に失敗しました(${repo})`, {
+          cause: e,
+        });
+      }
+    },
+
+    async listPullRequestComments(repo, number) {
+      const { owner, repo: name } = splitRepo(repo);
+      try {
+        const items: PrCommentItem[] = [];
+        // 会話タブ(issues.listComments)+ diff 行(pulls.listReviewComments)を統合する。
+        for (let page = 1; ; page++) {
+          const res = await octokit.rest.issues.listComments({
+            owner,
+            repo: name,
+            issue_number: number,
+            per_page: 100,
+            page,
+          });
+          for (const c of res.data) {
+            items.push({
+              kind: "issue",
+              author: c.user?.login ?? null,
+              body: c.body ?? "",
+              createdAt: c.created_at ?? null,
+            });
+          }
+          if (res.data.length < 100) break;
+        }
+        for (let page = 1; ; page++) {
+          const res = await octokit.rest.pulls.listReviewComments({
+            owner,
+            repo: name,
+            pull_number: number,
+            per_page: 100,
+            page,
+          });
+          for (const c of res.data) {
+            items.push({
+              kind: "review",
+              author: c.user?.login ?? null,
+              body: c.body ?? "",
+              createdAt: c.created_at ?? null,
+              ...(c.path !== undefined ? { path: c.path } : {}),
+            });
+          }
+          if (res.data.length < 100) break;
+        }
+        // createdAt 昇順(null は末尾)で時系列に並べる。
+        items.sort((a, b) => (a.createdAt ?? "￿").localeCompare(b.createdAt ?? "￿"));
+        return items;
+      } catch (e) {
+        const code = statusOf(e) === 404 ? "NOT_FOUND" : "API_ERROR";
+        throw new GhClientError(code, `PR コメントの取得に失敗しました(${repo}#${number})`, {
+          cause: e,
+        });
+      }
+    },
+
+    async listPullRequestFiles(repo, number) {
+      const { owner, repo: name } = splitRepo(repo);
+      try {
+        const out: PrFileSummary[] = [];
+        for (let page = 1; ; page++) {
+          const res = await octokit.rest.pulls.listFiles({
+            owner,
+            repo: name,
+            pull_number: number,
+            per_page: 100,
+            page,
+          });
+          for (const f of res.data) {
+            out.push({
+              path: f.filename,
+              status: f.status,
+              additions: f.additions,
+              deletions: f.deletions,
+            });
+          }
+          if (res.data.length < 100) break;
+        }
+        return out;
+      } catch (e) {
+        const code = statusOf(e) === 404 ? "NOT_FOUND" : "API_ERROR";
+        throw new GhClientError(code, `PR ファイル一覧の取得に失敗しました(${repo}#${number})`, {
           cause: e,
         });
       }

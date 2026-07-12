@@ -1,4 +1,10 @@
-import type { GhClient, PrSummary } from "@stratum/gh-client";
+import type {
+  GhClient,
+  MergedPrSummary,
+  PrCommentItem,
+  PrFileSummary,
+  PrSummary,
+} from "@stratum/gh-client";
 import type { IdCounterFile, IdCounterStore } from "@stratum/kb-core";
 import { describe, expect, it, vi } from "vitest";
 import type { ExtractionResult } from "./candidate.js";
@@ -81,6 +87,9 @@ function makeGh(over: Partial<GhClient> = {}): GhClient {
       throw new Error("not used in extractor tests");
     }),
     getFileContents: vi.fn(async () => null),
+    listMergedPullRequests: vi.fn(async (): Promise<MergedPrSummary[]> => []),
+    listPullRequestComments: vi.fn(async (): Promise<PrCommentItem[]> => []),
+    listPullRequestFiles: vi.fn(async (): Promise<PrFileSummary[]> => []),
     ...over,
   };
 }
