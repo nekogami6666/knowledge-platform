@@ -12,12 +12,27 @@
 import type { GhClient } from "@stratum/gh-client";
 import { GhClientError } from "@stratum/gh-client";
 import { buildVoiceMemoDoc, type Source, serializeEntry, voiceMemoPath } from "@stratum/kb-core";
-import type { PromptStore } from "@stratum/llm";
-import { LlmError, RETRYABLE_LLM_CODES, type Transcriber } from "@stratum/llm";
+import type {
+  AgentSearchOptions,
+  AgentSearchResult,
+  LlmDeps,
+  PromptStore,
+  Transcriber,
+} from "@stratum/llm";
+import {
+  LlmError,
+  loadPrompt,
+  nullUsageRecorder,
+  RETRYABLE_LLM_CODES,
+  runAgentSearch,
+  withRetry,
+} from "@stratum/llm";
 import type { Logger } from "pino";
+import { z } from "zod";
 import {
   allocateCaptureId,
   buildCaptureEntry,
+  type CaptureLlmDeps,
   type DraftSearchFn,
   jstDayKey,
   runDraft,
@@ -26,7 +41,13 @@ import { SerialQueue } from "./concurrency.js";
 import { githubForDiscord, type MembersConfig, type OpsConfig } from "./config.js";
 import type { BotStore } from "./db.js";
 import { withCorrelation } from "./logger.js";
-import { VOICE_MEMO_ACTION_TYPE, voiceMemoPayloadSchema } from "./voice.js";
+import {
+  VOICE_CORRECTION_ACTION_TYPE,
+  VOICE_MEMO_ACTION_TYPE,
+  VOICE_REPLY_MARKER,
+  voiceCorrectionPayloadSchema,
+  voiceMemoPayloadSchema,
+} from "./voice.js";
 
 /** 冪等キーとなるブランチ名(capture/<id> と同型・ADR-0015 D4)。 */
 export function voiceMemoBranch(messageId: string): string {
@@ -56,6 +77,8 @@ export interface VoicePipelineDeps {
   fetchFn?: typeof fetch;
   /** テスト用 seam(既定=実 runAgentSearch)。 */
   draftSearch?: DraftSearchFn;
+  /** 訂正反映(fast)の seam(PR-V4)。 */
+  correctionSearch?: CorrectionSearchFn;
   now?: () => Date;
 }
 
@@ -237,13 +260,15 @@ async function processOne(
     });
 
     // 「こう記録しました」スレッド返信(§6.4 L485)+ 本人 DM(👍 でマージ)。
+    // 先頭マーカー・PR URL・原本パスは訂正検知(voiceCorrectionDecision)が解析する契約。
     const excerpt = transcript.trim().slice(0, 200);
     await deps.messenger.reply(
       payload.channelId,
       payload.messageId,
       [
-        `🎙️ こう記録しました(冒頭): ${excerpt}${transcript.trim().length > 200 ? "…" : ""}`,
+        `${VOICE_REPLY_MARKER}(冒頭): ${excerpt}${transcript.trim().length > 200 ? "…" : ""}`,
         `原本と記事の PR: ${pr.url}`,
+        `原本: \`${transcriptPath}\``,
         "訂正がある場合はこの返信にリプライしてください。",
       ].join("\n"),
     );
@@ -285,10 +310,167 @@ export function createVoiceMemoWorker(deps: VoicePipelineDeps): { kick(): void }
   return {
     kick() {
       void queue
-        .enqueue(() => processVoiceMemoQueue(deps))
+        .enqueue(async () => {
+          await processVoiceMemoQueue(deps);
+          await processVoiceCorrectionQueue(deps);
+        })
         .catch((err) => {
           withCorrelation(deps.logger, "voice-worker").error({ err }, "voice memo queue failed");
         });
     },
   };
+}
+
+// --- 訂正フライホイール(§6.4 ③-b L485 / PR-V4)---
+
+/** prompts/voice/correct.md(fast)の出力契約。 */
+export const voiceCorrectionResultSchema = z.object({
+  transcript: z.string().min(1),
+});
+export type VoiceCorrectionResult = z.infer<typeof voiceCorrectionResultSchema>;
+
+export type CorrectionSearchFn = (
+  opts: AgentSearchOptions<VoiceCorrectionResult>,
+  deps?: LlmDeps,
+) => Promise<AgentSearchResult<VoiceCorrectionResult>>;
+
+/** 原本 md の文字起こし節の区切り(buildVoiceMemoDoc と対)。 */
+const TRANSCRIPT_SECTION = "## 文字起こし\n\n";
+
+/** 訂正反映: 現在の文字起こし + 訂正指示 → 反映後全文(role:fast・ツール無し単発)。 */
+export async function runCorrection(
+  input: { current: string; instruction: string; cwd: string },
+  deps: CaptureLlmDeps<CorrectionSearchFn>,
+): Promise<VoiceCorrectionResult> {
+  const search: CorrectionSearchFn = deps.search ?? runAgentSearch;
+  const usage = deps.usage ?? nullUsageRecorder;
+  const prompt = await loadPrompt("voice", "correct", deps.promptStore);
+  const r = await withRetry(
+    () =>
+      search(
+        {
+          app: "discord-bot",
+          role: prompt.role, // prompt frontmatter(fast)。直書きしない
+          systemPrompt: prompt.body,
+          prompt: [
+            "--- 現在の記録ここから ---",
+            input.current,
+            "--- 現在の記録ここまで ---",
+            "",
+            "--- 訂正指示ここから ---",
+            input.instruction,
+            "--- 訂正指示ここまで ---",
+          ].join("\n"),
+          cwd: input.cwd,
+          outputSchema: voiceCorrectionResultSchema,
+          allowedTools: [],
+          timeoutMs: deps.timeoutMs ?? 60_000,
+        },
+        { usage },
+      ),
+    { maxRetries: 1, ...deps.retry },
+  );
+  return r.value;
+}
+
+const CORRECTION_CLOSED_MESSAGE =
+  "対象の PR は既にマージ/クローズ済みのため自動反映できません。新しいメモとして投稿し直すか、knowledge-base を直接編集してください。";
+const CORRECTION_FAILED_MESSAGE = "訂正の自動反映に失敗しました。PR を直接編集してください。";
+const CORRECTION_DONE_MESSAGE =
+  "✅ 訂正を原本に反映しました。記事本文も直したい場合は PR を直接編集してください。";
+
+/** pending の voice_correction を古い順に処理する(直列)。STT は不要(gh + prompt + Claude)。 */
+export async function processVoiceCorrectionQueue(deps: VoicePipelineDeps): Promise<void> {
+  const { ops, gh, promptStore } = deps;
+  if (ops === undefined || ops.kb_repo === null || gh === undefined || promptStore === undefined) {
+    return; // 機能 OFF
+  }
+  const pending = deps.store
+    .listPendingActions(VOICE_CORRECTION_ACTION_TYPE)
+    .filter((a) => a.state === "pending");
+  for (const action of pending) {
+    await processCorrection(action.id, action.payloadJson, { ...deps, ops, gh, promptStore });
+  }
+}
+
+async function processCorrection(
+  actionId: string,
+  payloadJson: string | null,
+  deps: VoicePipelineDeps & { ops: OpsConfig; gh: GhClient; promptStore: PromptStore },
+): Promise<void> {
+  const log = withCorrelation(deps.logger, `voice-correction:${actionId}`);
+  const kbRepo = deps.ops.kb_repo as string;
+
+  const parsed = voiceCorrectionPayloadSchema.safeParse(
+    payloadJson === null ? null : JSON.parse(payloadJson),
+  );
+  if (!parsed.success) {
+    log.error({ err: parsed.error }, "invalid voice_correction payload; skipping");
+    deps.store.markActionDone(actionId);
+    return;
+  }
+  const payload = parsed.data;
+  const replyToCorrector = (content: string) =>
+    deps.messenger.reply(payload.channelId, payload.correctionMessageId, content);
+
+  try {
+    // PR がまだ open か(マージ後の原本書き換えは main への直 commit になるため行わない・初期スコープ)。
+    const pr = await deps.gh.getPullRequest(kbRepo, payload.prNumber);
+    if (pr.merged || pr.state !== "open") {
+      await replyToCorrector(CORRECTION_CLOSED_MESSAGE);
+      deps.store.markActionDone(actionId);
+      return;
+    }
+
+    // ブランチ上の現在の原本を読む(訂正の多重反映にも自然に対応)。
+    const branch = voiceMemoBranch(payload.originalMessageId);
+    const file = await deps.gh.getFileContents({
+      repo: kbRepo,
+      path: payload.transcriptPath,
+      ref: branch,
+    });
+    const sectionAt = file?.content.indexOf(TRANSCRIPT_SECTION) ?? -1;
+    if (file === null || sectionAt < 0) {
+      log.error({ path: payload.transcriptPath }, "transcript not found or unexpected format");
+      await replyToCorrector(CORRECTION_FAILED_MESSAGE);
+      deps.store.markActionDone(actionId);
+      return;
+    }
+    const header = file.content.slice(0, sectionAt + TRANSCRIPT_SECTION.length);
+    const current = file.content.slice(sectionAt + TRANSCRIPT_SECTION.length);
+
+    // fast モデルで訂正を反映(§6.4 L485)。
+    const corrected = await runCorrection(
+      { current: current.trim(), instruction: payload.correction, cwd: deps.cwd },
+      {
+        promptStore: deps.promptStore,
+        ...(deps.correctionSearch ? { search: deps.correctionSearch } : {}),
+      },
+    );
+
+    // PR ブランチを更新(main には触れない・ADR-0015 D4)。
+    await deps.gh.commitFiles({
+      repo: kbRepo,
+      branch,
+      message: `docs(kb): voice-memo 訂正反映(${payload.correctionMessageId})`,
+      files: [
+        { path: payload.transcriptPath, content: `${header}${corrected.transcript.trim()}\n` },
+      ],
+    });
+    await replyToCorrector(CORRECTION_DONE_MESSAGE);
+    deps.store.markActionDone(actionId);
+    log.info({ pr: payload.prNumber }, "voice correction applied");
+  } catch (err) {
+    if (err instanceof GhClientError && (err.code === "CONFLICT" || err.code === "NOT_FOUND")) {
+      // ブランチ先端が動いた(手編集)/ PR・ファイルが消えた。自動反映は諦めて案内する。
+      await replyToCorrector(CORRECTION_FAILED_MESSAGE).catch(() => {});
+      deps.store.markActionDone(actionId);
+      return;
+    }
+    if (isTransient(err)) {
+      log.warn({ err }, "voice correction transient failure; will retry");
+      return; // pending を残す
+    }
+    log.error({ err }, "voice correction failed");
+  }
 }

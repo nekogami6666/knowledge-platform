@@ -239,3 +239,130 @@ describe("handleVoiceMemo", () => {
     expect(errors).toHaveLength(1);
   });
 });
+
+// --- 訂正フライホイール(PR-V4)------------------------------------------------
+
+import {
+  extractPrNumber,
+  extractTranscriptPath,
+  handleVoiceCorrection,
+  VOICE_CORRECTION_ACTION_TYPE,
+  VOICE_REPLY_MARKER,
+  type VoiceCorrectionInput,
+  voiceCorrectionDecision,
+  voiceCorrectionPayloadSchema,
+} from "./voice.js";
+
+const BOT_REPLY = [
+  `${VOICE_REPLY_MARKER}(冒頭): 分注ユニットの…`,
+  "原本と記事の PR: https://github.com/org/knowledge-base/pull/7",
+  "原本: `interviews/voice-memos/2026/2026-07-08-333333333333333333.md`",
+  "訂正がある場合はこの返信にリプライしてください。",
+].join("\n");
+
+function correctionInput(over: Partial<VoiceCorrectionInput> = {}): VoiceCorrectionInput {
+  return {
+    authorIsBot: false,
+    referencedAuthorIsSelf: true,
+    referencedContent: BOT_REPLY,
+    referencedReferenceId: "333333333333333333",
+    content: "給脂は月イチではなく週イチです",
+    ...over,
+  };
+}
+
+describe("voiceCorrectionDecision", () => {
+  it("bot の記録返信への人間の返信を訂正として受け付ける", () => {
+    expect(voiceCorrectionDecision(correctionInput())).toEqual({
+      capture: true,
+      originalMessageId: "333333333333333333",
+      prNumber: 7,
+      transcriptPath: "interviews/voice-memos/2026/2026-07-08-333333333333333333.md",
+    });
+  });
+
+  it("bot 自身の投稿・bot 以外への返信・マーカー無しは対象外", () => {
+    expect(voiceCorrectionDecision(correctionInput({ authorIsBot: true }))).toMatchObject({
+      capture: false,
+    });
+    expect(
+      voiceCorrectionDecision(correctionInput({ referencedAuthorIsSelf: false })),
+    ).toMatchObject({ capture: false, reason: "not-self-reference" });
+    expect(
+      voiceCorrectionDecision(correctionInput({ referencedContent: "ふつうの返信" })),
+    ).toMatchObject({ capture: false, reason: "not-voice-reply" });
+  });
+
+  it("空の訂正・PR/パスを解析できない返信は対象外", () => {
+    expect(voiceCorrectionDecision(correctionInput({ content: "  " }))).toMatchObject({
+      capture: false,
+      reason: "empty-correction",
+    });
+    expect(
+      voiceCorrectionDecision(correctionInput({ referencedContent: `${VOICE_REPLY_MARKER} だけ` })),
+    ).toMatchObject({ capture: false, reason: "unparsable-reply" });
+  });
+});
+
+describe("extractPrNumber / extractTranscriptPath", () => {
+  it("PR 番号と原本パスを抽出する", () => {
+    expect(extractPrNumber(BOT_REPLY)).toBe(7);
+    expect(extractTranscriptPath(BOT_REPLY)).toBe(
+      "interviews/voice-memos/2026/2026-07-08-333333333333333333.md",
+    );
+    expect(extractPrNumber("no url")).toBeNull();
+    expect(extractTranscriptPath("no path")).toBeNull();
+  });
+});
+
+describe("handleVoiceCorrection", () => {
+  function fakeCorrectionMessage(over: { refContent?: string; authorBot?: boolean } = {}): {
+    message: Message;
+    reactions: string[];
+  } {
+    const reactions: string[] = [];
+    const referenced = {
+      author: { id: "BOT" },
+      content: over.refContent ?? BOT_REPLY,
+      reference: { messageId: "333333333333333333" },
+    };
+    const message = {
+      id: "CORR1",
+      author: { id: "U1", bot: over.authorBot ?? false },
+      channelId: "VC1",
+      content: "給脂は週イチです",
+      reference: { messageId: "REPLY1" },
+      client: { user: { id: "BOT" } },
+      fetchReference: async () => referenced,
+      react: async (e: string) => {
+        reactions.push(e);
+      },
+    };
+    return { message: message as unknown as Message, reactions };
+  }
+
+  it("訂正を voice_correction としてキューに積み ✅ を付ける", async () => {
+    const { logger } = fakeLogger();
+    const { store, queued } = fakeStore();
+    const { message, reactions } = fakeCorrectionMessage();
+    await handleVoiceCorrection(message, { logger, channels: CHANNELS, store });
+    expect(reactions).toEqual(["✅"]);
+    expect(queued).toHaveLength(1);
+    const action = queued[0] as PendingAction;
+    expect(action.type).toBe(VOICE_CORRECTION_ACTION_TYPE);
+    const payload = voiceCorrectionPayloadSchema.parse(JSON.parse(action.payloadJson ?? ""));
+    expect(payload.prNumber).toBe(7);
+    expect(payload.originalMessageId).toBe("333333333333333333");
+    expect(payload.correction).toBe("給脂は週イチです");
+  });
+
+  it("マーカーの無い返信・bot の投稿では何もしない", async () => {
+    const { logger } = fakeLogger();
+    const { store, queued } = fakeStore();
+    const { message } = fakeCorrectionMessage({ refContent: "ふつうの bot 返信" });
+    await handleVoiceCorrection(message, { logger, channels: CHANNELS, store });
+    const { message: botMsg } = fakeCorrectionMessage({ authorBot: true });
+    await handleVoiceCorrection(botMsg, { logger, channels: CHANNELS, store });
+    expect(queued).toHaveLength(0);
+  });
+});

@@ -184,3 +184,136 @@ export async function handleVoiceMemo(message: Message, deps: VoiceMemoDeps): Pr
     withCorrelation(deps.logger, "voice-memo").error({ err }, "voice memo capture failed");
   }
 }
+
+// --- 訂正フライホイール(§6.4 ③-b L485 / PR-V4)---
+
+/** pending_actions の type(訂正)。消費側は voice-pipeline.ts。 */
+export const VOICE_CORRECTION_ACTION_TYPE = "voice_correction";
+
+/** bot の「こう記録しました」返信の先頭マーカー(検知と対で使う)。 */
+export const VOICE_REPLY_MARKER = "🎙️ こう記録しました";
+
+/** 訂正キューの payload。branch は originalMessageId から決定的に復元する。 */
+export const voiceCorrectionPayloadSchema = z.object({
+  /** 元の音声メモの messageId(= voice-memo/<id> ブランチ)。 */
+  originalMessageId: z.string(),
+  /** bot 返信から抽出した PR 番号(open/merged 判定用)。 */
+  prNumber: z.number().int().positive(),
+  /** bot 返信から抽出した原本パス。 */
+  transcriptPath: z.string().min(1),
+  /** 訂正指示(返信本文)。 */
+  correction: z.string().min(1),
+  channelId: z.string(),
+  /** 訂正メッセージの id(反映結果の返信先)。 */
+  correctionMessageId: z.string(),
+  correctorId: z.string(),
+});
+export type VoiceCorrectionPayload = z.infer<typeof voiceCorrectionPayloadSchema>;
+
+/** bot 返信本文から PR 番号を抽出(無ければ null)。 */
+export function extractPrNumber(content: string): number | null {
+  const m = /\/pull\/(\d+)/.exec(content);
+  return m === null ? null : Number(m[1]);
+}
+
+/** bot 返信本文から原本パスを抽出(無ければ null)。 */
+export function extractTranscriptPath(content: string): string | null {
+  const m = /`(interviews\/voice-memos\/[^`]+)`/.exec(content);
+  return m === null ? null : (m[1] as string);
+}
+
+export interface VoiceCorrectionInput {
+  /** 訂正者(人間のみ)。 */
+  authorIsBot: boolean;
+  /** 返信先が bot 自身の投稿か。 */
+  referencedAuthorIsSelf: boolean;
+  /** 返信先(bot の「こう記録しました」)の本文。 */
+  referencedContent: string;
+  /** 返信先がさらに返信していた元メッセージ(= 音声メモ本体)の id。 */
+  referencedReferenceId: string | null;
+  /** 訂正本文。 */
+  content: string;
+}
+
+export type VoiceCorrectionDecision =
+  | { capture: true; originalMessageId: string; prNumber: number; transcriptPath: string }
+  | { capture: false; reason: string };
+
+/**
+ * 訂正返信のガード判定(純関数)。「bot の 🎙️ 記録返信への人間の返信」だけを拾う
+ * (handleGapAnswer の webhook 判定と同じ思想。マーカー + 抽出可能な PR/パスで他の bot 返信を除外)。
+ */
+export function voiceCorrectionDecision(input: VoiceCorrectionInput): VoiceCorrectionDecision {
+  if (input.authorIsBot) return { capture: false, reason: "bot-author" };
+  if (!input.referencedAuthorIsSelf) return { capture: false, reason: "not-self-reference" };
+  if (!input.referencedContent.startsWith(VOICE_REPLY_MARKER)) {
+    return { capture: false, reason: "not-voice-reply" };
+  }
+  if (input.content.trim().length === 0) return { capture: false, reason: "empty-correction" };
+  if (input.referencedReferenceId === null) {
+    return { capture: false, reason: "no-original-reference" };
+  }
+  const prNumber = extractPrNumber(input.referencedContent);
+  const transcriptPath = extractTranscriptPath(input.referencedContent);
+  if (prNumber === null || transcriptPath === null) {
+    return { capture: false, reason: "unparsable-reply" };
+  }
+  return {
+    capture: true,
+    originalMessageId: input.referencedReferenceId,
+    prNumber,
+    transcriptPath,
+  };
+}
+
+/**
+ * bot の「こう記録しました」返信への返信(訂正)を捕捉してキューへ積む(§6.4 L485 / PR-V4)。
+ * 反映(fast モデル + PR ブランチ更新)は voice-pipeline が行う。
+ * 例外は封じ込め(catch → log)。
+ */
+export async function handleVoiceCorrection(message: Message, deps: VoiceMemoDeps): Promise<void> {
+  try {
+    if (message.author.bot) return;
+    const referenceId = message.reference?.messageId;
+    if (referenceId === undefined) return;
+    const botId = message.client.user?.id;
+    if (botId === undefined) return;
+
+    // 返信元(bot の記録返信)を取得。削除済みは throw → catch。
+    const referenced = await message.fetchReference();
+    const decision = voiceCorrectionDecision({
+      authorIsBot: message.author.bot,
+      referencedAuthorIsSelf: referenced.author.id === botId,
+      referencedContent: referenced.content,
+      referencedReferenceId: referenced.reference?.messageId ?? null,
+      content: message.content,
+    });
+    if (!decision.capture) return;
+
+    const log = withCorrelation(deps.logger, `voice-correction:${message.id}`);
+    const payload: VoiceCorrectionPayload = {
+      originalMessageId: decision.originalMessageId,
+      prNumber: decision.prNumber,
+      transcriptPath: decision.transcriptPath,
+      correction: message.content,
+      channelId: message.channelId,
+      correctionMessageId: message.id,
+      correctorId: message.author.id,
+    };
+    deps.store.queueAction({
+      id: randomUUID(),
+      type: VOICE_CORRECTION_ACTION_TYPE,
+      queryId: null,
+      payloadJson: JSON.stringify(payload),
+      state: "pending",
+      createdAt: isoJst(),
+    });
+    await message.react("✅"); // 受領 ack(反映完了は別途返信)
+    log.info({ correctorId: message.author.id, pr: decision.prNumber }, "voice correction queued");
+  } catch (err) {
+    withCorrelation(deps.logger, "voice-correction").error(
+      { err },
+      "voice correction capture failed",
+    );
+  }
+}

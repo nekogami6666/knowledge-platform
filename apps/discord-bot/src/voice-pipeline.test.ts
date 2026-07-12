@@ -305,3 +305,145 @@ describe("processVoiceMemoQueue", () => {
     expect(done).toEqual(["ACT1"]);
   });
 });
+
+// --- 訂正フライホイール(PR-V4)------------------------------------------------
+
+import { buildVoiceMemoDoc } from "@stratum/kb-core";
+import type { VoiceCorrectionPayload } from "./voice.js";
+import {
+  type CorrectionSearchFn,
+  processVoiceCorrectionQueue,
+  type VoiceCorrectionResult,
+} from "./voice-pipeline.js";
+
+const TRANSCRIPT_PATH = `interviews/voice-memos/2026/2026-07-08-${MSG_ID}.md`;
+const CURRENT_DOC = buildVoiceMemoDoc({
+  transcript: "給脂は月イチで行う。",
+  messageUrl: `https://discord.com/channels/${GUILD_ID}/${CHANNEL_ID}/${MSG_ID}`,
+  author: "yamada",
+  dateJst: "2026-07-08",
+  sttModel: "gpt-4o-transcribe",
+});
+
+function correctionPayload(over: Partial<VoiceCorrectionPayload> = {}): VoiceCorrectionPayload {
+  return {
+    originalMessageId: MSG_ID,
+    prNumber: 7,
+    transcriptPath: TRANSCRIPT_PATH,
+    correction: "月イチではなく週イチです",
+    channelId: CHANNEL_ID,
+    correctionMessageId: "444444444444444444",
+    correctorId: "U1",
+    ...over,
+  };
+}
+
+function correctionAction(p: VoiceCorrectionPayload = correctionPayload()): PendingAction {
+  return {
+    id: "CORR-ACT1",
+    type: "voice_correction",
+    queryId: null,
+    payloadJson: JSON.stringify(p),
+    state: "pending",
+    createdAt: "2026-07-08T11:00:00+09:00",
+  };
+}
+
+function fakeCorrectionGh(
+  opts: { prState?: string; merged?: boolean; commitThrows?: unknown; fileMissing?: boolean } = {},
+): { gh: GhClient; commits: { branch: string; files: { path: string; content: string }[] }[] } {
+  const commits: { branch: string; files: { path: string; content: string }[] }[] = [];
+  const gh = {
+    getPullRequest: vi.fn(async () => ({
+      number: 7,
+      state: opts.prState ?? "open",
+      merged: opts.merged ?? false,
+      mergeableState: "clean",
+      title: "t",
+      url: "https://github.com/org/knowledge-base/pull/7",
+    })),
+    getFileContents: vi.fn(async () =>
+      opts.fileMissing === true ? null : { content: CURRENT_DOC, sha: "S" },
+    ),
+    commitFiles: vi.fn(async (o: { branch: string; files: never }) => {
+      if (opts.commitThrows !== undefined) throw opts.commitThrows;
+      commits.push(o as never);
+      return { sha: "C" };
+    }),
+  } as unknown as GhClient;
+  return { gh, commits };
+}
+
+const correctionFixed: CorrectionSearchFn = async () => ({
+  value: { transcript: "給脂は週イチで行う。" } satisfies VoiceCorrectionResult,
+  usage: { inputTokens: 1, outputTokens: 1 },
+});
+
+describe("processVoiceCorrectionQueue", () => {
+  it("open PR のブランチ上の原本に訂正を反映し、✅ 返信して done", async () => {
+    const { store, done } = fakeStore([correctionAction()]);
+    const { gh, commits } = fakeCorrectionGh();
+    const { messenger, replies } = fakeMessenger();
+    await processVoiceCorrectionQueue(
+      mkDeps({ store, gh, messenger, correctionSearch: correctionFixed }),
+    );
+
+    expect(commits).toHaveLength(1);
+    const commit = commits[0] as (typeof commits)[number];
+    expect(commit.branch).toBe(`voice-memo/${MSG_ID}`);
+    const file = commit.files[0] as { path: string; content: string };
+    expect(file.path).toBe(TRANSCRIPT_PATH);
+    expect(file.content).toContain("## 文字起こし\n\n給脂は週イチで行う。");
+    expect(file.content).toContain("# Voice memo 2026-07-08(yamada)"); // ヘッダは保持
+    expect(replies).toHaveLength(1);
+    expect(replies[0]).toContain("✅");
+    expect(done).toEqual(["CORR-ACT1"]);
+  });
+
+  it("マージ/クローズ済み PR には反映せず案内して done(初期スコープ)", async () => {
+    const { store, done } = fakeStore([correctionAction()]);
+    const { gh, commits } = fakeCorrectionGh({ merged: true, prState: "closed" });
+    const { messenger, replies } = fakeMessenger();
+    await processVoiceCorrectionQueue(
+      mkDeps({ store, gh, messenger, correctionSearch: correctionFixed }),
+    );
+    expect(commits).toHaveLength(0);
+    expect(replies[0]).toContain("マージ/クローズ済み");
+    expect(done).toEqual(["CORR-ACT1"]);
+  });
+
+  it("ブランチ更新の CONFLICT(手編集と競合)は案内して done", async () => {
+    const { store, done } = fakeStore([correctionAction()]);
+    const { gh } = fakeCorrectionGh({
+      commitThrows: new GhClientError("CONFLICT", "non-fast-forward"),
+    });
+    const { messenger, replies } = fakeMessenger();
+    await processVoiceCorrectionQueue(
+      mkDeps({ store, gh, messenger, correctionSearch: correctionFixed }),
+    );
+    expect(replies[0]).toContain("直接編集");
+    expect(done).toEqual(["CORR-ACT1"]);
+  });
+
+  it("LLM の一時的失敗は pending を残す(次回再試行)", async () => {
+    const { store, done } = fakeStore([correctionAction()]);
+    const { gh, commits } = fakeCorrectionGh();
+    const failing: CorrectionSearchFn = async () => {
+      throw new LlmError("OVERLOADED", "529");
+    };
+    await processVoiceCorrectionQueue(mkDeps({ store, gh, correctionSearch: failing }));
+    expect(commits).toHaveLength(0);
+    expect(done).toHaveLength(0);
+  });
+
+  it("原本が見つからない場合は案内して done", async () => {
+    const { store, done } = fakeStore([correctionAction()]);
+    const { gh } = fakeCorrectionGh({ fileMissing: true });
+    const { messenger, replies } = fakeMessenger();
+    await processVoiceCorrectionQueue(
+      mkDeps({ store, gh, messenger, correctionSearch: correctionFixed }),
+    );
+    expect(replies).toHaveLength(1);
+    expect(done).toEqual(["CORR-ACT1"]);
+  });
+});

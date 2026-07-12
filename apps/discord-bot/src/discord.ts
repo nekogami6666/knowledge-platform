@@ -39,7 +39,7 @@ import {
 import type { BotStore } from "./db.js";
 import { withCorrelation } from "./logger.js";
 import { isoJst } from "./time.js";
-import { handleVoiceMemo } from "./voice.js";
+import { handleVoiceCorrection, handleVoiceMemo } from "./voice.js";
 
 /** /ask コマンド定義(登録は別途 REST で行う)。 */
 export const askCommand = new SlashCommandBuilder()
@@ -212,12 +212,15 @@ export function createBot(deps: BotDeps): Client {
   // 受付後は onVoiceMemoQueued がパイプライン(STT → 単発 PR → 返信・PR-V3)を起こす。
   client.on(Events.MessageCreate, async (message) => {
     await handleGapAnswer(message, deps);
-    await handleVoiceMemo(message, {
+    const voiceDeps = {
       logger: deps.logger,
       channels: deps.channels,
       store: deps.store,
       ...(deps.voice !== undefined ? { voice: deps.voice } : {}),
-    });
+    };
+    await handleVoiceMemo(message, voiceDeps);
+    // §6.4 L485(PR-V4): bot の記録返信への返信 = 訂正。voice 設定に依らず bot 返信マーカーで判定。
+    await handleVoiceCorrection(message, voiceDeps);
     deps.onVoiceMemoQueued?.();
   });
 

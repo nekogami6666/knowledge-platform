@@ -16,6 +16,7 @@
 | `prompts/extractor/reconcile.md` | standard | 抽出候補と既存 KB の照合 |
 | `prompts/capture/triage.md` | fast | 💡スレッドのナレッジ候補判定 |
 | `prompts/capture/draft.md` | standard | スレッド/音声メモ → エントリ草案 |
+| `prompts/voice/correct.md` | fast | 音声メモ原本への訂正反映(§6.4 ③-b L485・PR-V4) |
 | `prompts/gap/request.md` | fast | 専門家への依頼文生成 |
 | `prompts/expertise/cluster.md` | deep | トピック増分クラスタリング |
 | `prompts/interview/questions.md` | deep | インタビュー質問リスト生成 |
