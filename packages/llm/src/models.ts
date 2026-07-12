@@ -23,3 +23,11 @@ export const MODELS: Readonly<Record<ModelRole, string>> = {
 export function modelIdFor(role: ModelRole): string {
   return MODELS[role];
 }
+
+/**
+ * 音声文字起こし(STT)のモデル ID(ADR-0015 D2)。ModelRole(Claude プロンプト用)とは別軸で、
+ * プロンプト frontmatter の role には使えない。エンジンは既存議事録パイプライン(QB-Meeting-Ops)と
+ * 同一の OpenAI transcription API。個人メモは一人語りのため話者分離なし版を既定にする。
+ * 四半期見直し(§5.2)の対象に含める。
+ */
+export const STT_MODEL = "gpt-4o-transcribe";

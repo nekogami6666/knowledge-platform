@@ -19,7 +19,7 @@ export { LlmError, type LlmErrorCode, RETRYABLE_LLM_CODES } from "./errors.js";
 // --- モデル設定 ---
 // 全 AI 操作は Claude on AWS(Agent SDK)経由に統一(ADR-0009)。第一者直叩き(@anthropic-ai/sdk・
 // generateStructured)とプロバイダ抽象(resolveProvider/LlmProvider)は撤去済み。
-export { MODELS, type ModelRole, modelIdFor } from "./models.js";
+export { MODELS, type ModelRole, modelIdFor, STT_MODEL } from "./models.js";
 // --- プロンプトローダ ---
 export {
   createFsPromptStore,
@@ -29,5 +29,13 @@ export {
 } from "./prompts.js";
 // --- リトライ ---
 export { type RetryOptions, withRetry } from "./retry.js";
+// --- STT(音声文字起こし。ADR-0015。音声のみ OpenAI・言語処理は Claude のまま)---
+export {
+  createOpenAiTranscriber,
+  type OpenAiTranscriberOptions,
+  type TranscribeInput,
+  type TranscribeResult,
+  type Transcriber,
+} from "./stt.js";
 // --- usage 記録 ---
 export { nullUsageRecorder, type Usage, type UsageRecorder } from "./usage.js";
