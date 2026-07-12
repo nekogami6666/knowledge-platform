@@ -90,3 +90,10 @@ export {
   type RepoValidationReport,
   validateRepo,
 } from "./validate-repo.js";
+// --- voice-memo 原本(§6.4 ③-b / ADR-0015)---
+export {
+  buildVoiceMemoDoc,
+  VOICE_MEMOS_DIR,
+  type VoiceMemoDocInput,
+  voiceMemoPath,
+} from "./voice-memo.js";

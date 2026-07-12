@@ -26,6 +26,8 @@ const envSchema = z
     GITHUB_APP_PRIVATE_KEY: z.string().optional(),
     GITHUB_APP_INSTALLATION_ID: z.string().optional(),
     GITHUB_TOKEN: z.string().optional(),
+    /** voice-memo の STT 用 OpenAI キー(ADR-0015 D3)。未設定なら voice-memo OFF。ログに出さない。 */
+    OPENAI_API_KEY: z.string().optional(),
     /** 検索対象リポの clone ルート(cwd)。 */
     CLONES_DIR: z.string().default("./.clones"),
     /** SQLite ファイルパス。 */

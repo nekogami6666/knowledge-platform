@@ -78,6 +78,8 @@ export interface BotDeps {
   clonesDir?: string;
   /** voice-memo(§6.4 ③-b)。未指定または channel_id が null なら機能 OFF。 */
   voice?: VoiceConfig;
+  /** voice-memo 受付直後にパイプライン(voice-pipeline.ts)を起こす hook(PR-V3)。 */
+  onVoiceMemoQueued?: () => void;
 }
 
 /** §9.2 default-deny: 許可されないチャンネルへの拒否メッセージ。許可なら null。 */
@@ -207,6 +209,7 @@ export function createBot(deps: BotDeps): Client {
 
   // §6.5 ④UI(PR-D2): gap 依頼(webhook)への「返信」を捕捉して gap_answer をキューへ。
   // §6.4 ③-b(PR-V1): #voice-memo への音声投稿を検知して voice_memo をキューへ(voice 未設定なら no-op)。
+  // 受付後は onVoiceMemoQueued がパイプライン(STT → 単発 PR → 返信・PR-V3)を起こす。
   client.on(Events.MessageCreate, async (message) => {
     await handleGapAnswer(message, deps);
     await handleVoiceMemo(message, {
@@ -215,6 +218,7 @@ export function createBot(deps: BotDeps): Client {
       store: deps.store,
       ...(deps.voice !== undefined ? { voice: deps.voice } : {}),
     });
+    deps.onVoiceMemoQueued?.();
   });
 
   return client;
@@ -528,4 +532,28 @@ export async function handleButton(interaction: ButtonInteraction, deps: BotDeps
       }
     }
   }
+}
+
+/**
+ * voice-pipeline(PR-V3)用の Discord 送信 seam。channelId/messageId からスレッド返信、
+ * userId から DM を送る(discord.js のグルー。パイプライン本体は discord.js に依存しない)。
+ */
+export function createClientMessenger(client: Client): {
+  reply(channelId: string, messageId: string, content: string): Promise<void>;
+  dm(userId: string, content: string): Promise<void>;
+} {
+  return {
+    async reply(channelId, messageId, content) {
+      const channel = await client.channels.fetch(channelId);
+      if (channel === null || !channel.isTextBased()) {
+        throw new Error(`channel ${channelId} is not text-based`);
+      }
+      const message = await channel.messages.fetch(messageId);
+      await message.reply(content);
+    },
+    async dm(userId, content) {
+      const user = await client.users.fetch(userId);
+      await user.send(content);
+    },
+  };
 }

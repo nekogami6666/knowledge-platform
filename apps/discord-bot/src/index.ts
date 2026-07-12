@@ -5,7 +5,13 @@
  */
 import { randomUUID } from "node:crypto";
 import { createGhClientFromEnv, type GhClient } from "@stratum/gh-client";
-import { createFsPromptStore, nullUsageRecorder } from "@stratum/llm";
+import {
+  createFsPromptStore,
+  createOpenAiTranscriber,
+  nullUsageRecorder,
+  type Transcriber,
+} from "@stratum/llm";
+import { Events } from "discord.js";
 import { type AskDeps, handleAskRequest } from "./ask.js";
 import {
   createFsConfigReader,
@@ -15,13 +21,14 @@ import {
   loadRepos,
   loadVoice,
 } from "./config.js";
-import { type AskHandler, createBot } from "./discord.js";
+import { type AskHandler, createBot, createClientMessenger } from "./discord.js";
 import { parseEnv } from "./env.js";
 import { createLogger, withCorrelation } from "./logger.js";
 import { createQaSearch } from "./qa-search.js";
 import { createGitRepoSyncer } from "./repos.js";
 import { createSqliteStore } from "./sqlite-store.js";
 import { isoJst } from "./time.js";
+import { createVoiceMemoWorker } from "./voice-pipeline.js";
 
 async function main(): Promise<void> {
   const env = parseEnv();
@@ -32,6 +39,7 @@ async function main(): Promise<void> {
     env.ANTHROPIC_AWS_API_KEY,
     env.GITHUB_TOKEN,
     env.GITHUB_APP_PRIVATE_KEY,
+    env.OPENAI_API_KEY,
   ].filter((v): v is string => typeof v === "string" && v.length > 0);
   const logger = createLogger("info", undefined, secrets);
 
@@ -104,6 +112,18 @@ async function main(): Promise<void> {
     );
   };
 
+  // §6.4 ③-b voice-memo の STT(ADR-0015)。キー未設定なら機能 OFF(検知が有効ならその旨警告)。
+  let transcriber: Transcriber | undefined;
+  if (env.OPENAI_API_KEY !== undefined && env.OPENAI_API_KEY.length > 0) {
+    transcriber = createOpenAiTranscriber({ apiKey: env.OPENAI_API_KEY });
+  } else if (voice.channel_id !== null) {
+    logger.warn(
+      "voice.yaml は設定されていますが OPENAI_API_KEY が無いため文字起こしは行われません(受付のみ・ADR-0015)。",
+    );
+  }
+
+  // ワーカーは client 依存(返信・DM)のため createBot 後に生成し、hook は遅延参照にする。
+  let voiceWorker: { kick(): void } | undefined;
   const bot = createBot({
     logger,
     channels,
@@ -116,9 +136,24 @@ async function main(): Promise<void> {
     members,
     promptStore,
     clonesDir: env.CLONES_DIR,
-    // §6.4 ③-b voice-memo: 検知・受付(channel_id が null なら OFF・PR-V1)。
+    // §6.4 ③-b voice-memo: 検知・受付(channel_id が null なら OFF・PR-V1)+ 受付後の起床(PR-V3)。
     voice,
+    onVoiceMemoQueued: () => voiceWorker?.kick(),
   });
+  voiceWorker = createVoiceMemoWorker({
+    logger,
+    store,
+    members,
+    ops,
+    ...(gh !== undefined ? { gh } : {}),
+    promptStore,
+    cwd: env.CLONES_DIR,
+    ...(transcriber !== undefined ? { transcriber } : {}),
+    messenger: createClientMessenger(bot),
+  });
+  // 起動時レジューム(ADR-0015 D5): 再起動前に受け付けた pending を拾う。
+  bot.once(Events.ClientReady, () => voiceWorker?.kick());
+
   await bot.login(env.DISCORD_TOKEN);
   logger.info("discord-bot started");
 }
