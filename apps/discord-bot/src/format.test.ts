@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { ResolvedCitation } from "./ask.js";
-import { citationUrl, formatAnswer } from "./format.js";
+import { citationUrl, formatAnswer, STALE_NOTE } from "./format.js";
 
 describe("citationUrl (commit-SHA permalink)", () => {
   it("github_file は blob/<SHA>/path#行アンカー", () => {
@@ -51,5 +51,16 @@ describe("formatAnswer", () => {
 
   it("引用が無ければ本文のみ", () => {
     expect(formatAnswer("答え", [])).toBe("答え");
+  });
+
+  it("stale な KB 引用には注記を付す(§6.7 / C8。他の引用には付けない)", () => {
+    const citations: ResolvedCitation[] = [
+      { kind: "github_file", repo: "org/kb", path: "knowledge/x.md", ref: "sha1", stale: true },
+      { kind: "github_file", repo: "org/kb", path: "knowledge/y.md", ref: "sha1" },
+    ];
+    const out = formatAnswer("答え", citations);
+    expect(out).toContain(`[1] https://github.com/org/kb/blob/sha1/knowledge/x.md ${STALE_NOTE}`);
+    expect(out).toContain("[2] https://github.com/org/kb/blob/sha1/knowledge/y.md");
+    expect(out.split("\n").at(-1)).not.toContain(STALE_NOTE);
   });
 });

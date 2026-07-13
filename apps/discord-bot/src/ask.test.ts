@@ -77,6 +77,77 @@ describe("validateCitations (修正5: LLM 返却を信頼しない多層検証)"
   });
 });
 
+describe("stale KB 注記(§6.7 / C8: stale エントリの引用は除外せずフラグを付けて通す)", () => {
+  const STALE_ENTRY = `---
+id: kb-2026-0001
+title: 古い知識
+type: fact
+domain: hardware
+tags: []
+sources:
+  - kind: discord
+    url: "https://discord.com/channels/1/2/3"
+confidence: high
+status: stale
+created: "2026-01-10"
+last_verified: "2026-01-10"
+owner: yamada
+---
+
+本文
+`;
+  const ACTIVE_ENTRY = STALE_ENTRY.replace("status: stale", "status: active");
+  const kbSynced: SyncedRepo[] = [
+    { repo: "org/knowledge-base", absDir: "/clones/kb", resolvedCommit: "sha-kb" },
+  ];
+  const exists = (): boolean => true;
+  const cite = (path: string): QaCitation[] => [
+    { kind: "github_file", repo: "org/knowledge-base", path },
+  ];
+
+  it("stale エントリは stale: true 付きで通す", () => {
+    const out = validateCitations(cite("knowledge/hardware/x.md"), kbSynced, exists, () => STALE_ENTRY);
+    expect(out).toEqual([
+      {
+        kind: "github_file",
+        repo: "org/knowledge-base",
+        path: "knowledge/hardware/x.md",
+        ref: "sha-kb",
+        stale: true,
+      },
+    ]);
+  });
+
+  it("active エントリには stale キーを付けない", () => {
+    const out = validateCitations(cite("knowledge/hardware/x.md"), kbSynced, exists, () => ACTIVE_ENTRY);
+    expect(out).toEqual([
+      { kind: "github_file", repo: "org/knowledge-base", path: "knowledge/hardware/x.md", ref: "sha-kb" },
+    ]);
+  });
+
+  it("KB スキーマでない .md(議事録など)は判定対象外(注記なしで通す)", () => {
+    const out = validateCitations(cite("2026/minutes.md"), kbSynced, exists, () => "# 議事録\n本文\n");
+    expect(out[0]).not.toHaveProperty("stale");
+  });
+
+  it("読み取り失敗(null)でも引用自体は壊さない", () => {
+    const out = validateCitations(cite("knowledge/hardware/x.md"), kbSynced, exists, () => null);
+    expect(out).toHaveLength(1);
+    expect(out[0]).not.toHaveProperty("stale");
+  });
+
+  it(".md 以外の引用ではファイルを読まない", () => {
+    let called = 0;
+    const readFile = (): string | null => {
+      called += 1;
+      return null;
+    };
+    const out = validateCitations(cite("src/main.ts"), kbSynced, exists, readFile);
+    expect(out).toHaveLength(1);
+    expect(called).toBe(0);
+  });
+});
+
 // --- synthetic 統合テスト(修正5: /ask パイプライン end-to-end・全SDKモック) ---
 
 function fakeSyncer(): RepoSyncer {

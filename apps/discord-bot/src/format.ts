@@ -26,9 +26,17 @@ export function citationUrl(c: ResolvedCitation): string {
   }
 }
 
+/** stale な KB エントリを引用したときの注記(§6.7 / C8。除外せず注記付きで引用する)。 */
+export const STALE_NOTE = "※最終確認から時間が経っています(stale)";
+
 /** 回答本文に出典脚注を付す。引用が無ければ本文のみ(呼び出し側で notFound に倒す前提)。 */
 export function formatAnswer(answer: string, citations: readonly ResolvedCitation[]): string {
   if (citations.length === 0) return answer;
-  const notes = citations.map((c, i) => `[${i + 1}] ${citationUrl(c)}`).join("\n");
+  const notes = citations
+    .map((c, i) => {
+      const stale = c.kind === "github_file" && c.stale === true ? ` ${STALE_NOTE}` : "";
+      return `[${i + 1}] ${citationUrl(c)}${stale}`;
+    })
+    .join("\n");
   return `${answer}\n\n出典:\n${notes}`;
 }

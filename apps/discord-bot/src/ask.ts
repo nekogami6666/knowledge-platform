@@ -7,9 +7,9 @@
  * とは別物(修正2)。kb-core は検証・permalink 変換の道具としてのみ再利用する(format.ts)。
  * commit SHA(resolvedCommit)は LLM を信頼せず bot が付与する(permalink が後からズレないため)。
  */
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join, normalize } from "node:path";
-import { parseLineRange } from "@stratum/kb-core";
+import { parseLineRange, safeParseEntry } from "@stratum/kb-core";
 import { loadPrompt, type PromptStore, type Usage } from "@stratum/llm";
 import { z } from "zod";
 import type { AnswerStatus, BotStore } from "./db.js";
@@ -80,7 +80,15 @@ export type QaAnswer = z.infer<typeof qaAnswerSchema>;
 
 /** 検証通過 + bot が ref(commit SHA)を付与した引用。permalink 生成可能。 */
 export type ResolvedCitation =
-  | { kind: "github_file"; repo: string; path: string; ref: string; lines?: string }
+  | {
+      kind: "github_file";
+      repo: string;
+      path: string;
+      ref: string;
+      lines?: string;
+      /** 引用先が KB エントリで status:"stale" のとき true(§6.7 の注記付き引用・C8)。 */
+      stale?: boolean;
+    }
   | { kind: "github_pr"; repo: string; number: number }
   | { kind: "github_issue"; repo: string; number: number }
   | { kind: "discord"; url: string };
@@ -96,6 +104,32 @@ function isSafeRelPath(path: string): boolean {
   return !norm.startsWith("..") && !norm.startsWith("/");
 }
 
+/** 既定のファイル読み取り(注入可)。読めない場合は null(stale 判定をスキップするだけで壊さない)。 */
+const defaultReadFile = (absPath: string): string | null => {
+  try {
+    return readFileSync(absPath, "utf8");
+  } catch {
+    return null;
+  }
+};
+
+/**
+ * 引用先が「stale な KB エントリ」かをコードで決定論的に判定する(§6.7 / C8。LLM に任せない)。
+ * どの同期リポが knowledge-base かは設定で持たず、**内容で判定**する: kb-core のスキーマで
+ * parse できるファイルだけが KB エントリ(id 接頭辞で kind が排他なので、順に試して最初の成功を採る)。
+ * 議事録やコードの .md は frontmatter が無い/スキーマ外なので自然に対象外になる。
+ */
+export function isStaleKbEntry(raw: string): boolean {
+  for (const kind of ["knowledge", "decision", "question"] as const) {
+    const r = safeParseEntry(raw, kind);
+    if (r.ok) {
+      const fm = r.entry.frontmatter as { status?: unknown };
+      return fm.status === "stale";
+    }
+  }
+  return false;
+}
+
 /**
  * モデルが返した citation を多層検証する(修正5。LLM 返却を信頼しない)。
  * 1) zod は呼び出し側(qaAnswerSchema)で済み 2) ドメイン github/discord のみ
@@ -106,6 +140,7 @@ export function validateCitations(
   citations: readonly QaCitation[],
   synced: readonly SyncedRepo[],
   fileExists: (absPath: string) => boolean = existsSync,
+  readFile: (absPath: string) => string | null = defaultReadFile,
 ): ResolvedCitation[] {
   const byRepo = new Map(synced.map((s) => [s.repo, s]));
   const out: ResolvedCitation[] = [];
@@ -124,13 +159,18 @@ export function validateCitations(
     const syncedRepo = byRepo.get(c.repo);
     if (syncedRepo === undefined || !isSafeRelPath(c.path)) continue;
     if (c.lines !== undefined && !isValidLineRange(c.lines)) continue;
-    if (!fileExists(join(syncedRepo.absDir, c.path))) continue;
+    const absPath = join(syncedRepo.absDir, c.path);
+    if (!fileExists(absPath)) continue;
+    // §6.7 / C8: stale な KB エントリの引用は落とさず、注記フラグを付けて通す(除外はしない)。
+    const raw = c.path.endsWith(".md") ? readFile(absPath) : null;
+    const stale = raw !== null && isStaleKbEntry(raw);
     out.push({
       kind: "github_file",
       repo: c.repo,
       path: c.path,
       ref: syncedRepo.resolvedCommit,
       ...(c.lines !== undefined ? { lines: c.lines } : {}),
+      ...(stale ? { stale: true } : {}),
     });
   }
   return out;
@@ -168,6 +208,8 @@ export interface AskDeps {
   monotonicMs?: () => number;
   /** ファイル実在判定(注入。既定 fs.existsSync)。 */
   fileExists?: (absPath: string) => boolean;
+  /** 引用先ファイルの読み取り(stale KB 判定用。注入。既定 fs.readFileSync。失敗は null)。 */
+  readFile?: (absPath: string) => string | null;
   /** エラー観測フック(§7.4。既定 no-op。PR-4b で相関 ID 付き pino を渡す)。 */
   logError?: (err: unknown) => void;
 }
@@ -216,7 +258,12 @@ export async function handleAskRequest(req: AskRequest, deps: AskDeps): Promise<
     });
     const valid = value.notFound
       ? []
-      : validateCitations(value.citations, synced, deps.fileExists ?? existsSync);
+      : validateCitations(
+          value.citations,
+          synced,
+          deps.fileExists ?? existsSync,
+          deps.readFile ?? defaultReadFile,
+        );
 
     // P6 / 出典規律: notFound、または出典が全滅したら捏造せず未回答に倒す(修正5 step6)。
     if (value.notFound || valid.length === 0) {
