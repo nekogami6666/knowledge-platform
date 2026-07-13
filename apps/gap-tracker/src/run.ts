@@ -13,8 +13,15 @@
 import { join } from "node:path";
 import type { BotStore } from "@stratum/discord-bot/store";
 import type { FileChange, GhClient } from "@stratum/gh-client";
-import { allocateId, type IdCounterStore, serializeEntry } from "@stratum/kb-core";
+import {
+  allocateId,
+  type ExpertiseMap,
+  type IdCounterStore,
+  parseExpertiseMap,
+  serializeEntry,
+} from "@stratum/kb-core";
 import type { Assignee, GapConfig } from "./config.js";
+import { rankByExpertise } from "./expertise.js";
 import type { SyncedKb } from "./kb-sync.js";
 import type { Logger } from "./logger.js";
 import { buildQuestion, buildRequestMessage, containsQueryId, selectAssignee } from "./question.js";
@@ -76,6 +83,19 @@ export async function runGapTracker(deps: RunDeps): Promise<RunSummary> {
   const raws = await deps.listQuestionRaws(kb.absDir);
   const idStore = deps.makeIdStore(kb.absDir);
 
+  // §4.4 L302: expertise.yaml があれば担当選定に使う(未生成・読取不可は従来ラウンドロビン)。
+  // parse 失敗も warn に留めて続行する(担当選定は依頼の付加価値であり、質問 commit を止めない)。
+  let expertise: ExpertiseMap | null = null;
+  try {
+    expertise = parseExpertiseMap(
+      await deps.readFile(join(kb.absDir, "expertise", "expertise.yaml")),
+    );
+  } catch {
+    logger.info(
+      "expertise.yaml が読めないため従来のラウンドロビンで選定します(Phase 4 生成前は正常)。",
+    );
+  }
+
   const files: FileChange[] = [];
   const requests: string[] = [];
   const doneIds: string[] = [];
@@ -98,7 +118,13 @@ export async function runGapTracker(deps: RunDeps): Promise<RunSummary> {
       summary.skipped += 1;
       continue;
     }
-    const assignee: Assignee | null = selectAssignee(config.assignees, rr, deps.reserveAssignee);
+    const preferred = expertise === null ? [] : rankByExpertise(query.question, expertise);
+    const assignee: Assignee | null = selectAssignee(
+      config.assignees,
+      rr,
+      deps.reserveAssignee,
+      preferred,
+    );
     rr += 1;
     const id = await allocateId("q", idStore, { now: deps.now() });
     const built = buildQuestion(id, query, assignee, deps.githubForDiscord);
