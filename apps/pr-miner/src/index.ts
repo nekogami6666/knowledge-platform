@@ -11,7 +11,7 @@ import {
   mkdir,
 } from "node:fs/promises";
 import { dirname } from "node:path";
-import { createGhClientFromEnv, type GhClient } from "@stratum/gh-client";
+import { createGhClientFromAuth, createGhClientFromEnv, type GhClient } from "@stratum/gh-client";
 import { createLocalIdCounterStore, validateRepo } from "@stratum/kb-core";
 import { createFsPromptStore, nullUsageRecorder } from "@stratum/llm";
 import { createFsConfigReader, loadPrMinerConfig } from "./config.js";
@@ -43,6 +43,7 @@ async function main(): Promise<void> {
   const secrets = [
     env.ANTHROPIC_AWS_API_KEY,
     env.GITHUB_TOKEN,
+    env.GITHUB_READ_TOKEN,
     env.GITHUB_APP_PRIVATE_KEY,
     env.DISCORD_OPS_WEBHOOK,
   ].filter((v): v is string => typeof v === "string" && v.length > 0);
@@ -57,11 +58,19 @@ async function main(): Promise<void> {
     logger.warn(concurrency.warning, { env: "PR_MINER_RECONCILE_CONCURRENCY" });
 
   // targets 非空のときだけ GitHub 認証を構築(PR 読み取りに必要。dry-run でも読み取りはする)。
+  // GITHUB_READ_TOKEN があれば読み取りだけ PAT に分離(read = PAT / write = App・ADR-0013 D4)。
   const enabled = config.targets.length > 0;
+  const gh = enabled ? createGhClientFromEnv() : nullGhClient();
+  const readToken = env.GITHUB_READ_TOKEN;
+  const ghRead =
+    enabled && readToken !== undefined && readToken.length > 0
+      ? createGhClientFromAuth({ kind: "token", token: readToken })
+      : gh;
   const deps: RunDeps = {
     config,
     kbRoot: env.KB_ROOT,
-    gh: enabled ? createGhClientFromEnv() : nullGhClient(),
+    gh,
+    ghRead,
     extractDeps: { promptStore, usage: nullUsageRecorder, timeoutMs: timeout.value },
     reconcileDeps: {
       promptStore,
