@@ -62,7 +62,4 @@ export class KbIdError extends Error {
 /** provenance ヘルパが不正・許可外ドメインの URL/source を扱ったときに投げる。 */
 export class KbProvenanceError extends Error {
   readonly name = "KbProvenanceError";
-  constructor(message: string) {
-    super(message);
-  }
 }
