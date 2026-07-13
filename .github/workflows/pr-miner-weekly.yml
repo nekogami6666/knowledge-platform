@@ -8,11 +8,12 @@
 # 必要 secrets:
 #   Claude on AWS: ANTHROPIC_AWS_API_KEY / ANTHROPIC_AWS_WORKSPACE_ID / AWS_REGION
 #   GitHub 書き込み(KB への PR): GH_APP_ID / GH_APP_PRIVATE_KEY / GH_APP_INSTALLATION_ID(§14#9 の App)
+#   対象リポの読み取り: GH_READ_PAT(fine-grained・対象リポに Pull requests: Read + Issues: Read。
+#     read = PAT / write = App の hybrid(ADR-0013 D4)。App のインストール先を対象リポへ広げない)
 #   KB clone(読み取り): EXTRACTOR_PAT(fine-grained・KB に Contents: Read)
 #   任意: DISCORD_OPS_WEBHOOK(#stratum-ops 通知)
 # 必要 vars(リポ名はハードコードしない・ADR-0013 D3):
 #   PR_MINER_KB_REPO(例 org/knowledge-base)/ PR_MINER_TARGETS(カンマ区切り。空 = 機能 OFF・§14#5)
-# 前提(人間・runbook 参照): GitHub App が対象リポに Pull requests: Read + Issues: Read を持つこと。
 # 手順の詳細: docs/runbooks/pr-miner-weekly.md
 name: pr-miner-weekly
 
@@ -88,11 +89,13 @@ jobs:
           ANTHROPIC_AWS_API_KEY: ${{ secrets.ANTHROPIC_AWS_API_KEY }}
           ANTHROPIC_AWS_WORKSPACE_ID: ${{ secrets.ANTHROPIC_AWS_WORKSPACE_ID }}
           AWS_REGION: ${{ secrets.AWS_REGION }}
-          # hybrid(ADR-0013 D4): PR/API は GitHub App のみ。GITHUB_TOKEN フォールバックは張らない
+          # hybrid(ADR-0013 D4): KB への PR 作成は GitHub App のみ。GITHUB_TOKEN フォールバックは張らない
           # (App 未設定なら fail-loud。誤って個人 PAT で PR を立てない)。KB clone は上の PAT。
           GITHUB_APP_ID: ${{ secrets.GH_APP_ID }}
           GITHUB_APP_PRIVATE_KEY: ${{ secrets.GH_APP_PRIVATE_KEY }}
           GITHUB_APP_INSTALLATION_ID: ${{ secrets.GH_APP_INSTALLATION_ID }}
+          # 対象リポの PR/コメント/ファイル読み取りは PAT(read = PAT / write = App の分離)。
+          GITHUB_READ_TOKEN: ${{ secrets.GH_READ_PAT }}
           DISCORD_OPS_WEBHOOK: ${{ secrets.DISCORD_OPS_WEBHOOK }}
           CONFIG_DIR: apps/pr-miner/config
           PROMPTS_DIR: ./prompts

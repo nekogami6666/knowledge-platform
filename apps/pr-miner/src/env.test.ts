@@ -29,6 +29,11 @@ describe("parseEnv", () => {
     expect(isRealPr(parseEnv({ ...base, PR_MINER_REAL: "1" }))).toBe(true);
     expect(isRealPr(parseEnv({ ...base, PR_MINER_REAL: "true" }))).toBe(true);
   });
+
+  it("GITHUB_READ_TOKEN は任意(read=PAT / write=App 分離用・未設定でも通る)", () => {
+    expect(parseEnv(base).GITHUB_READ_TOKEN).toBeUndefined();
+    expect(parseEnv({ ...base, GITHUB_READ_TOKEN: "ghp_x" }).GITHUB_READ_TOKEN).toBe("ghp_x");
+  });
 });
 
 describe("parsePositiveInt", () => {

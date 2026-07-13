@@ -144,6 +144,26 @@ function makeDeps(over: Partial<RunDeps> = {}): { deps: RunDeps; written: Record
 }
 
 describe("runPrMiner", () => {
+  it("ghRead 指定時: 対象リポの読み取りは ghRead、KB 操作(open 検知・PR 作成)は gh を使う", async () => {
+    const gh = makeGh();
+    const ghRead = makeGh();
+    const { deps } = makeDeps({ gh, ghRead });
+    const summary = await runPrMiner(deps);
+
+    expect(summary.created).toBe(true);
+    // 読み取り 3 API は ghRead 側だけが呼ばれる(read = PAT / write = App の分離・ADR-0013 D4)
+    expect(ghRead.listMergedPullRequests).toHaveBeenCalled();
+    expect(ghRead.listPullRequestComments).toHaveBeenCalled();
+    expect(ghRead.listPullRequestFiles).toHaveBeenCalled();
+    expect(gh.listMergedPullRequests).not.toHaveBeenCalled();
+    expect(gh.listPullRequestComments).not.toHaveBeenCalled();
+    expect(gh.listPullRequestFiles).not.toHaveBeenCalled();
+    // KB 側は gh のまま
+    expect(gh.listPullRequests).toHaveBeenCalled();
+    expect(gh.createPullRequest).toHaveBeenCalled();
+    expect(ghRead.createPullRequest).not.toHaveBeenCalled();
+  });
+
   it("happy path: 原本+カーソル+採番を 1 PR に載せ、head は週キー", async () => {
     const gh = makeGh();
     const { deps, written } = makeDeps({ gh });

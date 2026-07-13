@@ -20,6 +20,12 @@ const envSchema = z
     GITHUB_APP_PRIVATE_KEY: z.string().optional(),
     GITHUB_APP_INSTALLATION_ID: z.string().optional(),
     GITHUB_TOKEN: z.string().optional(),
+    /**
+     * 対象リポの読み取り専用 PAT(fine-grained・Pull requests/Issues: Read)。
+     * 設定すると読み取りだけこの PAT を使い、KB への書き込みは上の認証のまま(ADR-0013 D4 の hybrid)。
+     * GitHub App のインストール先を対象リポへ広げずに済む。未設定なら読み書き同一認証。
+     */
+    GITHUB_READ_TOKEN: z.string().optional(),
     /** #stratum-ops への通知 webhook(未設定なら通知 no-op)。 */
     DISCORD_OPS_WEBHOOK: z.string().optional(),
     /** "1"/"true" で実 PR 作成。既定は dry-run(候補をログのみ)。 */

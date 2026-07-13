@@ -29,7 +29,13 @@ export interface RunDeps {
   config: PrMinerConfig;
   /** KB clone のルート(workflow の checkout 済み)。 */
   kbRoot: string;
+  /** KB への書き込み(提案 PR 作成・open 検知)用クライアント(GitHub App)。 */
   gh: GhClient;
+  /**
+   * 対象リポの読み取り専用クライアント(ADR-0013 D4 の hybrid: read = PAT / write = App)。
+   * App のインストール先を対象リポへ広げないための分離。未指定なら gh を使う(単一認証でも動く)。
+   */
+  ghRead?: GhClient;
   extractDeps: Omit<PrExtractDeps, "existingDomains" | "cwd">;
   reconcileDeps: ReconcileDeps;
   makeIdStore: (kbRoot: string) => IdCounterStore;
@@ -111,7 +117,7 @@ export async function runPrMiner(deps: RunDeps): Promise<PrMinerSummary> {
     try {
       const since = sinceFor(state, repo, now, config.window_days);
       const cursor = state?.repos[repo]?.last_merged_at ?? null;
-      const merged = await deps.gh.listMergedPullRequests(repo, { since });
+      const merged = await (deps.ghRead ?? deps.gh).listMergedPullRequests(repo, { since });
       // カーソル由来の since は境界の再処理を避けるため merged_at > cursor で絞る(初回=cursor null は全件)。
       const fresh = (cursor === null ? merged : merged.filter((p) => p.mergedAt > cursor)).sort(
         (a, b) => a.mergedAt.localeCompare(b.mergedAt), // 昇順 = カーソルが最大に前進
@@ -216,8 +222,8 @@ async function minePr(
   files: { path: string; content: string }[],
 ): Promise<void> {
   const [comments, prFiles] = await Promise.all([
-    deps.gh.listPullRequestComments(repo, pr.number),
-    deps.gh.listPullRequestFiles(repo, pr.number),
+    (deps.ghRead ?? deps.gh).listPullRequestComments(repo, pr.number),
+    (deps.ghRead ?? deps.gh).listPullRequestFiles(repo, pr.number),
   ]);
   const input: PrInput = {
     repo,
