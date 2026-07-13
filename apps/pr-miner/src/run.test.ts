@@ -1,6 +1,7 @@
 import type { ExtractionResult } from "@stratum/extractor/candidate";
 import type { Verdict } from "@stratum/extractor/verdict";
 import type {
+  CommitSummary,
   GhClient,
   MergedPrSummary,
   PrCommentItem,
@@ -100,6 +101,7 @@ function makeGh(over: Partial<GhClient> = {}): GhClient {
     ),
     listPullRequestComments: vi.fn(async (): Promise<PrCommentItem[]> => []),
     listPullRequestFiles: vi.fn(async (): Promise<PrFileSummary[]> => []),
+    listCommits: vi.fn(async (): Promise<CommitSummary[]> => []),
     ...over,
   };
 }

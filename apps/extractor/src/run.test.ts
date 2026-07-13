@@ -1,4 +1,5 @@
 import type {
+  CommitSummary,
   GhClient,
   MergedPrSummary,
   PrCommentItem,
@@ -90,6 +91,7 @@ function makeGh(over: Partial<GhClient> = {}): GhClient {
     listMergedPullRequests: vi.fn(async (): Promise<MergedPrSummary[]> => []),
     listPullRequestComments: vi.fn(async (): Promise<PrCommentItem[]> => []),
     listPullRequestFiles: vi.fn(async (): Promise<PrFileSummary[]> => []),
+    listCommits: vi.fn(async (): Promise<CommitSummary[]> => []),
     ...over,
   };
 }

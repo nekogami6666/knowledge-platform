@@ -125,6 +125,29 @@ export interface PrFileSummary {
   deletions: number;
 }
 
+export interface ListCommitsOptions {
+  /** この時刻以降の commit のみ返す(ISO 8601)。 */
+  since: string;
+  /** この時刻以前に限定(ISO 8601・任意)。 */
+  until?: string;
+  /** 1 ページの取得件数。既定 100(GitHub 上限)。 */
+  perPage?: number;
+  /** ページングの安全上限(暴走防止)。既定 10。 */
+  maxPages?: number;
+}
+
+/** commit の要約(§6.6 ⑤-a expertise-mapper の evidence 入力)。diff・メッセージ本文は持たない。 */
+export interface CommitSummary {
+  sha: string;
+  /**
+   * GitHub アカウントに紐づく author login。未紐付け(メールが GitHub に登録されていない等)は null
+   * (email→人物の写像はしない・ADR-0017 D2。null は呼び出し側が「author 不明」として集計から除外)。
+   */
+  author: string | null;
+  /** commit author date(ISO 8601。rebase でも保存される側)。 */
+  authoredAt: string;
+}
+
 /** gh-client が公開する最小操作(F1 extractor / bot 代理マージ / C5 gap-tracker が消費)。 */
 export interface GhClient {
   /** 複数ファイルを1コミットにまとめた PR を作成する(Git Data API)。 */
@@ -153,6 +176,11 @@ export interface GhClient {
   listPullRequestComments(repo: string, number: number): Promise<PrCommentItem[]>;
   /** PR の変更ファイル要約(path/status/±行数のみ。diff 本文は取らない)。404 は NOT_FOUND。 */
   listPullRequestFiles(repo: string, number: number): Promise<PrFileSummary[]>;
+  /**
+   * 既定ブランチの commit を `since` 以降で列挙する(§6.6 ⑤-a expertise-mapper の evidence)。
+   * author は GitHub アカウント紐づきの login のみ(email 写像はしない・ADR-0017 D2)。
+   */
+  listCommits(repo: string, opts: ListCommitsOptions): Promise<CommitSummary[]>;
 }
 
 interface TreeItem {
@@ -285,6 +313,20 @@ export interface OctokitLike {
     repos: {
       getContent(p: { owner: string; repo: string; path: string; ref?: string }): Promise<{
         data: unknown;
+      }>;
+      listCommits(p: {
+        owner: string;
+        repo: string;
+        since: string;
+        until?: string;
+        per_page?: number;
+        page?: number;
+      }): Promise<{
+        data: Array<{
+          sha: string;
+          author?: { login: string } | null;
+          commit: { author?: { date?: string } | null };
+        }>;
       }>;
     };
   };
@@ -624,6 +666,39 @@ export function createGhClient(octokit: OctokitLike): GhClient {
       } catch (e) {
         const code = statusOf(e) === 404 ? "NOT_FOUND" : "API_ERROR";
         throw new GhClientError(code, `PR ファイル一覧の取得に失敗しました(${repo}#${number})`, {
+          cause: e,
+        });
+      }
+    },
+
+    async listCommits(repo, opts) {
+      const { owner, repo: name } = splitRepo(repo);
+      const perPage = opts.perPage ?? 100;
+      const maxPages = opts.maxPages ?? 10;
+      const out: CommitSummary[] = [];
+      try {
+        for (let page = 1; page <= maxPages; page++) {
+          const res = await octokit.rest.repos.listCommits({
+            owner,
+            repo: name,
+            since: opts.since,
+            ...(opts.until !== undefined ? { until: opts.until } : {}),
+            per_page: perPage,
+            page,
+          });
+          for (const c of res.data) {
+            out.push({
+              sha: c.sha,
+              author: c.author?.login ?? null,
+              // API 上 commit.author.date は常に入る(型が optional なだけ)。防御的に "" フォールバック。
+              authoredAt: c.commit.author?.date ?? "",
+            });
+          }
+          if (res.data.length < perPage) break; // 最終ページ
+        }
+        return out;
+      } catch (e) {
+        throw new GhClientError("API_ERROR", `commit の列挙に失敗しました(${repo})`, {
           cause: e,
         });
       }

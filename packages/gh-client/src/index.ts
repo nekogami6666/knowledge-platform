@@ -9,6 +9,7 @@ export { createOctokit, type GhAuth, normalizePrivateKey, resolveGhAuthFromEnv }
 // --- クライアント ---
 export {
   type CommitFilesOptions,
+  type CommitSummary,
   type CreatePrOptions,
   createGhClient,
   createGhClientFromAuth,
@@ -16,6 +17,7 @@ export {
   type FileChange,
   type GetFileOptions,
   type GhClient,
+  type ListCommitsOptions,
   type ListMergedPrOptions,
   type ListPrOptions,
   type MergedPrSummary,
