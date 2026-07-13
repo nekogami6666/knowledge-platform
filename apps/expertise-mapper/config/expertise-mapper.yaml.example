@@ -1,0 +1,7 @@
+# expertise-mapper の設定例(§6.6 ⑤-a / ADR-0017)。expertise-mapper.yaml にコピーして実値を入れる(gitignore 済み)。
+# CI では Actions vars(EXPERTISE_TARGETS / EXPERTISE_KB_REPO)から生成される(M5 workflow)。
+targets: [] # commit evidence の対象リポ("org/name")。空 = commit コレクタのみスキップ(KB evidence 単独で動く)
+kb:
+  repo: org/knowledge-base
+base_branch: main
+window_days: 90 # commit の遡り日数(§6.6「直近 90 日」)

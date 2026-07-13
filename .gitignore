@@ -6,10 +6,12 @@ coverage/
 .env.*
 .claude/settings.local.json
 
-# discord-bot / extractor / gap-tracker のローカル設定(実 ID を含むためコミットしない。*.yaml.example のみ追跡)
+# 各アプリのローカル設定(実 ID を含むためコミットしない。*.yaml.example のみ追跡)
 apps/discord-bot/config/*.yaml
 apps/extractor/config/*.yaml
 apps/gap-tracker/config/*.yaml
+apps/pr-miner/config/*.yaml
+apps/expertise-mapper/config/*.yaml
 
 # discord-bot のローカル実行が作る SQLite(bot.db とその WAL)
 apps/discord-bot/data/
