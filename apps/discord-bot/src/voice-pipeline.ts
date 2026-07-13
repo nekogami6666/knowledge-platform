@@ -11,7 +11,13 @@
  */
 import type { GhClient } from "@stratum/gh-client";
 import { GhClientError } from "@stratum/gh-client";
-import { buildVoiceMemoDoc, type Source, serializeEntry, voiceMemoPath } from "@stratum/kb-core";
+import {
+  buildVoiceMemoDoc,
+  githubForDiscord,
+  type Source,
+  serializeEntry,
+  voiceMemoPath,
+} from "@stratum/kb-core";
 import type {
   AgentSearchOptions,
   AgentSearchResult,
@@ -38,9 +44,10 @@ import {
   runDraft,
 } from "./capture.js";
 import { SerialQueue } from "./concurrency.js";
-import { githubForDiscord, type MembersConfig, type OpsConfig } from "./config.js";
+import type { OpsConfig } from "./config.js";
 import type { BotStore } from "./db.js";
 import { withCorrelation } from "./logger.js";
+import type { MembersLoader } from "./members.js";
 import {
   VOICE_CORRECTION_ACTION_TYPE,
   VOICE_MEMO_ACTION_TYPE,
@@ -63,7 +70,8 @@ export interface VoiceMessenger {
 export interface VoicePipelineDeps {
   logger: Logger;
   store: BotStore;
-  members: MembersConfig;
+  /** owner の写像(KB _meta/members.yaml の都度読み・ADR-0017 D3)。 */
+  getMembers: MembersLoader;
   /** kb_repo(書き込み先)。null なら機能 OFF(capture と同じゲート)。 */
   ops?: OpsConfig;
   gh?: GhClient;
@@ -206,7 +214,7 @@ async function processOne(
 
     const now = deps.now?.() ?? new Date();
     const dateJst = jstDayKey(now);
-    const owner = githubForDiscord(deps.members, payload.authorId) ?? "unassigned";
+    const owner = githubForDiscord(await deps.getMembers(), payload.authorId) ?? "unassigned";
 
     // 草案(capture/draft.md 流用・standard)。入力は文字起こし全文。
     const candidate = await runDraft(

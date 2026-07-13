@@ -15,6 +15,7 @@
 import { type GhClient, GhClientError } from "@stratum/gh-client";
 import {
   allocateId,
+  githubForDiscord,
   type IdCounterStore,
   type KnowledgeEntry,
   serializeEntry,
@@ -40,15 +41,10 @@ import type {
 } from "discord.js";
 import type { Logger } from "pino";
 import { z } from "zod";
-import {
-  type ChannelsConfig,
-  githubForDiscord,
-  isChannelAllowed,
-  type MembersConfig,
-  type OpsConfig,
-} from "./config.js";
+import { type ChannelsConfig, isChannelAllowed, type OpsConfig } from "./config.js";
 import type { BotStore } from "./db.js";
 import { withCorrelation } from "./logger.js";
+import type { MembersLoader } from "./members.js";
 
 // --- 中間スキーマ(LLM 出力契約。kb entry の再定義ではない・.default() 禁止=candidate.ts 方針)---
 
@@ -312,8 +308,8 @@ export interface CaptureDeps {
   logger: Logger;
   channels: ChannelsConfig;
   store: BotStore;
-  /** owner の写像(githubForDiscord)。未整備なら { members: [] }。 */
-  members: MembersConfig;
+  /** owner の写像(KB _meta/members.yaml の都度読み・ADR-0017 D3)。未整備なら空を返すローダ。 */
+  getMembers: MembersLoader;
   /** Agent SDK の cwd(ツール無し単発だが必須項目)。bot は CLONES_DIR を渡す。 */
   cwd: string;
   /** kb_repo(書き込み先)。null なら機能 OFF(代理マージと同じゲート・新 config なし)。 */
@@ -403,7 +399,7 @@ export async function handleLightbulb(
       { promptStore, ...(deps.draftSearch ? { search: deps.draftSearch } : {}) },
     );
     const { id, counterJson } = await allocateCaptureId(gh, ops.kb_repo, now);
-    const owner = githubForDiscord(deps.members, reactor.id) ?? "unassigned";
+    const owner = githubForDiscord(await deps.getMembers(), reactor.id) ?? "unassigned";
     const built = buildCaptureEntry(id, candidate, message.url, owner, now);
     const pr = await gh.createPullRequest({
       repo: ops.kb_repo,

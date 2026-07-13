@@ -334,7 +334,7 @@ function mkDeps(
     logger,
     channels: channels(),
     store,
-    members: { members: [{ github: "yamada", discord: "U1" }] },
+    getMembers: async () => ({ members: [{ github: "yamada", discord: "U1" }] }),
     cwd: "/clones",
     ops: { channel_id: "OPS", kb_repo: "org/knowledge-base" },
     gh,

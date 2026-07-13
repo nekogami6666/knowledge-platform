@@ -1,5 +1,0 @@
-# GitHub ユーザ名 ↔ Discord ユーザ ID マッピング(design.md §4.2 末 / §14 #8 未決。空で可)。
-# 未マップのユーザは Discord ユーザ ID をそのまま記録にフォールバックする。
-members: []
-#  - github: yamada
-#    discord: "123456789012345678"
