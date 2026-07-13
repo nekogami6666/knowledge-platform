@@ -5,6 +5,7 @@ import { type DocKind, safeParseEntry } from "./entry-io.js";
 import { type KbIssue, zodErrorToIssues } from "./errors.js";
 import { ID_PREFIX_RE } from "./schemas/common.js";
 import { expertiseMapSchema } from "./schemas/expertise-map.js";
+import { membersSchema } from "./schemas/members.js";
 
 /**
  * knowledge-base ディレクトリ全体のスキーマ検証(design.md §6.1)。
@@ -295,6 +296,33 @@ export async function validateRepo(repoRoot: string): Promise<RepoValidationRepo
     if (data !== undefined) {
       const parsed = expertiseMapSchema.safeParse(data);
       if (!parsed.success) addIssues(expertisePath, zodErrorToIssues(parsed.error));
+    }
+  }
+
+  // --- _meta/members.yaml(純 YAML、存在すれば検証・不在は許容 — ADR-0017 D3/D4) ---
+  // _meta/ のカーソル・ID カウンタ(機械が書く内部状態)は従来どおり非走査。members.yaml だけは
+  // 人間が申告 PR で編集する例外ファイルのため、名指しで構造ガードを掛ける。
+  const membersPath = join("_meta", "members.yaml");
+  let membersRaw: string | null = null;
+  try {
+    membersRaw = await readFile(join(repoRoot, membersPath), "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+  if (membersRaw !== null) {
+    checkedFiles++;
+    let data: unknown;
+    try {
+      data = yamlLoad(membersRaw, { schema: JSON_SCHEMA });
+    } catch {
+      addIssues(membersPath, [
+        { path: "(root)", message: "YAML 構文が不正です", code: "INVALID_YAML" },
+      ]);
+      data = undefined;
+    }
+    if (data !== undefined) {
+      const parsed = membersSchema.safeParse(data ?? {});
+      if (!parsed.success) addIssues(membersPath, zodErrorToIssues(parsed.error));
     }
   }
 

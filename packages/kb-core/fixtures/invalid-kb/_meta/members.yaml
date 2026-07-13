@@ -1,0 +1,4 @@
+# 不正例: discord 欠落 + 未知フィールド(strict 違反)
+members:
+  - github: yamada
+    slack: "U012345"
