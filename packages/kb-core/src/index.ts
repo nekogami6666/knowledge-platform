@@ -19,6 +19,12 @@ export {
   type KbParseErrorCode,
   KbProvenanceError,
 } from "./errors.js";
+// --- expertise マップ I/O(expertise/expertise.yaml・§4.5 / ADR-0017 D5)---
+export {
+  parseExpertiseMap,
+  sameExpertiseContent,
+  serializeExpertiseMap,
+} from "./expertise-io.js";
 // --- ID 採番 ---
 export {
   type AllocateIdOptions,
