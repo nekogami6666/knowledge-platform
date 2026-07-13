@@ -1,0 +1,102 @@
+# 週次 専門性マップ生成(design.md §6.6 ⑤-a / ADR-0017)。KB + 対象リポの commit から evidence を
+# 集め、deep でトピックへ増分クラスタリングし、expertise/expertise.yaml と週次レポートを KB の main へ
+# 直 commit する(自動生成物・手編集禁止・PR にしない — ADR-0017 D5)。
+# **実 commit は EXPERTISE_REAL=1 のときのみ**(既定 dry-run)。実行境界は extractor-nightly と同じ
+# (ADR-0013: persist-credentials:false / トークン非残留)。
+#
+# 必要 secrets:
+#   Claude on AWS: ANTHROPIC_AWS_API_KEY / ANTHROPIC_AWS_WORKSPACE_ID / AWS_REGION
+#   GitHub 書き込み(KB へ main 直 commit): GH_APP_ID / GH_APP_PRIVATE_KEY / GH_APP_INSTALLATION_ID
+#   対象リポの commit 読み取り: GH_READ_PAT(fine-grained・対象リポに **Contents: Read**。
+#     pr-miner と同じ PAT を共用 — スコープ追加は runbook 手順 1)
+#   KB checkout: EXTRACTOR_PAT(fine-grained・KB に Contents: Read)
+#   任意: DISCORD_OPS_WEBHOOK(risk:high の #stratum-ops 通知)
+# 必要 vars(リポ名はハードコードしない・ADR-0013 D3):
+#   EXPERTISE_KB_REPO(例 org/knowledge-base。空 = 全体 OFF)
+#   EXPERTISE_TARGETS(カンマ区切り。空 = commit evidence 無しで KB evidence のみ — 機能自体は動く)
+# 手順の詳細: docs/runbooks/expertise-weekly.md
+name: expertise-weekly
+
+on:
+  schedule:
+    - cron: "0 17 * * 0" # 17:00 UTC 日曜 = 02:00 JST 月曜(§6.6「週次、日曜深夜」)
+  workflow_dispatch: {}
+
+jobs:
+  map:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Enable corepack (pnpm)
+        run: corepack enable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - name: Install
+        run: pnpm install --frozen-lockfile
+      - name: Build
+        run: pnpm -r --if-present run build
+
+      # KB は checkout して読み書きの staging に使う(validateRepo がディスクを読む)。
+      # 実 commit は gh-client(App)の API で行うため checkout 側の認証は読み取りのみで足りる。
+      - name: Checkout knowledge-base
+        if: vars.EXPERTISE_KB_REPO != ''
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ vars.EXPERTISE_KB_REPO }}
+          token: ${{ secrets.EXTRACTOR_PAT }}
+          path: .clones/knowledge-base
+          persist-credentials: false
+          fetch-depth: 1
+
+      # expertise-mapper.yaml は gitignore 済み。CI では Actions vars から生成(ADR-0013 D3)。
+      # EXPERTISE_TARGETS(カンマ区切り)を targets 配列に展開。空なら targets: [](KB evidence のみ)。
+      - name: Generate expertise-mapper.yaml (from repo vars)
+        if: vars.EXPERTISE_KB_REPO != ''
+        run: |
+          mkdir -p apps/expertise-mapper/config
+          TARGETS_YAML=""
+          IFS=',' read -ra REPOS <<< "${{ vars.EXPERTISE_TARGETS }}"
+          for r in "${REPOS[@]}"; do
+            r="$(echo "$r" | xargs)"
+            [ -n "$r" ] && TARGETS_YAML="${TARGETS_YAML}  - ${r}"$'\n'
+          done
+          {
+            if [ -z "$TARGETS_YAML" ]; then
+              echo "targets: []"
+            else
+              echo "targets:"
+              printf '%s' "$TARGETS_YAML"
+            fi
+            echo "kb:"
+            echo "  repo: ${{ vars.EXPERTISE_KB_REPO }}"
+            echo "base_branch: main"
+            echo "window_days: 90"
+          } > apps/expertise-mapper/config/expertise-mapper.yaml
+          echo "expertise-mapper.yaml generated:"
+          cat apps/expertise-mapper/config/expertise-mapper.yaml
+
+      - name: Run expertise-mapper
+        if: vars.EXPERTISE_KB_REPO != ''
+        env:
+          CLAUDE_CODE_USE_ANTHROPIC_AWS: "1"
+          ANTHROPIC_AWS_API_KEY: ${{ secrets.ANTHROPIC_AWS_API_KEY }}
+          ANTHROPIC_AWS_WORKSPACE_ID: ${{ secrets.ANTHROPIC_AWS_WORKSPACE_ID }}
+          AWS_REGION: ${{ secrets.AWS_REGION }}
+          # hybrid(ADR-0013 D4): KB への main 直 commit は GitHub App のみ(fail-loud)。
+          GITHUB_APP_ID: ${{ secrets.GH_APP_ID }}
+          GITHUB_APP_PRIVATE_KEY: ${{ secrets.GH_APP_PRIVATE_KEY }}
+          GITHUB_APP_INSTALLATION_ID: ${{ secrets.GH_APP_INSTALLATION_ID }}
+          # 対象リポの commit 読み取りは PAT(read = PAT / write = App の分離)。
+          GITHUB_READ_TOKEN: ${{ secrets.GH_READ_PAT }}
+          DISCORD_OPS_WEBHOOK: ${{ secrets.DISCORD_OPS_WEBHOOK }}
+          CONFIG_DIR: apps/expertise-mapper/config
+          PROMPTS_DIR: ./prompts
+          KB_ROOT: .clones/knowledge-base
+          # 実 commit するときのみ設定(既定は dry-run)。初回 GO は人間判断(ADR-0013 D1(d)・runbook 参照)。
+          # EXPERTISE_REAL: "1"
+        run: pnpm --filter @stratum/expertise-mapper start
