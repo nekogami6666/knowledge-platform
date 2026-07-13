@@ -22,6 +22,7 @@ type ListFn = OctokitLike["rest"]["pulls"]["list"];
 type ReviewCommentsFn = OctokitLike["rest"]["pulls"]["listReviewComments"];
 type ListFilesFn = OctokitLike["rest"]["pulls"]["listFiles"];
 type IssueCommentsFn = OctokitLike["rest"]["issues"]["listComments"];
+type ListCommitsFn = OctokitLike["rest"]["repos"]["listCommits"];
 
 function fakeOctokit(
   over: {
@@ -30,6 +31,7 @@ function fakeOctokit(
     listReviewComments?: ReviewCommentsFn;
     listFiles?: ListFilesFn;
     listComments?: IssueCommentsFn;
+    listCommits?: ListCommitsFn;
   } = {},
 ) {
   const defaultList: ListFn = async () => ({
@@ -81,6 +83,7 @@ function fakeOctokit(
       },
       repos: {
         getContent: vi.fn(over.getContent ?? defaultGetContent),
+        listCommits: vi.fn<ListCommitsFn>(over.listCommits ?? (async () => ({ data: [] }))),
       },
     },
   };
@@ -546,5 +549,71 @@ describe("listPullRequestFiles", () => {
     oct.rest.pulls.listFiles.mockRejectedValueOnce({ status: 404 });
     const gh = createGhClient(oct as unknown as OctokitLike);
     await expect(gh.listPullRequestFiles("o/r", 7)).rejects.toMatchObject({ code: "NOT_FOUND" });
+  });
+});
+
+describe("listCommits(§6.6 ⑤-a expertise-mapper の evidence)", () => {
+  it("author login と authoredAt を写像し、未紐付け author は null", async () => {
+    const oct = fakeOctokit({
+      listCommits: async () => ({
+        data: [
+          {
+            sha: "aaa",
+            author: { login: "yamada" },
+            commit: { author: { date: "2026-07-01T10:00:00Z" } },
+          },
+          { sha: "bbb", author: null, commit: { author: { date: "2026-07-02T10:00:00Z" } } },
+        ],
+      }),
+    });
+    const gh = createGhClient(oct as unknown as OctokitLike);
+    const out = await gh.listCommits("o/r", { since: "2026-06-01T00:00:00Z" });
+    expect(out).toEqual([
+      { sha: "aaa", author: "yamada", authoredAt: "2026-07-01T10:00:00Z" },
+      { sha: "bbb", author: null, authoredAt: "2026-07-02T10:00:00Z" },
+    ]);
+    expect(oct.rest.repos.listCommits).toHaveBeenCalledWith(
+      expect.objectContaining({ owner: "o", repo: "r", since: "2026-06-01T00:00:00Z" }),
+    );
+  });
+
+  it("ページ跨ぎ: 満杯ページの次を取り、満杯未満で打ち切る", async () => {
+    const pages = [
+      { data: [{ sha: "a", author: null, commit: { author: { date: "d" } } }] },
+      { data: [] },
+    ];
+    let call = 0;
+    const oct = fakeOctokit({
+      listCommits: async () => pages[call++] ?? { data: [] },
+    });
+    const gh = createGhClient(oct as unknown as OctokitLike);
+    const out = await gh.listCommits("o/r", { since: "s", perPage: 1, maxPages: 5 });
+    expect(out).toHaveLength(1);
+    expect(oct.rest.repos.listCommits).toHaveBeenCalledTimes(2); // 満杯 → 次ページ空で終了
+  });
+
+  it("maxPages で暴走を止める", async () => {
+    const oct = fakeOctokit({
+      listCommits: async () => ({
+        data: [{ sha: "x", author: null, commit: { author: { date: "d" } } }],
+      }),
+    });
+    const gh = createGhClient(oct as unknown as OctokitLike);
+    const out = await gh.listCommits("o/r", { since: "s", perPage: 1, maxPages: 3 });
+    expect(out).toHaveLength(3);
+    expect(oct.rest.repos.listCommits).toHaveBeenCalledTimes(3);
+  });
+
+  it("until をそのまま渡す・API 失敗は API_ERROR", async () => {
+    const oct = fakeOctokit();
+    const gh = createGhClient(oct as unknown as OctokitLike);
+    await gh.listCommits("o/r", { since: "s", until: "u" });
+    expect(oct.rest.repos.listCommits).toHaveBeenCalledWith(
+      expect.objectContaining({ until: "u" }),
+    );
+    oct.rest.repos.listCommits.mockRejectedValueOnce({ status: 500 });
+    await expect(gh.listCommits("o/r", { since: "s" })).rejects.toMatchObject({
+      code: "API_ERROR",
+    });
   });
 });
