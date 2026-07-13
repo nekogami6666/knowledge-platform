@@ -4,7 +4,7 @@
  * 本番は `sqlite-store.ts` の `createSqliteStore`(better-sqlite3)を使う。
  *
  * 監査の主識別子は Discord の生 ID(discordUserId / discordChannelId)を必ず残す
- * (members.yaml の表示名マッピングはログの主キーにしない。レビュー所見)。
+ * (members 対応表(KB _meta/members.yaml)の表示名マッピングはログの主キーにしない。レビュー所見)。
  */
 
 /**

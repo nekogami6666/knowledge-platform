@@ -1,7 +1,8 @@
 /**
- * Bot 設定(channels / members)の読み込みと検証(design.md §9.2 / §4.2 末)。
+ * Bot 設定(channels ほか)の読み込みと検証(design.md §9.2 / §4.2 末)。
  * - channels: Bot が閲覧を許可するチャンネル。allowlist 制(default-deny、§9.2)。
- * - members: GitHub ユーザ名 ↔ Discord ユーザ ID マッピング(§14 #8 未決。空で可)。
+ * - members 対応表はローカル config ではなく KB の `_meta/members.yaml` が唯一の正
+ *   (ADR-0017 D3。読み込みは members.ts の createCloneMembersLoader)。
  * 読み取りは注入可能にしてテストする(ファイルが無ければ既定値)。
  */
 import { readFile } from "node:fs/promises";
@@ -16,13 +17,6 @@ export const channelsConfigSchema = z
   })
   .default({ allow: [], permanent_exclude: [] });
 export type ChannelsConfig = z.infer<typeof channelsConfigSchema>;
-
-export const membersConfigSchema = z
-  .object({
-    members: z.array(z.object({ github: z.string(), discord: z.string() })).default([]),
-  })
-  .default({ members: [] });
-export type MembersConfig = z.infer<typeof membersConfigSchema>;
 
 /**
  * 検索対象リポ(§6.2 / §14 #5)。repo="org/name"(citation allowlist 兼 permalink)、
@@ -41,7 +35,7 @@ export type ReposConfig = z.infer<typeof reposConfigSchema>;
  * 👍 代理マージ(§6.3 / C1 拡張)の設定。両方が設定されて初めて機能が有効になる(既定 OFF)。
  * - channel_id: extractor が PR 通知を投稿する #stratum-ops のチャンネル ID。
  * - kb_repo: マージを許可する唯一のリポ("org/knowledge-base")。他リポの URL は拒否。
- * 承認者はチャンネルに入れる人間なら誰でも(チャンネル参加=信頼境界。members.yaml 整備後に締める)。
+ * 承認者はチャンネルに入れる人間なら誰でも(チャンネル参加=信頼境界。KB の _meta/members.yaml 整備後に締める)。
  */
 export const opsConfigSchema = z
   .object({
@@ -94,12 +88,6 @@ export async function loadChannels(reader: ConfigReader): Promise<ChannelsConfig
   return channelsConfigSchema.parse(data ?? undefined);
 }
 
-export async function loadMembers(reader: ConfigReader): Promise<MembersConfig> {
-  const text = await reader.read("members.yaml");
-  const data = text === null ? undefined : yaml.load(text);
-  return membersConfigSchema.parse(data ?? undefined);
-}
-
 export async function loadRepos(reader: ConfigReader): Promise<ReposConfig> {
   const text = await reader.read("repos.yaml");
   const data = text === null ? undefined : yaml.load(text);
@@ -122,9 +110,4 @@ export async function loadVoice(reader: ConfigReader): Promise<VoiceConfig> {
 export function isChannelAllowed(config: ChannelsConfig, channelId: string): boolean {
   if (config.permanent_exclude.includes(channelId)) return false;
   return config.allow.includes(channelId);
-}
-
-/** Discord ユーザ ID → GitHub ユーザ名(未マップは undefined)。 */
-export function githubForDiscord(config: MembersConfig, discordId: string): string | undefined {
-  return config.members.find((m) => m.discord === discordId)?.github;
 }

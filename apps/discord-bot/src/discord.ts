@@ -32,12 +32,12 @@ import { SerialQueue } from "./concurrency.js";
 import {
   type ChannelsConfig,
   isChannelAllowed,
-  type MembersConfig,
   type OpsConfig,
   type VoiceConfig,
 } from "./config.js";
 import type { BotStore } from "./db.js";
 import { withCorrelation } from "./logger.js";
+import { EMPTY_MEMBERS, type MembersLoader } from "./members.js";
 import { isoJst } from "./time.js";
 import { handleVoiceCorrection, handleVoiceMemo } from "./voice.js";
 
@@ -71,7 +71,7 @@ export interface BotDeps {
   /** GitHub クライアント(代理マージ・💡 捕捉用)。認証未整備なら undefined = 機能 OFF。 */
   gh?: GhClient;
   /** members.yaml(💡 捕捉の owner 写像・§6.4)。未整備なら空で可。 */
-  members?: MembersConfig;
+  getMembers?: MembersLoader;
   /** プロンプトローダ(💡 捕捉の triage/draft・§6.4)。未指定なら 💡 捕捉 OFF。 */
   promptStore?: PromptStore;
   /** Agent SDK の cwd(💡 捕捉はツール無し単発だが必須項目)。bot は CLONES_DIR。 */
@@ -199,7 +199,7 @@ export function createBot(deps: BotDeps): Client {
       logger: deps.logger,
       channels: deps.channels,
       store: deps.store,
-      members: deps.members ?? { members: [] },
+      getMembers: deps.getMembers ?? (async () => EMPTY_MEMBERS),
       cwd: deps.clonesDir ?? ".",
       ops: deps.ops,
       gh: deps.gh,

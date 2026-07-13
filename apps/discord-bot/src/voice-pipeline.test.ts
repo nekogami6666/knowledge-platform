@@ -1,11 +1,12 @@
 import type { GhClient } from "@stratum/gh-client";
 import { GhClientError } from "@stratum/gh-client";
+import type { Members } from "@stratum/kb-core";
 import type { PromptStore } from "@stratum/llm";
 import { LlmError, type Transcriber } from "@stratum/llm";
 import type { Logger } from "pino";
 import { describe, expect, it, vi } from "vitest";
 import type { CaptureCandidate, DraftSearchFn } from "./capture.js";
-import type { MembersConfig, OpsConfig } from "./config.js";
+import type { OpsConfig } from "./config.js";
 import type { BotStore, PendingAction } from "./db.js";
 import type { VoiceMemoPayload } from "./voice.js";
 import {
@@ -15,7 +16,7 @@ import {
 } from "./voice-pipeline.js";
 
 const OPS: OpsConfig = { channel_id: "OPS", kb_repo: "org/knowledge-base" };
-const MEMBERS: MembersConfig = { members: [{ github: "yamada", discord: "U1" }] };
+const MEMBERS: Members = { members: [{ github: "yamada", discord: "U1" }] };
 // permalink は数値 snowflake 必須(kb-core の discordSourceSchema)。
 const GUILD_ID = "111111111111111111";
 const CHANNEL_ID = "222222222222222222";
@@ -159,7 +160,7 @@ function mkDeps(over: Partial<VoicePipelineDeps> = {}): VoicePipelineDeps {
   return {
     logger,
     store,
-    members: MEMBERS,
+    getMembers: async () => MEMBERS,
     ops: OPS,
     gh,
     promptStore,

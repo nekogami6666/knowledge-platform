@@ -49,9 +49,11 @@ bot は `apps/discord-bot/config/*.yaml` を読みます(実値ファイルは `
 cd ~/stratum/knowledge-platform/apps/discord-bot/config
 cp channels.yaml.example channels.yaml   # allow: ["<許可チャンネルID>"]
 cp repos.yaml.example   repos.yaml        # synthetic 3件(url なし)
-cp members.yaml.example members.yaml      # 空で可
 nano channels.yaml                        # 許可チャンネルIDを入れる
 ```
+> members 対応表(github ↔ discord)はローカル設定ではなく **knowledge-base リポの
+> `_meta/members.yaml`** が唯一の正です(ADR-0017 D3)。各自が KB への PR で申告し、bot は
+> KB clone から自動で読みます(未整備の間は owner が "unassigned" になるだけで動作します)。
 synthetic コーパスを clone 先に配置(`repos.yaml` が url なし=ローカル git リポを前提とするため):
 ```sh
 cd ~/stratum/knowledge-platform

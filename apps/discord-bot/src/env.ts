@@ -32,7 +32,7 @@ const envSchema = z
     CLONES_DIR: z.string().default("./.clones"),
     /** SQLite ファイルパス。 */
     DB_PATH: z.string().default("./data/bot.db"),
-    /** members.yaml / channels.yaml / repos.yaml の置き場。 */
+    /** channels.yaml / repos.yaml / ops.yaml / voice.yaml の置き場(members は KB の _meta/members.yaml・ADR-0017 D3)。 */
     CONFIG_DIR: z.string().default("./config"),
     /** プロンプト(prompts/<app>/<name>.md)のルート。リポジトリルートの prompts/。 */
     PROMPTS_DIR: z.string().default("./prompts"),

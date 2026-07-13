@@ -13,17 +13,11 @@ import {
 } from "@stratum/llm";
 import { Events } from "discord.js";
 import { type AskDeps, handleAskRequest } from "./ask.js";
-import {
-  createFsConfigReader,
-  loadChannels,
-  loadMembers,
-  loadOps,
-  loadRepos,
-  loadVoice,
-} from "./config.js";
+import { createFsConfigReader, loadChannels, loadOps, loadRepos, loadVoice } from "./config.js";
 import { type AskHandler, createBot, createClientMessenger } from "./discord.js";
 import { parseEnv } from "./env.js";
 import { createLogger, withCorrelation } from "./logger.js";
+import { createCloneMembersLoader, DEFAULT_KB_DIR } from "./members.js";
 import { createQaSearch } from "./qa-search.js";
 import { createGitRepoSyncer } from "./repos.js";
 import { createSqliteStore } from "./sqlite-store.js";
@@ -45,10 +39,14 @@ async function main(): Promise<void> {
 
   const reader = createFsConfigReader(env.CONFIG_DIR);
   const channels = await loadChannels(reader);
-  const members = await loadMembers(reader);
   const reposConfig = await loadRepos(reader);
   const ops = await loadOps(reader);
   const voice = await loadVoice(reader);
+
+  // members 対応表は KB clone の _meta/members.yaml が唯一の正(ADR-0017 D3)。
+  // clone 先 dir は repos.yaml の ops.kb_repo 該当エントリから引く(無ければ既定名)。
+  const kbDir = reposConfig.repos.find((r) => r.repo === ops.kb_repo)?.dir ?? DEFAULT_KB_DIR;
+  const getMembers = createCloneMembersLoader({ clonesDir: env.CLONES_DIR, kbDir, logger });
 
   // 👍 代理マージ(§6.3): ops.yaml と GitHub 認証が両方揃ったときだけ有効(既定 OFF)。
   // 認証未整備(AUTH エラー)は機能 OFF として起動を続ける(bot の主務は /ask)。
@@ -65,7 +63,7 @@ async function main(): Promise<void> {
   logger.info(
     {
       allowedChannels: channels.allow.length,
-      members: members.members.length,
+      membersSource: `${kbDir}/_meta/members.yaml`,
       repos: reposConfig.repos.length,
       proxyMerge: gh !== undefined,
       voiceMemo: voice.channel_id !== null,
@@ -133,7 +131,7 @@ async function main(): Promise<void> {
     ops,
     gh,
     // §6.4 💡 捕捉: owner 写像 + triage/draft プロンプト + Agent SDK cwd(kb_repo/gh が無ければ OFF)。
-    members,
+    getMembers,
     promptStore,
     clonesDir: env.CLONES_DIR,
     // §6.4 ③-b voice-memo: 検知・受付(channel_id が null なら OFF・PR-V1)+ 受付後の起床(PR-V3)。
@@ -143,7 +141,7 @@ async function main(): Promise<void> {
   voiceWorker = createVoiceMemoWorker({
     logger,
     store,
-    members,
+    getMembers,
     ops,
     ...(gh !== undefined ? { gh } : {}),
     promptStore,
