@@ -1,3 +1,6 @@
+import { cp, mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { type RepoProblem, validateRepo } from "./validate-repo.js";
@@ -17,8 +20,28 @@ describe("validateRepo", () => {
     const report = await validateRepo(VALID_KB);
     expect(report.problems).toEqual([]);
     expect(report.ok).toBe(true);
-    // knowledge 2 + decision 1 + question 2 + expertise 1
-    expect(report.checkedFiles).toBe(6);
+    // knowledge 2 + decision 1 + question 2 + expertise 1 + members 1
+    expect(report.checkedFiles).toBe(7);
+  });
+
+  it("_meta/members.yaml が無くても許容(§14#8 未決の間は空・ADR-0017 D3)", async () => {
+    const tmp = await mkdtemp(join(tmpdir(), "kb-core-members-"));
+    try {
+      await cp(VALID_KB, tmp, { recursive: true });
+      await rm(join(tmp, "_meta", "members.yaml"));
+      const report = await validateRepo(tmp);
+      expect(report.ok).toBe(true);
+      expect(report.checkedFiles).toBe(6); // members 分だけ減る
+    } finally {
+      await rm(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it("_meta/members.yaml のスキーマ違反(未知フィールド・discord 欠落)を検出する", async () => {
+    const report = await validateRepo(INVALID_KB);
+    const problem = report.problems.find((p) => p.file.includes("members.yaml"));
+    expect(problem).toBeDefined();
+    expect(problem?.issues.length).toBeGreaterThan(0);
   });
 
   it("不正な knowledge-base は ok:false で全件報告する", async () => {

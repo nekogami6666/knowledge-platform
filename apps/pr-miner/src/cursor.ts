@@ -2,7 +2,8 @@
  * pr-miner カーソル `_meta/pr-miner-state.json`(design.md §4.1.2 / §7.1)。
  * リポごとに「最後に処理したマージ時刻(last_merged_at)」を保持し、次回はそれ以降のみ列挙する。
  * knowledge-base 内の JSON(ナレッジエントリではない)なので fs で直接読み書きしてよい(kb-core 対象外・
- * extractor cursor.ts と同方針。validateRepo は _meta/ を走査しない)。
+ * extractor cursor.ts と同方針。validateRepo は _meta/ のカーソル・ID カウンタを走査しない —
+ * 例外は人間が編集する `_meta/members.yaml` のみ名指し検証・ADR-0017 D4)。
  * カーソルの前進は提案 PR に含めて行い、merge 時に main へ反映される(extractor と同じ「自分の PR がカーソルを進める」)。
  */
 import { readFile as fsReadFile } from "node:fs/promises";
