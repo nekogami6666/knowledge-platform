@@ -4,6 +4,18 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "build": "tsc -p tsconfig.build.json",
+    "start": "node dist/index.js"
+  },
+  "dependencies": {
+    "@stratum/discord-bot": "workspace:*",
+    "@stratum/gh-client": "workspace:*",
+    "@stratum/kb-core": "workspace:*",
+    "js-yaml": "^4.2.0",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@types/js-yaml": "^4.0.9"
   }
 }

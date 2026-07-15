@@ -15,6 +15,10 @@
     "./sqlite-store": {
       "types": "./dist/sqlite-store.d.ts",
       "default": "./dist/sqlite-store.js"
+    },
+    "./freshness": {
+      "types": "./dist/freshness.d.ts",
+      "default": "./dist/freshness.js"
     }
   },
   "scripts": {
