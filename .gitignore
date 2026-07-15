@@ -12,6 +12,7 @@ apps/extractor/config/*.yaml
 apps/gap-tracker/config/*.yaml
 apps/pr-miner/config/*.yaml
 apps/expertise-mapper/config/*.yaml
+apps/freshness-checker/config/*.yaml
 
 # discord-bot のローカル実行が作る SQLite(bot.db とその WAL)
 apps/discord-bot/data/

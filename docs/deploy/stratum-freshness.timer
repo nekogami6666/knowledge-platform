@@ -1,0 +1,13 @@
+# freshness-checker の起動タイマー(§6.7 / ADR-0019 D1: 平日 11:00 JST。
+# gap-tracker(10:00)と 1 時間ずらして bot.db への同時書き込みと通知の重なりを避ける)。
+# VM のタイムゾーンが UTC の場合も動くよう Asia/Tokyo を明示する。
+# 配置: ~/.config/systemd/user/stratum-freshness.timer → `systemctl --user enable --now` で有効化。
+[Unit]
+Description=Run stratum freshness-checker on weekday mornings (JST)
+
+[Timer]
+OnCalendar=Mon..Fri 11:00 Asia/Tokyo
+Persistent=true
+
+[Install]
+WantedBy=timers.target

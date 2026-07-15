@@ -1,0 +1,16 @@
+# freshness-checker 設定(design.md §6.7 / ADR-0019)。
+# コピーして freshness.yaml として同ディレクトリ(CONFIG_DIR)に置く。実 ID を含むためコミットしない。
+# owner → Discord の対応表はここではなく KB の _meta/members.yaml が唯一の正(ADR-0017 D3)。
+
+# stale 降格の commit 先(org/name)。
+kb_repo: "your-org/knowledge-base"
+# CLONES_DIR 配下の clone ディレクトリ名。
+kb_dir: "knowledge-base"
+# git remote URL(省略時は checkout 済みの kb_dir をそのまま使う。本番は設定を推奨)。
+# kb_url: "https://github.com/your-org/knowledge-base.git"
+base_branch: "main"
+
+# 1 人 1 日あたりの確認 DM 上限(ADR-0019 D2)。
+daily_limit_per_owner: 2
+# 無応答でエントリを status: stale へ降格するまでの日数(ADR-0019 D4)。
+stale_after_days: 14
