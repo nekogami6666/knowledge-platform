@@ -38,6 +38,7 @@ import {
   type VoiceConfig,
 } from "./config.js";
 import type { BotStore } from "./db.js";
+import { type FreshnessApplyDeps, handleFreshnessReaction } from "./freshness-flow.js";
 import { withCorrelation } from "./logger.js";
 import { EMPTY_MEMBERS, type MembersLoader } from "./members.js";
 import { isoJst } from "./time.js";
@@ -83,6 +84,8 @@ export interface BotDeps {
   voice?: VoiceConfig;
   /** voice-memo 受付直後にパイプライン(voice-pipeline.ts)を起こす hook(PR-V3)。 */
   onVoiceMemoQueued?: () => void;
+  /** 鮮度確認 DM への 👍✏️🗑 応答(§6.7 / ADR-0019 D2)。gh か ops.kb_repo が無ければ OFF。 */
+  freshness?: FreshnessApplyDeps;
 }
 
 /** §9.2(ADR-0018): 読めないチャンネルへの拒否メッセージ。許可なら null。 */
@@ -214,6 +217,8 @@ export function createBot(deps: BotDeps): Client {
   // §6.4 ③-a: 💡 でナレッジ候補を捕捉(kb_repo/gh/promptStore が無ければ実質 no-op)。
   client.on(Events.MessageReactionAdd, async (reaction, user) => {
     await handleProxyMergeReaction(reaction, user, deps);
+    // §6.7(ADR-0019 D2): 鮮度確認 DM への 👍✏️🗑(deps.freshness 未設定なら no-op)。
+    await handleFreshnessReaction(reaction, user, deps);
     await handleLightbulb(reaction, user, {
       logger: deps.logger,
       channels: deps.channels,

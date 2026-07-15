@@ -131,4 +131,20 @@ describe.skipIf(!sqliteAvailable())("createSqliteStore(:memory:)", () => {
     s.markActionDone("unknown");
     s.close();
   });
+
+  it("setActionState で中間状態へ前進(freshness の pending→sent・ADR-0019 D2)", () => {
+    const s = createStore(":memory:");
+    s.queueAction({
+      id: "a1",
+      type: "freshness",
+      queryId: null,
+      payloadJson: null,
+      state: "pending",
+      createdAt: "t",
+    });
+    s.setActionState("a1", "sent");
+    expect(s.listPendingActions("freshness")[0]?.state).toBe("sent");
+    s.setActionState("unknown", "sent");
+    s.close();
+  });
 });
