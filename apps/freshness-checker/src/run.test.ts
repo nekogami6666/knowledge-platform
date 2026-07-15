@@ -50,6 +50,7 @@ function fakeStore(actions: PendingAction[] = []): FakeStore {
     queueAction: (a) => queued.push(a),
     listPendingActions: (type) => actions.filter((a) => type === undefined || a.type === type),
     markActionDone: (id) => doneIds.push(id),
+    setActionState: () => {},
     hitRateLimit: () => ({ count: 1, allowed: true }),
     close: () => {},
   };

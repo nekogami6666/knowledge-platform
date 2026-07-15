@@ -72,6 +72,12 @@ export interface BotStore {
   markActionDone(id: string): void;
 
   /**
+   * 保留アクションの state を進める(§4.6。freshness の "pending"→"sent" 等・ADR-0019 D2)。
+   * "done" 以外の中間状態への遷移に使う(消費の完了は markActionDone)。未知 id は no-op。
+   */
+  setActionState(id: string, state: string): void;
+
+  /**
    * (subject, kind, windowStart) の利用を1回数え、count<=limit なら allowed=true を返す(§6.2 直列+制御)。
    * subject 例: "user:123" / "channel:456" / "global"。windowStart はウィンドウ識別子(例 "2026-06-17T10")。
    */
@@ -109,6 +115,10 @@ export function createMemoryStore(): BotStore {
     markActionDone(id) {
       const a = actions.find((row) => row.id === id);
       if (a) a.state = "done";
+    },
+    setActionState(id, state) {
+      const a = actions.find((row) => row.id === id);
+      if (a) a.state = state;
     },
     hitRateLimit(subject, kind, windowStart, limit) {
       const key = `${subject}|${kind}|${windowStart}`;

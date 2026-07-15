@@ -69,6 +69,21 @@ describe("createMemoryStore: pending_actions", () => {
     expect(s.listPendingActions("question_queue")[0]?.state).toBe("done");
     s.markActionDone("unknown"); // no-op(throw しない)
   });
+
+  it("setActionState で中間状態へ前進(freshness の pending→sent・ADR-0019 D2)", () => {
+    const s = createMemoryStore();
+    s.queueAction({
+      id: "a1",
+      type: "freshness",
+      queryId: null,
+      payloadJson: null,
+      state: "pending",
+      createdAt: "t",
+    });
+    s.setActionState("a1", "sent");
+    expect(s.listPendingActions("freshness")[0]?.state).toBe("sent");
+    s.setActionState("unknown", "sent"); // no-op(throw しない)
+  });
 });
 
 describe("createMemoryStore: feedback / answerStatus", () => {

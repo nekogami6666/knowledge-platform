@@ -4,7 +4,9 @@
  * 組み立てて /ask を配線し、Discord にログインする。
  */
 import { randomUUID } from "node:crypto";
+import { readFile as fsReadFile, writeFile as fsWriteFile } from "node:fs/promises";
 import { createGhClientFromEnv, type GhClient } from "@stratum/gh-client";
+import { validateRepo } from "@stratum/kb-core";
 import {
   createFsPromptStore,
   createOpenAiTranscriber,
@@ -16,6 +18,7 @@ import { type AskDeps, handleAskRequest } from "./ask.js";
 import { createFsConfigReader, loadChannels, loadOps, loadRepos, loadVoice } from "./config.js";
 import { type AskHandler, createBot, createClientMessenger } from "./discord.js";
 import { parseEnv } from "./env.js";
+import { createFreshnessDmWorker, type FreshnessApplyDeps } from "./freshness-flow.js";
 import { createLogger, withCorrelation } from "./logger.js";
 import { createCloneMembersLoader, DEFAULT_KB_DIR } from "./members.js";
 import { createQaSearch } from "./qa-search.js";
@@ -83,6 +86,37 @@ async function main(): Promise<void> {
   const syncer = createGitRepoSyncer(env.CLONES_DIR);
   const promptStore = createFsPromptStore(env.PROMPTS_DIR);
 
+  // §6.7(ADR-0019 D2/D3): 鮮度確認 DM への 👍✏️🗑 応答。👍/🗑 は main 直 commit のため
+  // gh 認証 + ops.kb_repo(§6.3 と同じ唯一の書き込み先)が前提。無ければ機能 OFF。
+  let freshness: FreshnessApplyDeps | undefined;
+  if (gh !== undefined && ops.kb_repo !== null) {
+    const kbRepo = ops.kb_repo;
+    const kbSpec = reposConfig.repos.find((r) => r.repo === kbRepo) ?? { repo: kbRepo, dir: kbDir };
+    freshness = {
+      store,
+      gh,
+      kbRepo,
+      // gh-client の既定と同じ(KB の base ブランチを変える場合はここも設定化する)。
+      baseBranch: "main",
+      syncKbClone: async () => {
+        const [synced] = await syncer.sync([kbSpec]);
+        if (synced === undefined) throw new Error("KB clone の同期に失敗しました");
+        return synced.absDir;
+      },
+      readFile: (p) => fsReadFile(p, "utf8"),
+      writeFile: (p, c) => fsWriteFile(p, c, "utf8"),
+      validate: (root) => validateRepo(root),
+      today: () => isoJst().slice(0, 10),
+      makeId: () => randomUUID(),
+      nowIso: () => isoJst(),
+      logger,
+    };
+  } else {
+    logger.info(
+      "鮮度確認の応答 UI は無効です(GitHub 認証か ops.kb_repo が未設定・§6.7 / ADR-0019)。",
+    );
+  }
+
   // 実 agentic search(runAgentSearch + §6.2 リトライ)を共有ファクトリで構築。
   // golden eval も同じ createQaSearch を使い、同一パイプラインを評価する(PR-5)。
   const search = createQaSearch({ usage: nullUsageRecorder });
@@ -139,7 +173,10 @@ async function main(): Promise<void> {
     // §6.4 ③-b voice-memo: 検知・受付(channel_id が null なら OFF・PR-V1)+ 受付後の起床(PR-V3)。
     voice,
     onVoiceMemoQueued: () => voiceWorker?.kick(),
+    // §6.7: 鮮度確認 DM への 👍✏️🗑 応答(undefined なら OFF)。
+    ...(freshness !== undefined ? { freshness } : {}),
   });
+  const messenger = createClientMessenger(bot);
   voiceWorker = createVoiceMemoWorker({
     logger,
     store,
@@ -149,10 +186,18 @@ async function main(): Promise<void> {
     promptStore,
     cwd: env.CLONES_DIR,
     ...(transcriber !== undefined ? { transcriber } : {}),
-    messenger: createClientMessenger(bot),
+    messenger,
   });
+  // §6.7(ADR-0019 D2): checker(VM timer)が積んだ鮮度確認 pending を DM で送る worker。
+  // checker は日次(平日 11:00 JST)なので、起動時 + 定期ポーリングで拾えば十分。
+  const freshnessWorker = createFreshnessDmWorker({ logger, store, dm: messenger.dm });
+  const FRESHNESS_POLL_MS = 10 * 60 * 1000;
+  setInterval(() => freshnessWorker.kick(), FRESHNESS_POLL_MS).unref();
   // 起動時レジューム(ADR-0015 D5): 再起動前に受け付けた pending を拾う。
-  bot.once(Events.ClientReady, () => voiceWorker?.kick());
+  bot.once(Events.ClientReady, () => {
+    voiceWorker?.kick();
+    freshnessWorker.kick();
+  });
 
   await bot.login(env.DISCORD_TOKEN);
   logger.info("discord-bot started");
