@@ -47,10 +47,13 @@ cd knowledge-platform
 bot は `apps/discord-bot/config/*.yaml` を読みます(実値ファイルは `.gitignore` 済み)。`*.yaml.example` を雛形に作成:
 ```sh
 cd ~/stratum/knowledge-platform/apps/discord-bot/config
-cp channels.yaml.example channels.yaml   # allow: ["<許可チャンネルID>"]
 cp repos.yaml.example   repos.yaml        # synthetic 3件(url なし)
-nano channels.yaml                        # 許可チャンネルIDを入れる
+# channels.yaml は任意(ADR-0018: 読むチャンネルは Discord のロール可視性で決まる。
+# 「公開だが読ませない」明示除外を使う場合のみ channels.yaml.example をコピーして permanent_exclude を記入)
 ```
+> **チャンネルの読み取り制御(ADR-0018)**: bot(専用ロール)が見えるチャンネル = 読む。
+> 機密チャンネルは private にして bot を入れない。bot ロールに **Administrator を付けない**こと。
+> 起動ログに可視チャンネル一覧が出るので、意図しないチャンネルが混ざっていないか確認する。
 > members 対応表(github ↔ discord)はローカル設定ではなく **knowledge-base リポの
 > `_meta/members.yaml`** が唯一の正です(ADR-0017 D3)。各自が KB への PR で申告し、bot は
 > KB clone から自動で読みます(未整備の間は owner が "unassigned" になるだけで動作します)。

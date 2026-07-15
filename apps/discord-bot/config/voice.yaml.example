@@ -1,6 +1,6 @@
 # voice-memo(§6.4 ③-b / ADR-0015)の設定例。voice.yaml にコピーして実値を入れる(.gitignore 済み)。
 # channel_id を設定して初めて有効になる(未設定=機能 OFF)。
-# 注意: このチャンネルは channels.yaml の allow にも入れること(§9.2 default-deny)。
+# 注意: このチャンネルは bot(専用ロール)が見える状態にすること(ADR-0018。private なら bot を入れる)。
 #       QB-Meeting-Ops の intake チャンネルとは別チャンネルにすること(二重処理防止・ADR-0015)。
 channel_id: "123456789012345678" # 音声メモ専用チャンネル(#voice-memo)の ID
 max_attachment_bytes: 26214400 # 受け付ける音声の上限(既定 25MB = OpenAI API 上限。ADR-0015 D6)

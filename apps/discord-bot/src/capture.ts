@@ -41,10 +41,16 @@ import type {
 } from "discord.js";
 import type { Logger } from "pino";
 import { z } from "zod";
-import { type ChannelsConfig, isChannelAllowed, type OpsConfig } from "./config.js";
+import {
+  type ChannelGateInput,
+  type ChannelsConfig,
+  isChannelAllowed,
+  type OpsConfig,
+} from "./config.js";
 import type { BotStore } from "./db.js";
 import { withCorrelation } from "./logger.js";
 import type { MembersLoader } from "./members.js";
+import { gateInputFromChannel } from "./visibility.js";
 
 // --- 中間スキーマ(LLM 出力契約。kb entry の再定義ではない・.default() 禁止=candidate.ts 方針)---
 
@@ -88,18 +94,18 @@ export interface CaptureDecisionInput {
   reactorIsBot: boolean;
   /** guild メッセージか(DM・グループ DM は §6.4 で対象外)。 */
   inGuild: boolean;
-  channelId: string;
+  gate: ChannelGateInput;
   channels: ChannelsConfig;
 }
 
 export type CaptureDecision = { capture: true } | { capture: false; reason: string };
 
-/** 💡 捕捉のガード判定(§6.4・純関数)。💡 / 人間 / guild / allowlist チャンネル を全て満たすときのみ可。 */
+/** 💡 捕捉のガード判定(§6.4・純関数)。💡 / 人間 / guild / bot 可視チャンネル(ADR-0018)を満たすときのみ可。 */
 export function captureDecision(input: CaptureDecisionInput): CaptureDecision {
   if (input.emojiName !== "💡") return { capture: false, reason: "not-lightbulb" };
   if (input.reactorIsBot) return { capture: false, reason: "bot-reactor" };
   if (!input.inGuild) return { capture: false, reason: "not-guild" };
-  if (!isChannelAllowed(input.channels, input.channelId)) {
+  if (!isChannelAllowed(input.channels, input.gate)) {
     return { capture: false, reason: "channel-not-allowed" };
   }
   return { capture: true };
@@ -348,7 +354,7 @@ export async function handleLightbulb(
       emojiName: r.emoji.name,
       reactorIsBot: reactor.bot,
       inGuild: message.guildId !== null,
-      channelId: message.channelId,
+      gate: gateInputFromChannel(message.channel, message.channelId),
       channels: deps.channels,
     });
     if (!decision.capture) return; // 対象外(未許可チャンネル・DM 等)には反応しない

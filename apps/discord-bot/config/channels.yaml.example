@@ -1,7 +1,6 @@
-# Bot が閲覧を許可するチャンネル(design.md §9.2: allowlist 制 / default-deny)。
-# 実チャンネル ID は経営承認の上で channels.yaml(gitignore 済み)に記載する。
-# allow が空のあいだ、Bot はどのチャンネルにも応答しない(安全側)。
-allow: []
-
-# 恒久除外チャンネル(例: #hr / #management。§9.3)。allow より優先される。
-permanent_exclude: []
+# チャンネル読み取りの設定(ADR-0018)。channels.yaml にコピーして使う(gitignore 済み)。
+# 読むかどうかは Discord のロール可視性で決まる: **bot(専用ロール)が見えるチャンネル = 読む**。
+# 機密チャンネルは private にして bot を入れない(Discord 自体が default-deny)。
+# ここに書くのは「公開だが読ませたくないチャンネル」の明示除外だけ(§9.3・経営指定)。
+# スレッドは親チャンネル ID の除外も効く。
+permanent_exclude: [] # 例: ["<#general の ID>"]

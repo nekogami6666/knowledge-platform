@@ -3,7 +3,7 @@ import type { ButtonInteraction, Message, MessageReaction, User } from "discord.
 import { GatewayIntentBits } from "discord.js";
 import type { Logger } from "pino";
 import { describe, expect, it, vi } from "vitest";
-import type { ChannelsConfig, OpsConfig } from "./config.js";
+import type { ChannelGateInput, ChannelsConfig, OpsConfig } from "./config.js";
 import type { BotStore } from "./db.js";
 import {
   askCommand,
@@ -23,26 +23,30 @@ import {
   windowKey,
 } from "./discord.js";
 
-/** discord.js を起動せず allowlist 配線(§9.2)の判定だけを検証する。 */
+/** discord.js を起動せずゲート配線(§9.2 / ADR-0018)の判定だけを検証する。 */
 const channels = (over: Partial<ChannelsConfig> = {}): ChannelsConfig => ({
-  allow: [],
   permanent_exclude: [],
   ...over,
 });
+const gate = (over: Partial<ChannelGateInput> = {}): ChannelGateInput => ({
+  channelId: "111",
+  parentId: null,
+  botCanView: true,
+  ...over,
+});
 
-describe("denyReason (§9.2 default-deny の配線)", () => {
-  it("allow が空ならどのチャンネルも拒否メッセージ(default-deny)", () => {
-    expect(denyReason(channels(), "111")).toBe(DENY_MESSAGE);
+describe("denyReason(§9.2 / ADR-0018 の配線)", () => {
+  it("bot が見えるチャンネルは null(許可 → onAsk へ進む)", () => {
+    expect(denyReason(channels(), gate())).toBeNull();
   });
 
-  it("allow にあるチャンネルは null(許可 → onAsk へ進む)", () => {
-    expect(denyReason(channels({ allow: ["111"] }), "111")).toBeNull();
+  it("不可視・判定不能は拒否メッセージ(安全側)", () => {
+    expect(denyReason(channels(), gate({ botCanView: false }))).toBe(DENY_MESSAGE);
+    expect(denyReason(channels(), gate({ botCanView: null }))).toBe(DENY_MESSAGE);
   });
 
-  it("permanent_exclude は allow より優先(拒否)", () => {
-    expect(denyReason(channels({ allow: ["111"], permanent_exclude: ["111"] }), "111")).toBe(
-      DENY_MESSAGE,
-    );
+  it("permanent_exclude は可視性より優先(拒否)", () => {
+    expect(denyReason(channels({ permanent_exclude: ["111"] }), gate())).toBe(DENY_MESSAGE);
   });
 });
 

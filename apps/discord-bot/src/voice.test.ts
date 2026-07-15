@@ -1,7 +1,7 @@
 import type { Message } from "discord.js";
 import type { Logger } from "pino";
 import { describe, expect, it, vi } from "vitest";
-import type { ChannelsConfig, VoiceConfig } from "./config.js";
+import type { ChannelGateInput, ChannelsConfig, VoiceConfig } from "./config.js";
 import type { BotStore, PendingAction } from "./db.js";
 import {
   DAILY_LIMIT_MESSAGE,
@@ -14,7 +14,13 @@ import {
   voiceMemoPayloadSchema,
 } from "./voice.js";
 
-const CHANNELS: ChannelsConfig = { allow: ["VC1"], permanent_exclude: [] };
+const CHANNELS: ChannelsConfig = { permanent_exclude: [] };
+const GATE = (over: Partial<ChannelGateInput> = {}): ChannelGateInput => ({
+  channelId: "VC1",
+  parentId: null,
+  botCanView: true,
+  ...over,
+});
 const VOICE: VoiceConfig = {
   channel_id: "VC1",
   max_attachment_bytes: 25 * 1024 * 1024,
@@ -35,7 +41,7 @@ function decisionInput(over: Partial<VoiceMemoDecisionInput> = {}): VoiceMemoDec
   return {
     authorIsBot: false,
     inGuild: true,
-    channelId: "VC1",
+    gate: GATE(),
     voiceChannelId: "VC1",
     channels: CHANNELS,
     attachments: [audio()],
@@ -64,12 +70,17 @@ describe("voiceMemoDecision", () => {
   });
 
   it("専用チャンネル以外の音声投稿は無視する", () => {
-    const d = voiceMemoDecision(decisionInput({ channelId: "OTHER" }));
+    const d = voiceMemoDecision(decisionInput({ gate: GATE({ channelId: "OTHER" }) }));
     expect(d).toMatchObject({ accept: false, reason: "other-channel" });
   });
 
-  it("専用チャンネルが allowlist に無ければ拒否する(§9.2 default-deny)", () => {
-    const d = voiceMemoDecision(decisionInput({ channels: { allow: [], permanent_exclude: [] } }));
+  it("bot が専用チャンネルを見えないなら拒否(ADR-0018・安全側)", () => {
+    const d = voiceMemoDecision(decisionInput({ gate: GATE({ botCanView: null }) }));
+    expect(d).toMatchObject({ accept: false, reason: "channel-not-allowed" });
+  });
+
+  it("permanent_exclude されたチャンネルは拒否(§9.3)", () => {
+    const d = voiceMemoDecision(decisionInput({ channels: { permanent_exclude: ["VC1"] } }));
     expect(d).toMatchObject({ accept: false, reason: "channel-not-allowed" });
   });
 
@@ -159,6 +170,12 @@ function fakeMessage(
     author: { id: "U1", bot: over.authorBot ?? false },
     guildId: over.guildId !== undefined ? over.guildId : "G1",
     channelId: over.channelId ?? "VC1",
+    channel: {
+      isDMBased: () => false,
+      parentId: null,
+      guild: { members: { me: {} } },
+      permissionsFor: () => ({ has: () => true }),
+    },
     url: "https://discord.com/channels/G1/VC1/MSG1",
     attachments: new Map(atts.map((a, i) => [String(i), a])),
     flags: { has: () => over.isVoiceMessage ?? false },
