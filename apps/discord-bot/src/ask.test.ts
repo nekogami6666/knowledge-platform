@@ -106,7 +106,12 @@ owner: yamada
   ];
 
   it("stale エントリは stale: true 付きで通す", () => {
-    const out = validateCitations(cite("knowledge/hardware/x.md"), kbSynced, exists, () => STALE_ENTRY);
+    const out = validateCitations(
+      cite("knowledge/hardware/x.md"),
+      kbSynced,
+      exists,
+      () => STALE_ENTRY,
+    );
     expect(out).toEqual([
       {
         kind: "github_file",
@@ -119,14 +124,29 @@ owner: yamada
   });
 
   it("active エントリには stale キーを付けない", () => {
-    const out = validateCitations(cite("knowledge/hardware/x.md"), kbSynced, exists, () => ACTIVE_ENTRY);
+    const out = validateCitations(
+      cite("knowledge/hardware/x.md"),
+      kbSynced,
+      exists,
+      () => ACTIVE_ENTRY,
+    );
     expect(out).toEqual([
-      { kind: "github_file", repo: "org/knowledge-base", path: "knowledge/hardware/x.md", ref: "sha-kb" },
+      {
+        kind: "github_file",
+        repo: "org/knowledge-base",
+        path: "knowledge/hardware/x.md",
+        ref: "sha-kb",
+      },
     ]);
   });
 
   it("KB スキーマでない .md(議事録など)は判定対象外(注記なしで通す)", () => {
-    const out = validateCitations(cite("2026/minutes.md"), kbSynced, exists, () => "# 議事録\n本文\n");
+    const out = validateCitations(
+      cite("2026/minutes.md"),
+      kbSynced,
+      exists,
+      () => "# 議事録\n本文\n",
+    );
     expect(out[0]).not.toHaveProperty("stale");
   });
 
