@@ -62,7 +62,7 @@ async function main(): Promise<void> {
   }
   logger.info(
     {
-      allowedChannels: channels.allow.length,
+      permanentExclude: channels.permanent_exclude.length,
       membersSource: `${kbDir}/_meta/members.yaml`,
       repos: reposConfig.repos.length,
       proxyMerge: gh !== undefined,
@@ -70,8 +70,10 @@ async function main(): Promise<void> {
     },
     "config loaded",
   );
-  if (channels.allow.length === 0) {
-    logger.warn("channels.allow が空です(default-deny)。どのチャンネルにも応答しません(§9.2)。");
+  if (channels.allow !== undefined && channels.allow.length > 0) {
+    logger.warn(
+      "channels.allow は廃止されました(ADR-0018: bot が見えるチャンネルを読みます)。行を削除してください(無視されます)。",
+    );
   }
   if (reposConfig.repos.length === 0) {
     logger.warn("repos.yaml が空です。検索対象リポがありません(§14 #5)。");

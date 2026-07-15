@@ -10,10 +10,16 @@ import { type Message, MessageFlags } from "discord.js";
 import type { Logger } from "pino";
 import { z } from "zod";
 import { jstDayKey } from "./capture.js";
-import { type ChannelsConfig, isChannelAllowed, type VoiceConfig } from "./config.js";
+import {
+  type ChannelGateInput,
+  type ChannelsConfig,
+  isChannelAllowed,
+  type VoiceConfig,
+} from "./config.js";
 import type { BotStore } from "./db.js";
 import { withCorrelation } from "./logger.js";
 import { isoJst } from "./time.js";
+import { gateInputFromChannel } from "./visibility.js";
 
 /** pending_actions の type(§4.6)。消費側(PR-V3)と共有する。 */
 export const VOICE_MEMO_ACTION_TYPE = "voice_memo";
@@ -50,10 +56,10 @@ export interface VoiceMemoDecisionInput {
   authorIsBot: boolean;
   /** guild メッセージか(DM は §6.4 で対象外)。 */
   inGuild: boolean;
-  channelId: string;
+  gate: ChannelGateInput;
   /** voice.yaml の channel_id(null = 機能 OFF)。 */
   voiceChannelId: string | null;
-  /** §9.2 default-deny(専用チャンネルも channels.yaml の allow に入っていること)。 */
+  /** §9.2(ADR-0018): 専用チャンネルは bot が見えること + permanent_exclude 外であること。 */
   channels: ChannelsConfig;
   attachments: VoiceAttachmentMeta[];
   /** ボイスメッセージ(MessageFlags.IsVoiceMessage)。 */
@@ -81,10 +87,10 @@ export const DAILY_LIMIT_MESSAGE = "音声メモの本日の上限に達して�
 export function voiceMemoDecision(input: VoiceMemoDecisionInput): VoiceMemoDecision {
   if (input.voiceChannelId === null) return { accept: false, reason: "disabled" };
   if (!input.inGuild) return { accept: false, reason: "not-guild" };
-  if (input.channelId !== input.voiceChannelId) {
+  if (input.gate.channelId !== input.voiceChannelId) {
     return { accept: false, reason: "other-channel" };
   }
-  if (!isChannelAllowed(input.channels, input.channelId)) {
+  if (!isChannelAllowed(input.channels, input.gate)) {
     return { accept: false, reason: "channel-not-allowed" };
   }
   if (input.authorIsBot) return { accept: false, reason: "bot-author" };
@@ -126,7 +132,7 @@ export async function handleVoiceMemo(message: Message, deps: VoiceMemoDeps): Pr
     const decision = voiceMemoDecision({
       authorIsBot: message.author.bot,
       inGuild: message.guildId !== null,
-      channelId: message.channelId,
+      gate: gateInputFromChannel(message.channel, message.channelId),
       voiceChannelId: voice.channel_id,
       channels: deps.channels,
       attachments: [...message.attachments.values()].map((a) => ({

@@ -1,5 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { type ConfigReader, isChannelAllowed, loadChannels, loadOps, loadRepos } from "./config.js";
+import {
+  type ChannelGateInput,
+  type ChannelsConfig,
+  type ConfigReader,
+  isChannelAllowed,
+  loadChannels,
+  loadOps,
+  loadRepos,
+} from "./config.js";
 
 function reader(files: Record<string, string | null>): ConfigReader {
   return { read: (name) => Promise.resolve(files[name] ?? null) };
@@ -21,32 +29,47 @@ describe("loadRepos", () => {
 });
 
 describe("loadChannels", () => {
-  it("ファイルが無ければ default-deny の空設定", async () => {
+  it("ファイルが無ければ既定(除外なし)", async () => {
     const c = await loadChannels(reader({}));
-    expect(c.allow).toEqual([]);
     expect(c.permanent_exclude).toEqual([]);
+    expect(c.allow).toBeUndefined();
   });
 
-  it("yaml をパースする", async () => {
+  it("yaml をパースする(旧 allow は deprecated として保持され、判定には使われない)", async () => {
     const c = await loadChannels(
       reader({ "channels.yaml": "allow: ['111']\npermanent_exclude: ['999']" }),
     );
-    expect(c.allow).toEqual(["111"]);
+    expect(c.allow).toEqual(["111"]); // index.ts が警告するために読むだけ
     expect(c.permanent_exclude).toEqual(["999"]);
   });
 });
 
-describe("isChannelAllowed (§9.2 default-deny)", () => {
-  it("allow が空ならどのチャンネルも拒否", () => {
-    expect(isChannelAllowed({ allow: [], permanent_exclude: [] }, "111")).toBe(false);
+describe("isChannelAllowed(ADR-0018: ロール可視性 + permanent_exclude)", () => {
+  const gate = (over: Partial<ChannelGateInput> = {}): ChannelGateInput => ({
+    channelId: "111",
+    parentId: null,
+    botCanView: true,
+    ...over,
+  });
+  const cfg = (exclude: string[] = []): ChannelsConfig => ({ permanent_exclude: exclude });
+
+  it("bot が見える → 許可", () => {
+    expect(isChannelAllowed(cfg(), gate())).toBe(true);
   });
 
-  it("allow にあれば許可", () => {
-    expect(isChannelAllowed({ allow: ["111"], permanent_exclude: [] }, "111")).toBe(true);
+  it("bot が見えない・判定不能(null)→ 拒否(安全側)", () => {
+    expect(isChannelAllowed(cfg(), gate({ botCanView: false }))).toBe(false);
+    expect(isChannelAllowed(cfg(), gate({ botCanView: null }))).toBe(false);
   });
 
-  it("permanent_exclude が allow より優先(拒否)", () => {
-    expect(isChannelAllowed({ allow: ["111"], permanent_exclude: ["111"] }, "111")).toBe(false);
+  it("permanent_exclude は可視性より優先(拒否)", () => {
+    expect(isChannelAllowed(cfg(["111"]), gate())).toBe(false);
+  });
+
+  it("スレッドは親チャンネル ID でも除外照合(ADR-0018 D3 の穴塞ぎ)", () => {
+    expect(
+      isChannelAllowed(cfg(["PARENT"]), gate({ channelId: "THREAD", parentId: "PARENT" })),
+    ).toBe(false);
   });
 });
 

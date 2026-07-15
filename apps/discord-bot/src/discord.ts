@@ -22,6 +22,7 @@ import {
   type PartialMessageReaction,
   Partials,
   type PartialUser,
+  PermissionFlagsBits,
   SlashCommandBuilder,
   type User,
 } from "discord.js";
@@ -30,6 +31,7 @@ import type { AskResult } from "./ask.js";
 import { handleLightbulb } from "./capture.js";
 import { SerialQueue } from "./concurrency.js";
 import {
+  type ChannelGateInput,
   type ChannelsConfig,
   isChannelAllowed,
   type OpsConfig,
@@ -39,6 +41,7 @@ import type { BotStore } from "./db.js";
 import { withCorrelation } from "./logger.js";
 import { EMPTY_MEMBERS, type MembersLoader } from "./members.js";
 import { isoJst } from "./time.js";
+import { gateInputFromInteraction } from "./visibility.js";
 import { handleVoiceCorrection, handleVoiceMemo } from "./voice.js";
 
 /** /ask コマンド定義(登録は別途 REST で行う)。 */
@@ -82,10 +85,10 @@ export interface BotDeps {
   onVoiceMemoQueued?: () => void;
 }
 
-/** §9.2 default-deny: 許可されないチャンネルへの拒否メッセージ。許可なら null。 */
+/** §9.2(ADR-0018): 読めないチャンネルへの拒否メッセージ。許可なら null。 */
 export const DENY_MESSAGE = "このチャンネルでは利用できません(§9.2)。";
-export function denyReason(channels: ChannelsConfig, channelId: string): string | null {
-  return isChannelAllowed(channels, channelId) ? null : DENY_MESSAGE;
+export function denyReason(channels: ChannelsConfig, gate: ChannelGateInput): string | null {
+  return isChannelAllowed(channels, gate) ? null : DENY_MESSAGE;
 }
 
 // レート制限(§6.2 直列+制御 / §13 専門家負荷)。固定 10 分バケットで user/channel 別にカウント。
@@ -181,6 +184,22 @@ export function createBot(deps: BotDeps): Client {
     } catch (err) {
       withCorrelation(deps.logger, "startup").error({ err }, "slash command registration failed");
     }
+    // ADR-0018 D5: 可視チャンネルの監査ログ(bot が「何を読むか」を起動時に 1 回可視化)。
+    for (const guild of ready.guilds.cache.values()) {
+      const me = guild.members.me;
+      const visible = guild.channels.cache
+        .filter(
+          (c) =>
+            c.isTextBased() &&
+            me !== null &&
+            (c.permissionsFor(me, false)?.has(PermissionFlagsBits.ViewChannel) ?? false),
+        )
+        .map((c) => c.name);
+      deps.logger.info(
+        { guild: guild.name, count: visible.length, channels: visible },
+        "visible channels(ADR-0018 監査)",
+      );
+    }
   });
 
   client.on(Events.InteractionCreate, async (interaction: Interaction) => {
@@ -234,8 +253,12 @@ async function handleAsk(
   queue: SerialQueue,
 ): Promise<void> {
   const { logger, channels, store } = deps;
-  // §9.2 default-deny: 許可外チャンネルでは onAsk を呼ばず ephemeral で拒否する。
-  const denied = denyReason(channels, interaction.channelId);
+  // ADR-0018 D4: interaction は bot 不可視チャンネル・DM からも届くため、guild + 可視性を明示チェック。
+  if (!interaction.inGuild()) {
+    await interaction.reply({ content: DENY_MESSAGE, ephemeral: true });
+    return;
+  }
+  const denied = denyReason(channels, gateInputFromInteraction(interaction));
   if (denied !== null) {
     await interaction.reply({ content: denied, ephemeral: true });
     return;

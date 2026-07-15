@@ -1,6 +1,7 @@
 /**
  * Bot 設定(channels ほか)の読み込みと検証(design.md §9.2 / §4.2 末)。
- * - channels: Bot が閲覧を許可するチャンネル。allowlist 制(default-deny、§9.2)。
+ * - channels: 読み取り可否は Discord のロール可視性(bot の ViewChannel)で決まる(ADR-0018)。
+ *   config に残るのは「公開だが読ませないチャンネル」の明示除外(permanent_exclude・§9.3)のみ。
  * - members 対応表はローカル config ではなく KB の `_meta/members.yaml` が唯一の正
  *   (ADR-0017 D3。読み込みは members.ts の createCloneMembersLoader)。
  * 読み取りは注入可能にしてテストする(ファイルが無ければ既定値)。
@@ -12,11 +13,24 @@ import { z } from "zod";
 
 export const channelsConfigSchema = z
   .object({
-    allow: z.array(z.string()).default([]),
+    /** @deprecated ADR-0018 で廃止。判定には使わない(残っていれば index.ts が警告して無視)。 */
+    allow: z.array(z.string()).optional(),
     permanent_exclude: z.array(z.string()).default([]),
   })
-  .default({ allow: [], permanent_exclude: [] });
+  .default({ permanent_exclude: [] });
 export type ChannelsConfig = z.infer<typeof channelsConfigSchema>;
+
+/**
+ * チャンネルゲートの入力(discord.js から剥がした純粋データ・ADR-0018)。
+ * 変換は visibility.ts(gateInputFromChannel / gateInputFromInteraction)が担う。
+ */
+export interface ChannelGateInput {
+  channelId: string;
+  /** スレッド / フォーラム投稿の親チャンネル ID(permanent_exclude の照合用)。 */
+  parentId: string | null;
+  /** bot 自身が ViewChannel を持つか。null = 判定不能(安全側 = 拒否)。 */
+  botCanView: boolean | null;
+}
 
 /**
  * 検索対象リポ(§6.2 / §14 #5)。repo="org/name"(citation allowlist 兼 permalink)、
@@ -106,8 +120,12 @@ export async function loadVoice(reader: ConfigReader): Promise<VoiceConfig> {
   return voiceConfigSchema.parse(data ?? undefined);
 }
 
-/** §9.2 default-deny: allow に含まれ、かつ permanent_exclude に含まれないチャンネルのみ許可。 */
-export function isChannelAllowed(config: ChannelsConfig, channelId: string): boolean {
-  if (config.permanent_exclude.includes(channelId)) return false;
-  return config.allow.includes(channelId);
+/**
+ * §9.2(ADR-0018): permanent_exclude(スレッドは親 ID でも照合)→ bot の可視性の順で判定する。
+ * 「bot(専用ロール)が見えるチャンネル = 読む」。判定不能(botCanView: null)は拒否(安全側)。
+ */
+export function isChannelAllowed(config: ChannelsConfig, gate: ChannelGateInput): boolean {
+  if (config.permanent_exclude.includes(gate.channelId)) return false;
+  if (gate.parentId !== null && config.permanent_exclude.includes(gate.parentId)) return false;
+  return gate.botCanView === true;
 }

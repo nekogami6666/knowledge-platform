@@ -21,12 +21,17 @@ import {
   type TriageSearchFn,
   triageResultSchema,
 } from "./capture.js";
-import type { ChannelsConfig } from "./config.js";
+import type { ChannelGateInput, ChannelsConfig } from "./config.js";
 import type { BotStore } from "./db.js";
 
 const channels = (over: Partial<ChannelsConfig> = {}): ChannelsConfig => ({
-  allow: ["CH1"],
   permanent_exclude: [],
+  ...over,
+});
+const gate = (over: Partial<ChannelGateInput> = {}): ChannelGateInput => ({
+  channelId: "CH1",
+  parentId: null,
+  botCanView: true,
   ...over,
 });
 
@@ -39,10 +44,10 @@ describe("captureDecision (§6.4 のガード判定)", () => {
     emojiName: "💡" as string | null,
     reactorIsBot: false,
     inGuild: true,
-    channelId: "CH1",
+    gate: gate(),
     channels: channels(),
   };
-  it("💡 × 人間 × guild × allowlist → capture", () => {
+  it("💡 × 人間 × guild × bot 可視チャンネル → capture", () => {
     expect(captureDecision(base)).toEqual({ capture: true });
   });
   it("💡 以外は無視", () => {
@@ -63,11 +68,28 @@ describe("captureDecision (§6.4 のガード判定)", () => {
       reason: "not-guild",
     });
   });
-  it("allowlist 外のチャンネルは対象外(§9.3 default-deny)", () => {
-    expect(captureDecision({ ...base, channelId: "OTHER" })).toEqual({
+  it("bot が見えない・判定不能なチャンネルは対象外(ADR-0018・安全側)", () => {
+    expect(captureDecision({ ...base, gate: gate({ botCanView: false }) })).toEqual({
       capture: false,
       reason: "channel-not-allowed",
     });
+    expect(captureDecision({ ...base, gate: gate({ botCanView: null }) })).toEqual({
+      capture: false,
+      reason: "channel-not-allowed",
+    });
+  });
+
+  it("permanent_exclude(スレッド親含む)は可視でも対象外(§9.3)", () => {
+    expect(
+      captureDecision({ ...base, channels: channels({ permanent_exclude: ["CH1"] }) }),
+    ).toEqual({ capture: false, reason: "channel-not-allowed" });
+    expect(
+      captureDecision({
+        ...base,
+        gate: gate({ channelId: "THREAD", parentId: "CH9" }),
+        channels: channels({ permanent_exclude: ["CH9"] }),
+      }),
+    ).toEqual({ capture: false, reason: "channel-not-allowed" });
   });
 });
 
@@ -265,7 +287,13 @@ function fakeGh(opts: { existingHead?: string; createThrows?: unknown } = {}): {
 }
 
 function fakeContext(
-  over: { emoji?: string; guildId?: string | null; channelId?: string; userBot?: boolean } = {},
+  over: {
+    emoji?: string;
+    guildId?: string | null;
+    channelId?: string;
+    userBot?: boolean;
+    visible?: boolean;
+  } = {},
 ): { reaction: MessageReaction; user: User; dms: string[] } {
   const dms: string[] = [];
   const mkMsg = (id: string, content: string, ts: number) => ({
@@ -282,6 +310,10 @@ function fakeContext(
     url: URL,
     channel: {
       isThread: () => false,
+      isDMBased: () => false,
+      parentId: null,
+      guild: { members: { me: {} } },
+      permissionsFor: () => ({ has: () => over.visible ?? true }),
       messages: {
         fetch: async () =>
           new Map([
@@ -382,7 +414,7 @@ describe("handleLightbulb (§6.4 ③-a)", () => {
       { emoji: "👍" },
       { userBot: true },
       { guildId: null },
-      { channelId: "OTHER" },
+      { visible: false },
     ]) {
       const { gh, list } = fakeGh();
       const { reaction, user } = fakeContext(over);
