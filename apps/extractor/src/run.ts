@@ -13,13 +13,13 @@ import type { DecisionCandidate, LearningCandidate } from "./candidate.js";
 import { mapWithLimit } from "./concurrency.js";
 import type { ExtractorConfig } from "./config.js";
 import { type ExtractorState, readState, serializeState } from "./cursor.js";
-import { changedMinutesFiles, type GitExec } from "./diff.js";
+import { changedSourceFiles, type GitExec } from "./diff.js";
 import { checkDomainProximity, listDomains, type ReaddirFn } from "./domains.js";
 import { type ExtractDeps, extractFromMinutes } from "./extract.js";
 import type { Logger } from "./logger.js";
 import { type MaterializeAction, type MaterializeDeps, materializeOne } from "./materialize.js";
 import type { Notifier, NotifyCounts } from "./notify.js";
-import { buildPrTitle, findExistingPr, shortSha } from "./pr-title.js";
+import { buildPrTitle, buildRunKey, findExistingPr } from "./pr-title.js";
 import { type ReconcileDeps, reconcileCandidate } from "./reconcile.js";
 import type { RepoSyncer } from "./repos.js";
 
@@ -144,7 +144,7 @@ function buildPrBody(
 ): string {
   const newDomains = domains.newDomains.length > 0 ? domains.newDomains.join(", ") : "なし";
   return [
-    "議事録からの自動抽出(extractor)。内容を確認し、問題なければ 👍、修正は PR で直接編集してください。",
+    "議事録・インタビューからの自動抽出(extractor)。内容を確認し、問題なければ 👍、修正は PR で直接編集してください。",
     `- 新規: ${counts.new}`,
     `- 出典追記: ${counts.append}`,
     `- 矛盾更新: ${counts.supersede}`,
@@ -162,25 +162,73 @@ function buildPrBody(
     .join("\n");
 }
 
+/** 抽出ソース 1 系統の実行記述子(minutes / interviews・PR-I1)。 */
+interface SourceBatch {
+  key: "minutes" | "interviews";
+  /** Source.kind(出典スキーマ・§4.2)。 */
+  sourceKind: "meeting" | "interview";
+  /** 出典 repo("org/minutes" / KB リポ)。 */
+  repo: string;
+  /** clone の絶対パス(本文読み取りと Agent SDK cwd)。 */
+  root: string;
+  /** 同期後の head SHA(source.ref とカーソル前進先)。 */
+  headSha: string;
+  promptName: string;
+  label: string;
+  changed: string[];
+}
+
 export async function runExtractor(deps: RunDeps): Promise<RunSummary> {
   const { config, logger } = deps;
   const synced = await deps.syncer.sync();
   const kbRoot = synced.kb.absDir;
-  const minutesRoot = synced.minutes.absDir;
-  const headSha = synced.minutes.resolvedCommit;
+  const minutesHead = synced.minutes.resolvedCommit;
+  const kbHead = synced.kb.resolvedCommit;
 
   const state = await readState(join(kbRoot, "_meta", "state.json"), deps.readFile);
-  const sinceSha = state?.last_processed_sha ?? null;
 
-  const changed = await changedMinutesFiles(
-    minutesRoot,
-    sinceSha,
-    headSha,
-    deps.exec,
-    config.minutes.exclude,
-  );
-  if (changed.length === 0) {
-    logger.info("変更された議事録がありません。PR を作成しません。");
+  // ソース別 diff(§6.3 step1)。interviews は KB リポ内のディレクトリなので kb clone を diff する。
+  const allBatches: SourceBatch[] = [
+    {
+      key: "minutes",
+      sourceKind: "meeting",
+      repo: config.minutes.repo,
+      root: synced.minutes.absDir,
+      headSha: minutesHead,
+      promptName: "extract",
+      label: "会議議事録",
+      changed: await changedSourceFiles(
+        synced.minutes.absDir,
+        state?.sources.minutes?.last_processed_sha ?? null,
+        minutesHead,
+        deps.exec,
+        { pathspec: "*.md", excludeBasenames: config.minutes.exclude },
+      ),
+    },
+    {
+      key: "interviews",
+      sourceKind: "interview",
+      repo: config.kb.repo,
+      root: kbRoot,
+      headSha: kbHead,
+      promptName: "extract-interview",
+      label: "ナレッジインタビューの書き起こし",
+      changed: await changedSourceFiles(
+        kbRoot,
+        state?.sources.interviews?.last_processed_sha ?? null,
+        kbHead,
+        deps.exec,
+        {
+          pathspec: `${config.interviews.dir}/*.md`,
+          excludeDirs: config.interviews.exclude_dirs.map((d) => `${config.interviews.dir}/${d}`),
+        },
+      ),
+    },
+  ];
+  const batches = allBatches.filter((b) => b.changed.length > 0);
+
+  if (batches.length === 0) {
+    logger.info("変更された議事録・インタビューがありません。PR を作成しません。");
     return {
       created: false,
       reason: "no-changes",
@@ -190,14 +238,15 @@ export async function runExtractor(deps: RunDeps): Promise<RunSummary> {
     };
   }
 
-  // 冪等性: 同一 head SHA の open PR が既にあれば skip(実 PR 時のみ gh に触れる)。
+  // 冪等性: 同一ランキー(minutes+kb head)の open PR が既にあれば skip(実 PR 時のみ gh に触れる)。
+  const runKey = buildRunKey(minutesHead, kbHead);
   if (deps.realPr) {
     const existing = findExistingPr(
       await deps.gh.listPullRequests(config.kb.repo, { state: "open" }),
-      headSha,
+      runKey,
     );
     if (existing) {
-      logger.info("同一 head の PR が既存のため skip(冪等)", { prUrl: existing.url });
+      logger.info("同一範囲の PR が既存のため skip(冪等)", { prUrl: existing.url });
       return {
         created: false,
         reason: "already-exists",
@@ -224,74 +273,76 @@ export async function runExtractor(deps: RunDeps): Promise<RunSummary> {
   const clock = deps.monotonicMs ?? (() => performance.now());
   const timings: StageTimings = { extractMs: 0, reconcileMs: 0, materializeMs: 0 };
 
-  for (const path of changed) {
-    const content = await deps.readFile(join(minutesRoot, path));
-    const participants = parseParticipants(content);
-    const tExtract = clock();
-    const { value: extraction } = await extractFromMinutes(
-      { repo: config.minutes.repo, path, content, cwd: minutesRoot },
-      { ...deps.extractDeps, existingDomains: [...domainSet] },
-    );
-    timings.extractMs += clock() - tExtract;
-    counts.openQuestions += extraction.openQuestions.length;
-
-    const candidates = [...extraction.decisions, ...extraction.learnings];
-    domains.candidateCount += candidates.length;
-
-    // reconcile は read-only な agentic search なので上限付き並列(§2-E)。リトライは reconcileCandidate
-    // 内の withRetry(per-candidate・429/529/timeout)が担い、mapWithLimit は in-flight を絞るだけ。
-    // 失敗候補は skip+記録して run 全体を落とさない(逐次時代の fail-fast からの意図的変更)。
-    const tReconcile = clock();
-    const verdicts = await mapWithLimit(candidates, deps.reconcileConcurrency, async (c) => {
-      try {
-        const { value } = await reconcileCandidate(c, kbRoot, deps.reconcileDeps);
-        return { ok: true as const, verdict: value };
-      } catch (e) {
-        return { ok: false as const, error: e };
-      }
-    });
-    timings.reconcileMs += clock() - tReconcile;
-
-    // materialize は逐次(allocateId の順序性を保つ)。verdict は入力=候補順に集約済み。
-    const tMaterialize = clock();
-    for (let i = 0; i < candidates.length; i += 1) {
-      const c = candidates[i];
-      const r = verdicts[i];
-      if (c === undefined || r === undefined) continue;
-      if (!r.ok) {
-        counts.skip += 1;
-        logger.warn("reconcile 失敗のため候補を skip", {
-          candidate: candidateLabel(c),
-          error: r.error instanceof Error ? r.error.message : String(r.error),
-        });
-        continue;
-      }
-      // 出典 = 議事録(meeting)。lines は候補ごとに異なるためここで合成する。
-      const source: Source = {
-        kind: "meeting",
-        repo: config.minutes.repo,
-        path,
-        ref: headSha,
-        ...(c.lines !== undefined ? { lines: c.lines } : {}),
-      };
-      const change = await materializeOne(
-        {
-          kbRoot,
-          source,
-          fallbackPeople: participants,
-          candidate: c,
-          verdict: r.verdict,
-        },
-        materializeDeps,
+  for (const batch of batches) {
+    for (const path of batch.changed) {
+      const content = await deps.readFile(join(batch.root, path));
+      const participants = parseParticipants(content);
+      const tExtract = clock();
+      const { value: extraction } = await extractFromMinutes(
+        { repo: batch.repo, path, content, cwd: batch.root, label: batch.label },
+        { ...deps.extractDeps, existingDomains: [...domainSet], promptName: batch.promptName },
       );
-      bump(counts, change.action);
-      files.push(...change.files);
-      addPeople(people, c);
-      if (c.kind === "learning" && change.action === "new") {
-        recordLearningDomain(c.domain, domainSet, domains, logger);
+      timings.extractMs += clock() - tExtract;
+      counts.openQuestions += extraction.openQuestions.length;
+
+      const candidates = [...extraction.decisions, ...extraction.learnings];
+      domains.candidateCount += candidates.length;
+
+      // reconcile は read-only な agentic search なので上限付き並列(§2-E)。リトライは reconcileCandidate
+      // 内の withRetry(per-candidate・429/529/timeout)が担い、mapWithLimit は in-flight を絞るだけ。
+      // 失敗候補は skip+記録して run 全体を落とさない(逐次時代の fail-fast からの意図的変更)。
+      const tReconcile = clock();
+      const verdicts = await mapWithLimit(candidates, deps.reconcileConcurrency, async (c) => {
+        try {
+          const { value } = await reconcileCandidate(c, kbRoot, deps.reconcileDeps);
+          return { ok: true as const, verdict: value };
+        } catch (e) {
+          return { ok: false as const, error: e };
+        }
+      });
+      timings.reconcileMs += clock() - tReconcile;
+
+      // materialize は逐次(allocateId の順序性を保つ)。verdict は入力=候補順に集約済み。
+      const tMaterialize = clock();
+      for (let i = 0; i < candidates.length; i += 1) {
+        const c = candidates[i];
+        const r = verdicts[i];
+        if (c === undefined || r === undefined) continue;
+        if (!r.ok) {
+          counts.skip += 1;
+          logger.warn("reconcile 失敗のため候補を skip", {
+            candidate: candidateLabel(c),
+            error: r.error instanceof Error ? r.error.message : String(r.error),
+          });
+          continue;
+        }
+        // 出典 = 議事録(meeting)またはインタビュー(interview)。lines は候補ごとに合成する。
+        const source: Source = {
+          kind: batch.sourceKind,
+          repo: batch.repo,
+          path,
+          ref: batch.headSha,
+          ...(c.lines !== undefined ? { lines: c.lines } : {}),
+        };
+        const change = await materializeOne(
+          {
+            kbRoot,
+            source,
+            fallbackPeople: participants,
+            candidate: c,
+            verdict: r.verdict,
+          },
+          materializeDeps,
+        );
+        bump(counts, change.action);
+        files.push(...change.files);
+        addPeople(people, c);
+        if (c.kind === "learning" && change.action === "new") {
+          recordLearningDomain(c.domain, domainSet, domains, logger);
+        }
       }
+      timings.materializeMs += clock() - tMaterialize;
     }
-    timings.materializeMs += clock() - tMaterialize;
   }
   timings.extractMs = Math.round(timings.extractMs);
   timings.reconcileMs = Math.round(timings.reconcileMs);
@@ -315,8 +366,12 @@ export async function runExtractor(deps: RunDeps): Promise<RunSummary> {
   for (const f of files) {
     await deps.writeFile(join(kbRoot, f.path), f.content);
   }
+  // 両ソースとも同期時 head まで処理済み(変更が無かった側も diff 済みなので取りこぼさない)。
   const newState: ExtractorState = {
-    last_processed_sha: headSha,
+    sources: {
+      minutes: { last_processed_sha: minutesHead },
+      interviews: { last_processed_sha: kbHead },
+    },
     last_run_at: deps.now().toISOString(),
   };
   await deps.writeFile(join(kbRoot, "_meta", "state.json"), serializeState(newState));
@@ -339,7 +394,7 @@ export async function runExtractor(deps: RunDeps): Promise<RunSummary> {
     };
   }
 
-  const title = buildPrTitle(sinceSha, headSha);
+  const title = buildPrTitle(runKey);
   if (!deps.realPr) {
     logger.info("dry-run: 実 PR は作成しません(EXTRACTOR_REAL_PR 未設定)。", {
       files: files.length,
@@ -350,7 +405,7 @@ export async function runExtractor(deps: RunDeps): Promise<RunSummary> {
 
   const pr = await deps.gh.createPullRequest({
     repo: config.kb.repo,
-    head: `extract/${shortSha(headSha)}`,
+    head: `extract/${runKey}`,
     base: config.base_branch,
     title,
     body: buildPrBody(counts, domains, [...people]),

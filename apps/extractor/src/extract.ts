@@ -39,6 +39,8 @@ export interface ExtractDeps {
   timeoutMs?: number;
   /** 既存 domain の一覧(⑱・§2-C)。プロンプトに提示して learning の domain 再利用を促す(乱立抑制)。 */
   existingDomains?: readonly string[];
+  /** プロンプト名(prompts/extractor/<name>.md)。既定 "extract"。interviews は "extract-interview"(PR-I1)。 */
+  promptName?: string;
 }
 
 export interface MinutesInput {
@@ -48,8 +50,10 @@ export interface MinutesInput {
   path: string;
   /** 議事録本文(呼び出し側=F1c が clone から読む)。 */
   content: string;
-  /** Agent SDK の cwd(minutes clone ルート)。ツール無しなので実体探索はしない。 */
+  /** Agent SDK の cwd(ソース clone ルート)。ツール無しなので実体探索はしない。 */
   cwd: string;
+  /** 文書の種類ラベル(prompt の導入文に使う)。既定 "会議議事録"。 */
+  label?: string;
 }
 
 /** 各行頭に `L{n}: ` を付け、LLM が根拠の行範囲(lines)を確実に引用できるようにする。 */
@@ -69,26 +73,27 @@ export function buildExtractPrompt(
     existingDomains.length > 0
       ? `既存 domain(learning の domain はなるべくこの中から選ぶ・無ければ新設可): ${existingDomains.join(", ")}`
       : "既存 domain: (まだ無し。適切な粒度で新設してよい)";
+  const label = input.label ?? "会議議事録";
   return [
-    "以下は1つの会議議事録です。決定 / 学び / 未解決の問い を抽出してください。",
+    `以下は1つの${label}です。決定 / 学び / 未解決の問い を抽出してください。`,
     `repo: ${input.repo}`,
     `path: ${input.path}`,
     domainLine,
     "各行頭の `L{n}:` は行番号です。根拠の行範囲を lines(例 L12-L18)で示してください。",
-    "--- 議事録ここから ---",
+    "--- 本文ここから ---",
     numberLines(input.content),
-    "--- 議事録ここまで ---",
+    "--- 本文ここまで ---",
   ].join("\n");
 }
 
-/** 1 議事録ファイルから抽出候補を得る(role:standard・ツール無し単発・§6.3)。 */
+/** ソース 1 ファイルから抽出候補を得る(role:standard・ツール無し単発・§6.3)。 */
 export async function extractFromMinutes(
   input: MinutesInput,
   deps: ExtractDeps,
 ): Promise<{ value: ExtractionResult; usage: Usage }> {
   const search: ExtractSearchFn = deps.search ?? runAgentSearch;
   const usage = deps.usage ?? nullUsageRecorder;
-  const prompt = await loadPrompt("extractor", "extract", deps.promptStore);
+  const prompt = await loadPrompt("extractor", deps.promptName ?? "extract", deps.promptStore);
   return withRetry(
     () =>
       search(

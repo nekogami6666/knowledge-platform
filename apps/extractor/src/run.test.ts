@@ -11,15 +11,17 @@ import { describe, expect, it, vi } from "vitest";
 import type { ExtractionResult } from "./candidate.js";
 import type { ExtractorConfig } from "./config.js";
 import { createLogger } from "./logger.js";
-import { buildPrTitle } from "./pr-title.js";
+import { buildPrTitle, buildRunKey } from "./pr-title.js";
 import { type RunDeps, runExtractor } from "./run.js";
 import type { Verdict } from "./verdict.js";
 
 const HEAD = "abcdef1234567890"; // 小文字 hex(pr-title の正規表現に一致)
+const KB_HEAD = "0123456fedcba987"; // kb clone の head(interviews カーソルの前進先・PR-I1)
 
 const config: ExtractorConfig = {
   minutes: { repo: "org/minutes", dir: "minutes", exclude: ["transcript.md"] },
   kb: { repo: "org/knowledge-base", dir: "knowledge-base" },
+  interviews: { dir: "interviews", exclude_dirs: ["kits", "voice-memos"] },
   base_branch: "main",
 };
 
@@ -107,7 +109,7 @@ function makeDeps(over: Partial<RunDeps> = {}): RunDeps {
     syncer: {
       sync: async () => ({
         minutes: { repo: "org/minutes", absDir: "/m", resolvedCommit: HEAD },
-        kb: { repo: "org/knowledge-base", absDir: "/kb", resolvedCommit: "kbsha" },
+        kb: { repo: "org/knowledge-base", absDir: "/kb", resolvedCommit: KB_HEAD },
       }),
     },
     gh: makeGh(),
@@ -130,7 +132,9 @@ function makeDeps(over: Partial<RunDeps> = {}): RunDeps {
       return v;
     },
     writeFile: async () => {},
-    exec: async () => ({ stdout: "2026/06/x.md\n" }),
+    // pathspec で分岐(minutes は変更 1 件・interviews は変更なしが既定)。
+    exec: async (args: readonly string[]) =>
+      args.includes("interviews/*.md") ? { stdout: "" } : { stdout: "2026/06/x.md\n" },
     readdir: async () => [],
     notifier: { notifyPrCreated: vi.fn(async () => {}) },
     now: () => new Date("2026-07-01T00:00:00Z"),
@@ -154,7 +158,13 @@ describe("runExtractor", () => {
     expect(paths).toContain("_meta/state.json");
     expect(paths).toContain("_meta/id-counter.json");
     expect(paths.some((p) => p.startsWith("knowledge/hardware/kb-2026-0144"))).toBe(true);
-    expect(arg?.title).toContain("init..abcdef1");
+    expect(arg?.title).toContain("abcdef1+0123456");
+    // カーソルは両ソースとも同期時 head へ前進(PR-I1)。
+    const state = JSON.parse(arg?.files.find((f) => f.path === "_meta/state.json")?.content ?? "");
+    expect(state.sources).toEqual({
+      minutes: { last_processed_sha: HEAD },
+      interviews: { last_processed_sha: KB_HEAD },
+    });
     expect(notifier.notifyPrCreated).toHaveBeenCalledTimes(1);
     expect(r.domains.candidateCount).toBe(1);
     expect(r.domains.newDomains).toContain("hardware");
@@ -198,11 +208,11 @@ describe("runExtractor", () => {
     expect(gh.createPullRequest).not.toHaveBeenCalled();
   });
 
-  it("同一 head の PR が既存 → 冪等 skip", async () => {
+  it("同一範囲(ランキー)の PR が既存 → 冪等 skip", async () => {
     const existing: PrSummary = {
       number: 7,
-      title: buildPrTitle(null, HEAD),
-      headRef: "extract/abcdef1",
+      title: buildPrTitle(buildRunKey(HEAD, KB_HEAD)),
+      headRef: `extract/${buildRunKey(HEAD, KB_HEAD)}`,
       url: "https://existing",
     };
     const gh = makeGh({ listPullRequests: vi.fn(async () => [existing]) });
@@ -286,6 +296,49 @@ describe("runExtractor", () => {
     expect(r.created).toBe(true);
     expect(r.counts.new).toBe(1);
     expect(r.counts.skip).toBe(1);
+  });
+
+  it("interviews/ の変更は interview 出典 + 面談プロンプトで抽出される(第 2 ソース・PR-I1)", async () => {
+    const gh = makeGh();
+    const promptNames: string[] = [];
+    const userPrompts: string[] = [];
+    const r = await runExtractor(
+      makeDeps({
+        gh,
+        // minutes は変更なし・interviews に 1 件。
+        exec: async (args: readonly string[]) =>
+          args.includes("interviews/*.md")
+            ? { stdout: "interviews/2026-07-01-yamada.md\n" }
+            : { stdout: "" },
+        readFile: async (p) => {
+          if (p === "/kb/interviews/2026-07-01-yamada.md") {
+            return "# 面談\n参加者: yamada\n初期化は電源→センサの順。";
+          }
+          if (p === "/kb/_meta/id-counter.json") return JSON.stringify({ kb: { "2026": 144 } });
+          throw new Error(`ENOENT ${p}`);
+        },
+        extractDeps: {
+          promptStore: {
+            read: async (_app: string, name: string) => {
+              promptNames.push(name);
+              return "---\nrole: standard\n---\nRULES";
+            },
+          },
+          search: async (opts) => {
+            userPrompts.push(opts.prompt);
+            return { value: oneLearning, usage: { inputTokens: 1, outputTokens: 1 } };
+          },
+        },
+      }),
+    );
+    expect(r.created).toBe(true);
+    expect(promptNames.some((n) => n.includes("extract-interview"))).toBe(true);
+    expect(userPrompts.some((p) => p.includes("ナレッジインタビュー"))).toBe(true);
+    const arg = vi.mocked(gh.createPullRequest).mock.calls[0]?.[0];
+    const entry = arg?.files.find((f) => f.path.startsWith("knowledge/"));
+    expect(entry?.content).toContain('kind: "interview"');
+    expect(entry?.content).toContain("interviews/2026-07-01-yamada.md");
+    expect(entry?.content).toContain(KB_HEAD); // source.ref は kb head
   });
 
   it("段階別 timings を計測する(monotonicMs 注入)", async () => {

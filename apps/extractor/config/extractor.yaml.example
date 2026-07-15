@@ -9,4 +9,8 @@ kb:
   repo: org/knowledge-base
   dir: knowledge-base
   # url: https://github.com/org/knowledge-base.git
+# interviews は KB リポ内のディレクトリ(§6.6 ⑤-b・PR-I1)。省略時は下記の既定で動く。
+# interviews:
+#   dir: interviews
+#   exclude_dirs: [kits, voice-memos]   # 質問リストと voice-memo 原本は抽出対象外
 base_branch: main
