@@ -77,18 +77,31 @@ export function isoWeekKey(d: Date): string {
 }
 
 /**
- * 回答者選定(§6.5 step2)。expertise.yaml(§4.5)は Phase 4 で生成されるため、当面は
- * assignees のラウンドロビン。tryReserve が週3件/人の予約(BotStore.hitRateLimit を写像)で、
- * 全員が上限なら null(質問は status:open のまま・依頼なし)。
+ * 回答者選定(§6.5 step2 / §4.4 L302)。expertise.yaml 由来の優先リスト(rankByExpertise)が
+ * あれば「その順 ∩ assignees」を先に試し、無ければ(または優先者が全員週上限なら)従来の
+ * ラウンドロビンへフォールバック。assignees は「依頼を振ってよい人の curated プール」なので、
+ * expertise に載っていても assignees 外の人には依頼しない(ADR-0017 D3 の整理)。
+ * tryReserve が週3件/人の予約(BotStore.hitRateLimit を写像)で、全員が上限なら null
+ * (質問は status:open のまま・依頼なし)。
  */
 export function selectAssignee(
   assignees: readonly Assignee[],
   startIndex: number,
   tryReserve: (github: string) => boolean,
+  preferred: readonly string[] = [],
 ): Assignee | null {
+  const tried = new Set<string>();
+  for (const name of preferred) {
+    const a = assignees.find((x) => x.github === name);
+    if (a === undefined || tried.has(a.github)) continue;
+    tried.add(a.github);
+    if (tryReserve(a.github)) return a;
+  }
   for (let i = 0; i < assignees.length; i += 1) {
     const a = assignees[(startIndex + i) % assignees.length];
-    if (a !== undefined && tryReserve(a.github)) return a;
+    if (a === undefined || tried.has(a.github)) continue;
+    tried.add(a.github);
+    if (tryReserve(a.github)) return a;
   }
   return null;
 }
