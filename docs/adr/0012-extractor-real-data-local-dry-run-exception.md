@@ -1,6 +1,6 @@
 # ADR-0012: extractor の実データローカル dry-run 例外(検証目的・限定)
 
-- **ステータス**: proposed
+- **ステータス**: accepted(2026-07-16。extractor の抽出品質人手評価(過去 10 件・precision ≥ 0.80)を実施する前提として採択・本 PR のレビューをもって確定)
 - **日付**: 2026-07-05
 - **関連**: design.md §6.3(extractor)・§9.3(機微情報除外)・§9.4(外部送信)・§9.5(封じ込め) /
   ADR-0002(Anthropic API データポリシー・accepted)・ADR-0006(Q&A エージェント FS 封じ込め・proposed)・

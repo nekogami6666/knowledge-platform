@@ -473,6 +473,8 @@ Discord Gateway(WebSocket)受信とボタンインタラクションには常駐
 
 **受け入れ条件**: 過去の議事録 10 件に対する抽出結果を人手レビューし、precision(抽出されたもののうち妥当な割合)80% 以上。recall は初期は問わない(P4: 穴はフライホイールが埋める)。
 
+この受け入れ評価に限り、**実データのローカル dry-run を検証目的で許可**する(ADR-0012)。extract は `allowedTools: []`(ツール無し・§9.5 の安全経路のみ)で回し、reconcile(agentic Read)は含めない。評価出力(`evals/.review/`)は実内容を含むため gitignore・コミット禁止。本番・常駐・実 PR は引き続き ADR-0013(Actions エフェメラル runner)の実行境界に従う。
+
 ### 6.4 C3 `pr-miner` / C4 `voice-memo-processor` — ③ キャプチャ群
 
 **③-a 💡 reaction capture(discord-bot 内)**
