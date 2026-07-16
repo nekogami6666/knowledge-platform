@@ -22,6 +22,11 @@ RUN pnpm install --frozen-lockfile \
 # --- runtime 段: 最小イメージ + 非 root(ADR-0006: 余分な秘密/ツールを置かない)---
 FROM node:22-bookworm-slim AS runtime
 ENV NODE_ENV=production
+# git は実行時に必要(RepoSyncer の clone 同期 = /ask の検索対象と鮮度確認の commit 前提・§6.2/§6.7)。
+# slim には入っていないためここで追加する(ca-certificates は https clone 用)。
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends git ca-certificates \
+  && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 # prod 依存 + dist(better-sqlite3 の native 含む)を build 段から。
 COPY --from=build --chown=node:node /app /app
