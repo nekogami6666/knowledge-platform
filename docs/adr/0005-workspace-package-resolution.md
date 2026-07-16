@@ -1,6 +1,6 @@
 # ADR-0005: workspace パッケージの解決方式(build + exports)と build-before-typecheck
 
-- **ステータス**: proposed
+- **ステータス**: accepted
 - **日付**: 2026-06-17
 - **関連**: design.md §4.1.1(モノレポ構成)・§6.1(kb-core)・§10.1(CI)・§12.2(鉄則)/
   Phase 1(`packages/llm` 実装の前提)/ ADR-0001
