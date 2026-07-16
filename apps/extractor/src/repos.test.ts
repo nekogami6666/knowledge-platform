@@ -14,6 +14,7 @@ const config = (minutesUrl?: string): ExtractorConfig => ({
     ...(minutesUrl !== undefined ? { url: minutesUrl } : {}),
   },
   kb: { repo: "org/knowledge-base", dir: "knowledge-base" },
+  interviews: { dir: "interviews", exclude_dirs: ["kits", "voice-memos"] },
   base_branch: "main",
 });
 
