@@ -1,6 +1,6 @@
 # ADR-0014: gap-tracker を bot と同じ社内 VM の systemd timer で実行する
 
-- **ステータス**: proposed
+- **ステータス**: accepted(2026-07-16。VM systemd timer で稼働・§3.2 C5 転記・本 PR のレビューをもって採択)
 - **日付**: 2026-07-06
 - **関連**: design.md §3.2(C5 は「GitHub Actions cron」)・§4.6(bot ローカル SQLite)・§6.5(gap-tracker)・
   §6.2 L441(bot は questions を queue するだけで git に書かない)/ ADR-0010(社内 VM 常駐・systemd user)・

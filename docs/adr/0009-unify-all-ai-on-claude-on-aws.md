@@ -1,6 +1,6 @@
 # ADR-0009: 全 AI 操作を Claude on AWS に統一(第一者直叩きを撤去・judge も Agent SDK へ)
 
-- **ステータス**: proposed
+- **ステータス**: accepted(2026-07-16。第一者直叩きは全削除済み・§5.1/§5.2/§9.1 転記済み・本 PR のレビューをもって採択)
 - **日付**: 2026-06-29
 - **関連**: ADR-0008(Claude Platform on AWS を LLM プロバイダに採用)/ ADR-0007(Amazon Bedrock、誤認・superseded)/
   design.md §5.1(LLM の単発/agentic 経路)・§5.2(モデル)・§9.1(シークレット)・§10.2(golden eval)/

@@ -136,10 +136,10 @@
 | C2 | `extractor` | 夜間バッチ | GitHub Actions (cron) | ② ナレッジ抽出 |
 | C3 | `pr-miner` | 週次バッチ | GitHub Actions (cron) | ③ PR からの設計判断マイニング |
 | C4 | `voice-memo-processor` | イベント駆動 | discord-bot 内 + OpenAI STT(`packages/llm`・ADR-0015) | ③ 音声メモ |
-| C5 | `gap-tracker` | 日次バッチ | GitHub Actions (cron) | ④ フライホイール |
-| C6 | `expertise-mapper` | 週次バッチ | GitHub Actions (cron) | ⑤ 専門性マップ |
+| C5 | `gap-tracker` | 日次バッチ | 社内 VM の systemd user timer(ADR-0014。bot ローカル SQLite に触るため) | ④ フライホイール |
+| C6 | `expertise-mapper` | 週次バッチ | GitHub Actions (cron)(ADR-0017。リポ完結バッチ) | ⑤ 専門性マップ |
 | C7 | `interview-kit` | 手動トリガーバッチ | GitHub Actions (workflow_dispatch) | ⑤ ナレッジインタビュー |
-| C8 | `freshness-checker` | 日次バッチ | GitHub Actions (cron) | ⑥ 鮮度管理 |
+| C8 | `freshness-checker` | 日次バッチ | 社内 VM の systemd user timer(ADR-0019。bot ローカル状態に触るため)+ bot リアクション UI | ⑥ 鮮度管理 |
 | L1 | `kb-core` | 共有ライブラリ | - | KB スキーマ・読み書き・provenance |
 | L2 | `llm` | 共有ライブラリ | - | モデル設定・プロンプトローダ・共通クライアント |
 | L3 | `gh-client` | 共有ライブラリ | - | GitHub App 認証・Octokit ラッパ |
@@ -209,7 +209,8 @@ knowledge-base/
 ├── interviews/                # ナレッジインタビュー書き起こし(原本)
 └── _meta/
     ├── state.json             # バッチの処理済みカーソル(処理済み commit SHA 等)
-    └── id-counter.json        # エントリ ID 採番
+    ├── id-counter.json        # エントリ ID 採番
+    └── members.yaml           # GitHub↔Discord 人物対応表(各自申告で編集・ADR-0017 D3)
 ```
 
 ### 4.2 ナレッジエントリ スキーマ
@@ -257,7 +258,7 @@ owner: yamada                # 鮮度確認の宛先。原則 people の筆頭
 設計上の注意:
 - `type: decision` の本体は `decisions/` に置き、`knowledge/` には置かない(重複防止)。`knowledge/**` 内の `type: decision` は `validateRepo` がエラー検出する(ADR-0003 D3)
 - `review_interval_days` の `decision`=∞(鮮度確認対象外)は、値ではなくキー省略(null)で表現する(ADR-0003 D4)
-- 人物識別子は **GitHub ユーザ名に統一**し、Discord ID とのマッピングテーブルを discord-bot の設定(`apps/discord-bot/config/members.yaml`)に持つ
+- 人物識別子は **GitHub ユーザ名に統一**し、Discord ID とのマッピングは KB `_meta/members.yaml` を唯一の正とする(各自が申告で PR 編集。discord-bot は KB clone から都度読む・ADR-0017 D3)
 - ID は不変。ファイル名変更(slug 変更)があっても ID で参照する
 
 ### 4.3 Decision Record スキーマ
@@ -334,7 +335,9 @@ discord-bot のローカル SQLite(コンテナ内 `/data/bot.db` = VM の `~/st
 | `pending_actions` | 送信済み確認ボタン(鮮度確認・gap 回答依頼)の状態 |
 | `rate_limits` | ユーザ/チャンネル別の利用制御 |
 
-バッチ側(GitHub Actions)は SQLite を持たず、カーソルは `knowledge-base/_meta/state.json` に commit する(Actions はステートレスなため)。
+リポ完結バッチ(GitHub Actions: extractor / pr-miner / expertise-mapper / interview-kit)は SQLite を持たず、カーソルは `knowledge-base/_meta/state.json` に commit する(Actions はステートレスなため)。bot ローカル状態に触るバッチ(gap-tracker・ADR-0014 / freshness-checker・ADR-0019)は例外で、bot と同じ VM 上の systemd user timer で動き `bot.db`(`pending_actions` 等)を共有する。
+
+`_meta/` 配下は原則バッチが機械生成する(カーソル・採番)が、`members.yaml` だけは例外で **人間が申告で編集する名簿**(GitHub↔Discord 対応表・ADR-0017 D3/D4)。
 
 ---
 
@@ -617,9 +620,12 @@ GitHub App の権限は最小権限で発行する:
 - `knowledge-base`: `contents: read/write`, `pull_requests: read/write`
 - Organization レベル権限は付与しない
 
+`gh-client` は認証方式非依存(auth-agnostic・ADR-0011): App / token いずれの Octokit も注入 seam(`OctokitLike`)の背後で受ける。書き込み(PR・commit)は組織所有の GitHub App を既定運用とし、clone・読み取りは個人 fine-grained PAT を許容する hybrid(read=PAT / write=App・ADR-0013 D4)。Org 移行までの CI 読み取り PAT は暫定措置(ADR-0004)。
+
 ### 9.2 Discord 権限
 
-- Bot の閲覧チャンネルは **allowlist 制**(`apps/discord-bot/config/channels.yaml`)。デフォルト deny
+- Bot の閲覧チャンネルは **Discord のロール可視性(ViewChannel)で管理**する(ADR-0018。§14#4 を解消)。config によるチャンネル列挙(旧 `channels.yaml` allowlist)から反転し、「専用ロールを bot に付け、そのロールが見えるチャンネルだけ読む」運用にする。判定はコード側で **bot 自身の実効 ViewChannel**(/ask は `interaction.appPermissions`、MessageCreate/ReactionAdd は `channel.permissionsFor(members.me, {checkAdmin:false})`)で行う。機密チャンネルは private にして bot ロールを入れない限り Discord のレイヤで不可視になり、リスト漏れが構造的に起きない
+- default-deny は維持する(bot が見えないチャンネルの Gateway イベントはそもそも届かない)。恒久除外(§9.3)は denylist として `channels.yaml` の `permanent_exclude` に残す
 - Message Content Intent を使用するため、Developer Portal での Intent 有効化と、サーバ管理者・全メンバーへの「Bot が読むチャンネル一覧」の周知を運用要件とする(録音同意の既存運用に揃える)
 - DM・プライベートチャンネルは収集対象外(③-a 参照)
 
@@ -627,7 +633,7 @@ GitHub App の権限は最小権限で発行する:
 
 以下は**取り込み・要約・引用のすべてを禁止**: 人事評価・処遇・給与・採用候補者個人情報、健康・私生活に関する個人情報、顧客との契約金額等の営業機密のうち経営が指定するもの、認証情報そのもの(トークン・パスワードが議事録に書かれていた場合は伏字化して #stratum-ops に警告)。
 
-加えて、特定チャンネル(例: #hr, #management)を allowlist から恒久除外する。除外リストは経営承認の上で `channels.yaml` に明記する。
+加えて、特定チャンネル(例: #hr, #management)を恒久除外する。除外は ADR-0018 の可視性ゲートとは独立の denylist として経営承認の上で `channels.yaml` の `permanent_exclude` に明記し、スレッドは親チャンネル ID でも照合する(万一 bot ロールに見えてしまっても読まない二重防御・ADR-0018 D3)。
 
 ### 9.4 外部送信の整理
 
@@ -639,6 +645,7 @@ GitHub App の権限は最小権限で発行する:
 議事録・Discord メッセージは「信頼できない入力」として扱う。具体策:
 
 - Q&A エージェントの許可ツールを Read/Grep/Glob に限定(Bash・Write・ネットワーク禁止)→ 文書内に指示が混入しても実行能力がない
+- ただし **cwd は封じ込め境界ではない**(ADR-0006): Agent SDK の Read/Grep/Glob は cwd 外の絶対パス(`~/.ssh`・`/proc/self/environ`・兄弟 clone 等)もプロンプトなしで読めるため、cwd 制限だけでは任意ホストファイルの漏洩チャネルになりうる。**封じ込めは deploy 層(OS/コンテナ FS サンドボックス)で担保**し、コード側は cwd を境界と誤認させない設計にする。実運用の実行境界は GitHub Actions エフェメラル runner(ADR-0013)
 - 抽出系は構造化出力のみを受け取り、出力スキーマ外の挙動(別リポジトリへの書き込み等)を構造的に不可能にする
 - Bot の回答に含まれる URL は GitHub / Discord ドメインのみ許可(リンク先誘導の防止)
 
@@ -782,7 +789,7 @@ KPI(§1.4)の月次レビュー、ゴールデンセット拡充、embedding 移
 | 5 | pr-miner の対象開発リポジトリ一覧 | 開発リーダー | Phase 3 着手前 |
 | 6 | ~~knowledge/ 直下の初期ドメイン分類(5〜7 個)~~ **決定済み(2026-06-10)**: §4.1.2 の 5 分類(hardware / software / wetlab / ops / failures)を暫定採用し運用開始。分類の再編はエージェントによる後付け再編方針(§実装ロードマップ末尾の注意)に従う | - | 済 |
 | 7 | ~~プロジェクト正式名称(`stratum` 継続可否)~~ **決定済み(2026-06-10)**: `stratum` を正式名称とする(パッケージスコープ @stratum として実装に反映済み) | - | 済 |
-| 8 | メンバーの GitHub ↔ Discord ID マッピング表 | 各自申告 | Phase 1 着手前 |
+| 8 | メンバーの GitHub ↔ Discord ID マッピング表(申告先 = KB `_meta/members.yaml` に各自 PR・ADR-0017 D3) | 各自申告 | Phase 1 着手前 |
 | 9 | GitHub Organization(Team プラン)への移行判断。ブランチ保護の強制(ADR-0004 D2)と GitHub App の組織インストール(§9.1)の前提になる | 経営 | Phase 2 着手前 |
 
 ---

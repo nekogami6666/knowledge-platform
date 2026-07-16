@@ -1,6 +1,6 @@
 # ADR-0011: gh-client を auth-agnostic(GitHub App / token 両対応・注入式 Octokit)にする
 
-- **ステータス**: proposed
+- **ステータス**: accepted(2026-07-16。全バッチの PR 書き込みが本 seam 経由で稼働・本 PR のレビューをもって採択)
 - **日付**: 2026-06-30
 - **関連**: design.md §3.2(L3 gh-client)・§6(バッチ群の PR 書き込み)・§9.1(資格情報・最小権限)・§5.1(Octokit) /
   ADR-0004(個人アカウント暫定措置・CI 読みの PAT)・ADR-0008/0009(Claude on AWS 統一)

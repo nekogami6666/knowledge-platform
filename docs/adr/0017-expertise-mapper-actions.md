@@ -1,6 +1,6 @@
 # ADR-0017: expertise-mapper は GitHub Actions で実行し、人物統合は GitHub ユーザ名 + KB `_meta/members.yaml` 単一ソースとする
 
-- **ステータス**: proposed
+- **ステータス**: accepted(2026-07-16。#38〜#49 マージ済み・EXPERTISE_REAL 稼働開始・転記リスト反映・本 PR のレビューをもって採択)
 - **日付**: 2026-07-13(起案)/ 2026-07-14 改訂 — 初稿の D3(mapper 設定に写し・二重管理)を
   ユーザ裁定(2026-07-13)で撤回し、**KB `_meta/members.yaml` 単一ソース化**に差し替え。D7(Discord
   発言収集)を初版スコープ外へ格下げ。push 前のため履歴は amend

@@ -1,6 +1,6 @@
 # ADR-0019: freshness-checker は VM systemd timer + bot リアクション UI の分担で実行する
 
-- **ステータス**: proposed
+- **ステータス**: accepted(2026-07-16。#52〜#55 マージ済み・§3.2 C8 転記・本 PR のレビューをもって採択)
 - **日付**: 2026-07-15
 - **関連**: design.md §6.7(C8 要件・AC)・§4.2(last_verified / review_interval_days)・§4.6
   (pending_actions)・§13(確認疲れ防止)/

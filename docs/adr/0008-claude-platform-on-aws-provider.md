@@ -1,6 +1,6 @@
 # ADR-0008: LLM プロバイダを Claude Platform on AWS にする(Claude Code on AWS)
 
-- **ステータス**: proposed(ADR-0007 を supersede)
+- **ステータス**: accepted(2026-07-16。ADR-0007 を supersede・全 LLM 呼び出しが本経路で稼働・§5.1/§5.2/§9.1 転記済み)
 - **日付**: 2026-06-24
 - **関連**: ADR-0007(Amazon Bedrock、誤認)/ ADR-0009(全 AI 操作を Claude on AWS に統一・第一者直叩き撤去)/
   design.md §5.1(ホスティング/Agent SDK)・§5.2(モデル)・§9.1(シークレット)・§14 #2/#3 /
