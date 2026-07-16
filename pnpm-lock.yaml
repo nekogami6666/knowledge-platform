@@ -146,7 +146,17 @@ importers:
         specifier: ^4.0.9
         version: 4.0.9
 
-  apps/interview-kit: {}
+  apps/interview-kit:
+    dependencies:
+      '@stratum/gh-client':
+        specifier: workspace:*
+        version: link:../../packages/gh-client
+      '@stratum/llm':
+        specifier: workspace:*
+        version: link:../../packages/llm
+      zod:
+        specifier: ^3.25.76
+        version: 3.25.76
 
   apps/pr-miner:
     dependencies:
