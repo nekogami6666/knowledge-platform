@@ -1,0 +1,80 @@
+# インタビュー質問キット生成(design.md §6.6 ⑤-b / C7)。対象者とトピックを指定して手動起動し、
+# deep モデルが KB を agentic read して「まだ文書化されていない穴」を突く質問 10〜15 問を生成、
+# `interviews/kits/<person>-<topic>.md` の PR を knowledge-base に提案する。
+# **実 PR は real 入力を true にしたときのみ**(既定 dry-run = 質問リストをログに出すだけ)。
+# 対象者の選定は expertise 週次レポートの risk:high(C6)を起点にする(§6.6 ⑤-a step4)。
+#
+# 必要 secrets(expertise-weekly と共用):
+#   Claude on AWS: ANTHROPIC_AWS_API_KEY / ANTHROPIC_AWS_WORKSPACE_ID / AWS_REGION
+#   PR 作成(App): GH_APP_ID / GH_APP_PRIVATE_KEY / GH_APP_INSTALLATION_ID
+#   KB checkout: EXTRACTOR_PAT(fine-grained・KB に Contents: Read)
+#   任意: DISCORD_OPS_WEBHOOK(#stratum-ops 通知)
+# 必要 vars: EXPERTISE_KB_REPO(KB は同一リポなので C6 の var を共用。空 = 全体 OFF)
+name: interview-kit
+
+on:
+  workflow_dispatch:
+    inputs:
+      person:
+        description: "対象者(GitHub ユーザ名)"
+        required: true
+        type: string
+      topic:
+        description: "トピック(expertise レポートの risk:high 等)"
+        required: true
+        type: string
+      real:
+        description: "実 PR を作成する(false = dry-run で質問リストをログ確認)"
+        required: false
+        default: false
+        type: boolean
+
+jobs:
+  kit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Enable corepack (pnpm)
+        run: corepack enable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - name: Install
+        run: pnpm install --frozen-lockfile
+      - name: Build
+        run: pnpm -r --if-present run build
+
+      # KB は agentic read の対象(質問生成の材料)。PR 作成は gh-client(App)の API で行うため
+      # checkout 側の認証は読み取りのみで足りる(ADR-0013 の実行境界)。
+      - name: Checkout knowledge-base
+        if: vars.EXPERTISE_KB_REPO != ''
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ vars.EXPERTISE_KB_REPO }}
+          token: ${{ secrets.EXTRACTOR_PAT }}
+          path: .clones/knowledge-base
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Run interview-kit
+        if: vars.EXPERTISE_KB_REPO != ''
+        env:
+          CLAUDE_CODE_USE_ANTHROPIC_AWS: "1"
+          ANTHROPIC_AWS_API_KEY: ${{ secrets.ANTHROPIC_AWS_API_KEY }}
+          ANTHROPIC_AWS_WORKSPACE_ID: ${{ secrets.ANTHROPIC_AWS_WORKSPACE_ID }}
+          AWS_REGION: ${{ secrets.AWS_REGION }}
+          GITHUB_APP_ID: ${{ secrets.GH_APP_ID }}
+          GITHUB_APP_PRIVATE_KEY: ${{ secrets.GH_APP_PRIVATE_KEY }}
+          GITHUB_APP_INSTALLATION_ID: ${{ secrets.GH_APP_INSTALLATION_ID }}
+          DISCORD_OPS_WEBHOOK: ${{ secrets.DISCORD_OPS_WEBHOOK }}
+          PROMPTS_DIR: ./prompts
+          KB_ROOT: .clones/knowledge-base
+          INTERVIEW_KB_REPO: ${{ vars.EXPERTISE_KB_REPO }}
+          INTERVIEW_PERSON: ${{ inputs.person }}
+          INTERVIEW_TOPIC: ${{ inputs.topic }}
+          INTERVIEW_REAL: ${{ inputs.real && '1' || '' }}
+        run: pnpm --filter @stratum/interview-kit start
