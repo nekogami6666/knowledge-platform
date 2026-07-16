@@ -98,5 +98,6 @@ jobs:
           PROMPTS_DIR: ${{ github.workspace }}/prompts
           KB_ROOT: ${{ github.workspace }}/.clones/knowledge-base
           # 実 commit するときのみ設定(既定は dry-run)。初回 GO は人間判断(ADR-0013 D1(d)・runbook 参照)。
-          # EXPERTISE_REAL: "1"
+          # 実 commit ON(2026-07-16 有効化。dry-run 目視済み — runbook 手順 3)。
+          EXPERTISE_REAL: "1"
         run: pnpm --filter @stratum/expertise-mapper start
