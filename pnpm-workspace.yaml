@@ -2,3 +2,9 @@ packages:
   - "apps/*"
   - "packages/*"
   - "evals"
+
+# ネイティブビルドの許可リスト(pnpm v10 は既定で postinstall をブロックする)。
+# better-sqlite3 は bot/gap-tracker/freshness の SQLite、esbuild は evals が使う。
+onlyBuiltDependencies:
+  - better-sqlite3
+  - esbuild
