@@ -97,9 +97,9 @@ jobs:
           # 対象リポの PR/コメント/ファイル読み取りは PAT(read = PAT / write = App の分離)。
           GITHUB_READ_TOKEN: ${{ secrets.GH_READ_PAT }}
           DISCORD_OPS_WEBHOOK: ${{ secrets.DISCORD_OPS_WEBHOOK }}
-          CONFIG_DIR: apps/pr-miner/config
-          PROMPTS_DIR: ./prompts
-          KB_ROOT: .clones/knowledge-base
+          CONFIG_DIR: ${{ github.workspace }}/apps/pr-miner/config
+          PROMPTS_DIR: ${{ github.workspace }}/prompts
+          KB_ROOT: ${{ github.workspace }}/.clones/knowledge-base
           # 実 PR を出すときのみ設定(既定は dry-run)。初回 GO は人間判断(ADR-0013 D1(d)・runbook 参照)。
           # PR_MINER_REAL: "1"
         run: pnpm --filter @stratum/pr-miner start

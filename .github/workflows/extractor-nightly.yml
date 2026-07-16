@@ -73,9 +73,9 @@ jobs:
           GITHUB_APP_PRIVATE_KEY: ${{ secrets.GH_APP_PRIVATE_KEY }}
           GITHUB_APP_INSTALLATION_ID: ${{ secrets.GH_APP_INSTALLATION_ID }}
           DISCORD_OPS_WEBHOOK: ${{ secrets.DISCORD_OPS_WEBHOOK }}
-          CONFIG_DIR: apps/extractor/config
-          CLONES_DIR: .clones
-          PROMPTS_DIR: ./prompts
+          CONFIG_DIR: ${{ github.workspace }}/apps/extractor/config
+          CLONES_DIR: ${{ github.workspace }}/.clones
+          PROMPTS_DIR: ${{ github.workspace }}/prompts
           # 実 PR を出すときのみ設定(既定は dry-run)。初回 GO は人間判断(ADR-0013 D1(d)・runbook 参照)。
           # EXTRACTOR_REAL_PR: "1"
         run: pnpm --filter @stratum/extractor start

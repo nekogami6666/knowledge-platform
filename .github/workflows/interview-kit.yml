@@ -71,8 +71,8 @@ jobs:
           GITHUB_APP_PRIVATE_KEY: ${{ secrets.GH_APP_PRIVATE_KEY }}
           GITHUB_APP_INSTALLATION_ID: ${{ secrets.GH_APP_INSTALLATION_ID }}
           DISCORD_OPS_WEBHOOK: ${{ secrets.DISCORD_OPS_WEBHOOK }}
-          PROMPTS_DIR: ./prompts
-          KB_ROOT: .clones/knowledge-base
+          PROMPTS_DIR: ${{ github.workspace }}/prompts
+          KB_ROOT: ${{ github.workspace }}/.clones/knowledge-base
           INTERVIEW_KB_REPO: ${{ vars.EXPERTISE_KB_REPO }}
           INTERVIEW_PERSON: ${{ inputs.person }}
           INTERVIEW_TOPIC: ${{ inputs.topic }}
