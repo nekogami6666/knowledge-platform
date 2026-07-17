@@ -7,7 +7,7 @@
   },
   "files": {
     "ignoreUnknown": true,
-    "includes": ["**", "!**/node_modules", "!**/dist", "!**/.clones", "!.claude"]
+    "includes": ["**", "!**/node_modules", "!**/dist", "!**/.clones", "!.claude", "!sidecars"]
   },
   "formatter": {
     "enabled": true,

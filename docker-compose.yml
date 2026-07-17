@@ -26,3 +26,26 @@ services:
       - ./apps/discord-bot/config:/config:ro
       - ${STRATUM_CLONES:-~/stratum/clones}:/clones # 起動時に git 同期するため rw
       - ${STRATUM_DATA:-~/stratum/data}:/data # bot.db(gap-tracker と共有・WAL)
+      # VC 録音の受け渡し(recorder サービスと同一パスで共有・ADR-0020 D4)
+      - ${STRATUM_RECORDINGS:-~/stratum/recordings}:/recordings
+
+  # VC voice-memo 録音 sidecar(ADR-0020)。bot が compose 内部ネットワーク経由
+  # (http://recorder:9488)で駆動する。ports は公開しない(受信面を増やさない・ADR-0010 D2)。
+  recorder:
+    build:
+      context: .
+      dockerfile: Dockerfile.recorder
+    image: stratum-recorder
+    init: true
+    restart: unless-stopped
+    # rootless では uid 0 = ホストユーザ(ADR-0016 D2)。録音ファイルをホスト所有に保ち bot と共有する。
+    user: "0"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    env_file:
+      - ${STRATUM_ENV:-~/stratum/stratum.env} # RECORDER_DISCORD_TOKEN を含める(chmod 600・§9.1)
+    tmpfs:
+      - /tmp
+    volumes:
+      - ${STRATUM_RECORDINGS:-~/stratum/recordings}:/recordings
