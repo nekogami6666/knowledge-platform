@@ -36,12 +36,14 @@
   (`RECORDER_DISCORD_TOKEN`・sidecar が使用)。Gateway セッションの分離で挙動を単純に保つ。
 - stratum bot に `GuildVoiceStates` intent を追加(§9.5 の最小権限表を改訂)。
 
-### D3. トリガーは「専用 VC への入室」・1 人語り限定・時間上限つき
+### D3. トリガーは「専用 VC への入室」・複数人でも継続・時間上限つき
 
 - `voice.yaml` に `vc_channel_id`(既定 null = 機能 OFF)を追加。この VC への**入室(1 人目)で録音開始**、
-  **退室(0 人)で finalize**。
-- **2 人目が入室したら abort** し、「voice memo は 1 人用。会議は meeting-ops の対象チャンネルで」と案内
-  (owner = 入室者で一意になり、現行の「本人へ DM」がそのまま成立する)。
+  **全員退室(0 人)で finalize**。
+- **2 人目以降が入っても録音は継続する**(ユーザー裁定 2026-07-17: 誤入室や複数人での知見出しを許容)。
+  owner(DM 先・起票者)= **最初の入室者**で一意。finalize 時の participant_ids を members.yaml で
+  写像して記事の `people` に載せる(未登載者は除外)。話者分離は v1 では付けない
+  (必要になれば STT_MODEL を diarize 版へ切替 — ADR-0015 D2 の切替候補)。
 - `max_recording_minutes`(既定 15)で自動 finalize(ADR-0015 D6 の「分割しない」を維持 — 128k m4a で
   25MB 上限内に収まる長さに制御する)。日次上限は既存 `daily_limit` を共用する。
 
