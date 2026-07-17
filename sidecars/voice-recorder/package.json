@@ -1,0 +1,21 @@
+{
+  "name": "@stratum/voice-recorder-sidecar",
+  "version": "0.1.0",
+  "private": true,
+  "description": "VC voice-memo recorder sidecar (vendored from QB-Meeting-Ops discordjs-recorder).",
+  "type": "module",
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "scripts": {
+    "start": "node src/server.js",
+    "check": "node --check src/server.js"
+  },
+  "dependencies": {
+    "@discordjs/voice": "^0.19.2",
+    "@snazzah/davey-linux-x64-gnu": "0.1.11",
+    "discord.js": "^14.24.2",
+    "opusscript": "^0.0.8",
+    "prism-media": "^1.3.5"
+  }
+}
