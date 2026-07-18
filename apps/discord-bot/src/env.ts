@@ -28,6 +28,10 @@ const envSchema = z
     GITHUB_TOKEN: z.string().optional(),
     /** voice-memo の STT 用 OpenAI キー(ADR-0015 D3)。未設定なら voice-memo OFF。ログに出さない。 */
     OPENAI_API_KEY: z.string().optional(),
+    /** VC 録音 sidecar の URL(ADR-0020。compose 内部ネットワーク・例 http://recorder:9488)。未設定なら VC 入口 OFF。 */
+    RECORDER_URL: z.string().optional(),
+    /** 録音ファイルの共有マウント(sidecar と同一パス・ADR-0020 D4)。 */
+    RECORDINGS_DIR: z.string().default("/recordings"),
     /** 検索対象リポの clone ルート(cwd)。 */
     CLONES_DIR: z.string().default("./.clones"),
     /** SQLite ファイルパス。 */

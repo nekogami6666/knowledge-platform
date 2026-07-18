@@ -74,8 +74,18 @@ export const voiceConfigSchema = z
       .positive()
       .default(25 * 1024 * 1024),
     daily_limit: z.number().int().positive().default(3),
+    /** VC 録音の専用ボイスチャンネル(ADR-0020 D3。null = VC 入口 OFF)。 */
+    vc_channel_id: z.string().nullable().default(null),
+    /** VC 録音の自動 finalize 上限(分・ADR-0020 D3。STT 25MB 上限に収める)。 */
+    max_recording_minutes: z.number().int().positive().default(15),
   })
-  .default({ channel_id: null, max_attachment_bytes: 25 * 1024 * 1024, daily_limit: 3 });
+  .default({
+    channel_id: null,
+    max_attachment_bytes: 25 * 1024 * 1024,
+    daily_limit: 3,
+    vc_channel_id: null,
+    max_recording_minutes: 15,
+  });
 export type VoiceConfig = z.infer<typeof voiceConfigSchema>;
 
 /** 設定ファイルの読み取り口。ファイルが無ければ null を返す(= 既定値を使う)。 */

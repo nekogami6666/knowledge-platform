@@ -42,6 +42,7 @@ import { type FreshnessApplyDeps, handleFreshnessReaction } from "./freshness-fl
 import { withCorrelation } from "./logger.js";
 import { EMPTY_MEMBERS, type MembersLoader } from "./members.js";
 import { isoJst } from "./time.js";
+import type { VcRecorderWatcher, VcSnapshot } from "./vc-recorder.js";
 import { gateInputFromInteraction } from "./visibility.js";
 import { handleVoiceCorrection, handleVoiceMemo } from "./voice.js";
 
@@ -86,6 +87,8 @@ export interface BotDeps {
   onVoiceMemoQueued?: () => void;
   /** 鮮度確認 DM への 👍✏️🗑 応答(§6.7 / ADR-0019 D2)。gh か ops.kb_repo が無ければ OFF。 */
   freshness?: FreshnessApplyDeps;
+  /** VC 録音の制御(§6.4 ③-b / ADR-0020)。voice.vc_channel_id + RECORDER_URL が無ければ OFF。 */
+  vcRecorder?: Pick<VcRecorderWatcher, "handleSnapshot">;
 }
 
 /** §9.2(ADR-0018): 読めないチャンネルへの拒否メッセージ。許可なら null。 */
@@ -148,6 +151,8 @@ export const BOT_INTENTS = [
   GatewayIntentBits.GuildMessageReactions,
   GatewayIntentBits.DirectMessageReactions,
   GatewayIntentBits.MessageContent,
+  // VC 録音の入退室検知(§6.4 ③-b / ADR-0020 D3。非 privileged)。
+  GatewayIntentBits.GuildVoiceStates,
 ] as const;
 
 /**
@@ -234,6 +239,25 @@ export function createBot(deps: BotDeps): Client {
   // §6.5 ④UI(PR-D2): gap 依頼(webhook)への「返信」を捕捉して gap_answer をキューへ。
   // §6.4 ③-b(PR-V1): #voice-memo への音声投稿を検知して voice_memo をキューへ(voice 未設定なら no-op)。
   // 受付後は onVoiceMemoQueued がパイプライン(STT → 単発 PR → 返信・PR-V3)を起こす。
+  // §6.4 ③-b(ADR-0020): 専用 VC の入退室 → 録音制御(vcRecorder 未設定なら no-op)。
+  // スナップショット(bot を除いた現在参加者)だけを渡し、開始/終了判定は vc-recorder.ts が持つ。
+  client.on(Events.VoiceStateUpdate, (oldState, newState) => {
+    const vcId = deps.voice?.vc_channel_id ?? null;
+    const rec = deps.vcRecorder;
+    if (vcId === null || rec === undefined) return;
+    if (oldState.channelId !== vcId && newState.channelId !== vcId) return;
+    const guild = newState.guild ?? oldState.guild;
+    const ch = guild.channels.cache.get(vcId);
+    const humanIds =
+      ch !== undefined && ch.isVoiceBased()
+        ? [...ch.members.values()].filter((m) => !m.user.bot).map((m) => m.id)
+        : [];
+    const snapshot: VcSnapshot = { guildId: guild.id, channelId: vcId, humanIds };
+    void rec.handleSnapshot(snapshot).catch((err) => {
+      deps.logger.warn({ err }, "vc snapshot handling failed");
+    });
+  });
+
   client.on(Events.MessageCreate, async (message) => {
     await handleGapAnswer(message, deps);
     const voiceDeps = {

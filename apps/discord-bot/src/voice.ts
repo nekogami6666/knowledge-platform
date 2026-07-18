@@ -29,7 +29,7 @@ export const VOICE_MEMO_ACTION_TYPE = "voice_memo";
  * gapAnswerPayloadSchema と同方針)。添付 URL は Discord CDN(期限付き)のため、
  * 消費が遅れて失効した場合は messageId から添付を再取得する。
  */
-export const voiceMemoPayloadSchema = z.object({
+export const attachmentVoiceMemoPayloadSchema = z.object({
   messageId: z.string(),
   channelId: z.string(),
   guildId: z.string(),
@@ -40,6 +40,33 @@ export const voiceMemoPayloadSchema = z.object({
   contentType: z.string().nullable(),
   size: z.number().int().nonnegative(),
 });
+export type AttachmentVoiceMemoPayload = z.infer<typeof attachmentVoiceMemoPayloadSchema>;
+
+/**
+ * VC 録音入口(ADR-0020)の payload。書き手は vc-recorder.ts(finalize 成功時)、
+ * 読み手は voice-pipeline(添付 DL の代わりに共有マウントのファイルを読む)。
+ */
+export const vcVoiceMemoPayloadSchema = z.object({
+  source: z.literal("vc"),
+  /** 冪等キー(PR ブランチ voice-memo/<meetingId>)。 */
+  meetingId: z.string().min(1),
+  /** recording.m4a の絶対パス(bot/sidecar 共有マウント上・ADR-0020 D4)。 */
+  filePath: z.string().min(1),
+  guildId: z.string(),
+  channelId: z.string(),
+  /** owner(最初の入室者。DM 先・起票者)。 */
+  authorId: z.string(),
+  /** 発話した参加者(sidecar の participant_ids)。members 写像で記事の people へ。 */
+  participantIds: z.array(z.string()),
+  recordedAtJst: z.string(),
+});
+export type VcVoiceMemoPayload = z.infer<typeof vcVoiceMemoPayloadSchema>;
+
+/** 旧形式(source 無し = 添付)と VC 形の union(後方互換)。 */
+export const voiceMemoPayloadSchema = z.union([
+  attachmentVoiceMemoPayloadSchema,
+  vcVoiceMemoPayloadSchema,
+]);
 export type VoiceMemoPayload = z.infer<typeof voiceMemoPayloadSchema>;
 
 // --- 純関数(単体テスト対象)---

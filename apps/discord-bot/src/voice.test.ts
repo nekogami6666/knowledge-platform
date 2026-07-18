@@ -25,6 +25,8 @@ const VOICE: VoiceConfig = {
   channel_id: "VC1",
   max_attachment_bytes: 25 * 1024 * 1024,
   daily_limit: 3,
+  vc_channel_id: null,
+  max_recording_minutes: 15,
 };
 
 function audio(over: Partial<VoiceAttachmentMeta> = {}): VoiceAttachmentMeta {
@@ -203,6 +205,7 @@ describe("handleVoiceMemo", () => {
     expect(action.type).toBe(VOICE_MEMO_ACTION_TYPE);
     expect(action.state).toBe("pending");
     const payload = voiceMemoPayloadSchema.parse(JSON.parse(action.payloadJson ?? ""));
+    if ("source" in payload) throw new Error("attachment payload expected");
     expect(payload.messageId).toBe("MSG1");
     expect(payload.authorId).toBe("U1");
     expect(payload.attachmentUrl).toBe(audio().url);
