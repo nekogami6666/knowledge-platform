@@ -16,7 +16,7 @@ import {
 import { Events } from "discord.js";
 import { type AskDeps, handleAskRequest } from "./ask.js";
 import { createFsConfigReader, loadChannels, loadOps, loadRepos, loadVoice } from "./config.js";
-import { type AskHandler, createBot, createClientMessenger } from "./discord.js";
+import { type AskHandler, createBot, createClientMessenger, warmDmChannels } from "./discord.js";
 import { parseEnv } from "./env.js";
 import { createFreshnessDmWorker, type FreshnessApplyDeps } from "./freshness-flow.js";
 import { createLogger, withCorrelation } from "./logger.js";
@@ -230,6 +230,9 @@ async function main(): Promise<void> {
   bot.once(Events.ClientReady, () => {
     voiceWorker?.kick();
     freshnessWorker.kick();
+    // discord.js 14.x: 未キャッシュ DM へのリアクションは MessageReactionAdd が発火しない
+    // (warmDmChannels の docblock 参照)。再起動前に送った DM への 👍✏️🗑 応答を生かす。
+    void warmDmChannels(bot, getMembers, logger);
   });
 
   await bot.login(env.DISCORD_TOKEN);

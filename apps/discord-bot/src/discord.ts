@@ -590,6 +590,43 @@ export async function handleButton(interaction: ButtonInteraction, deps: BotDeps
 }
 
 /**
+ * DM チャンネルキャッシュの事前ウォーム(discord.js 14.26.4 の DM リアクション欠落対策)。
+ * 未キャッシュの DM チャンネルへのリアクションは、Action#getChannel がリアクション packet
+ * (channel type / recipients を持たない)から DMChannel を組み立てられず、`Partials.Channel` を
+ * 宣言していても MessageReactionAdd 自体が発火しない(ChannelManager#_add が null を返して
+ * 無言 drop。最新 14.27.0 も同実装)。DM 送信元プロセスはチャンネルがキャッシュ済みのため動くが、
+ * bot 再起動でキャッシュは空になり、過去に送った DM への応答だけが死ぬ(VM 実証 2026-07-18)。
+ * 対策: members.yaml の全員分の DM チャンネルを起動時に createDM で開いてキャッシュへ載せる
+ * (既存 DM チャンネルの取得のみで、メッセージ送信や相手への通知は発生しない)。
+ * 対象導線: 鮮度確認 DM の 👍✏️🗑(§6.7)と capture レビュー DM の 👍(§6.4)。
+ */
+export async function warmDmChannels(
+  client: Client,
+  getMembers: MembersLoader,
+  logger: Logger,
+): Promise<void> {
+  try {
+    const { members } = await getMembers();
+    let warmed = 0;
+    for (const member of members) {
+      try {
+        await client.users.createDM(member.discord);
+        warmed += 1;
+      } catch (err) {
+        // DM を開けない(相手の設定等)のは準正常系 — 該当者のリアクション応答だけが効かない。
+        logger.warn({ err, github: member.github }, "DM チャンネルのウォームに失敗しました");
+      }
+    }
+    logger.info(
+      { warmed, total: members.length },
+      "DM チャンネルをキャッシュしました(リアクション受信対策)",
+    );
+  } catch (err) {
+    logger.warn({ err }, "DM チャンネルのウォームをスキップしました(members 読込失敗)");
+  }
+}
+
+/**
  * voice-pipeline(PR-V3)用の Discord 送信 seam。channelId/messageId からスレッド返信、
  * userId から DM を送る(discord.js のグルー。パイプライン本体は discord.js に依存しない)。
  */

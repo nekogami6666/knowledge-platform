@@ -18,6 +18,9 @@ services:
     # 受信ポートは開けない(外向き通信のみ・ADR-0010 D2)。ports は定義しない。
     env_file:
       - ${STRATUM_ENV:-~/stratum/stratum.env} # chmod 600(§9.1)
+    environment:
+      # git が資格情報プロンプトで無限待ちしない(非対話 fail-fast。鮮度確認の clone 同期で必須)
+      GIT_TERMINAL_PROMPT: "0"
     tmpfs:
       - /tmp
       - /root # HOME(uid 0)。Agent SDK subprocess が ~/.claude に書くため書き込み可の tmpfs にする

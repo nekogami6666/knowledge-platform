@@ -20,6 +20,7 @@ import {
   parseFeedbackCustomId,
   parseGithubPrUrl,
   proxyMergeDecision,
+  warmDmChannels,
   windowKey,
 } from "./discord.js";
 
@@ -630,5 +631,59 @@ describe("handleGapAnswer (§6.5 ④UI 捕捉 / 例外封じ込め)", () => {
     await expect(handleGapAnswer(message, deps(logger, store))).resolves.toBeUndefined();
     expect(queued).toHaveLength(1);
     expect(errors).toHaveLength(1);
+  });
+});
+
+describe("warmDmChannels(discord.js DM リアクション欠落対策)", () => {
+  const mkLogger = () => {
+    const warns: unknown[] = [];
+    const infos: unknown[] = [];
+    const l = {
+      child: () => l,
+      warn: (o: unknown) => warns.push(o),
+      info: (o: unknown) => infos.push(o),
+      error: () => {},
+      debug: () => {},
+    };
+    return { logger: l as unknown as Logger, warns, infos };
+  };
+
+  it("members 全員分の createDM を呼び、失敗者は warn してスキップ(全体は続行)", async () => {
+    const opened: string[] = [];
+    const client = {
+      users: {
+        createDM: async (id: string) => {
+          if (id === "U2") throw new Error("cannot open");
+          opened.push(id);
+        },
+      },
+    } as never;
+    const { logger, warns, infos } = mkLogger();
+    await warmDmChannels(
+      client,
+      async () => ({
+        members: [
+          { github: "a", discord: "U1" },
+          { github: "b", discord: "U2" },
+          { github: "c", discord: "U3" },
+        ],
+      }),
+      logger,
+    );
+    expect(opened).toEqual(["U1", "U3"]);
+    expect(warns).toHaveLength(1);
+    expect(infos.at(-1)).toMatchObject({ warmed: 2, total: 3 });
+  });
+
+  it("members 読込失敗は warn のみで throw しない", async () => {
+    const { logger, warns } = mkLogger();
+    await warmDmChannels(
+      {} as never,
+      async () => {
+        throw new Error("kb clone missing");
+      },
+      logger,
+    );
+    expect(warns).toHaveLength(1);
   });
 });
