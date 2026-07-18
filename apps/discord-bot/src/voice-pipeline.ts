@@ -9,6 +9,7 @@
  * (次の kick/再起動で再試行)。恒久的な失敗(添付 URL 失効・4xx・空の文字起こし)は投稿者へ
  * 返信して done にする(無限リトライでエラー返信を繰り返さない)。
  */
+import { readFile as fsReadFile } from "node:fs/promises";
 import type { GhClient } from "@stratum/gh-client";
 import { GhClientError } from "@stratum/gh-client";
 import {
@@ -83,6 +84,8 @@ export interface VoicePipelineDeps {
   messenger: VoiceMessenger;
   /** 音声ダウンロード(テスト差し替え)。 */
   fetchFn?: typeof fetch;
+  /** VC 録音ファイルの読み取り(ADR-0020 D4。共有マウント。テスト差し替え)。 */
+  readLocalFile?: (absPath: string) => Promise<Uint8Array>;
   /** テスト用 seam(既定=実 runAgentSearch)。 */
   draftSearch?: DraftSearchFn;
   /** 訂正反映(fast)の seam(PR-V4)。 */
@@ -154,11 +157,18 @@ async function processOne(
     return;
   }
   const payload = parsed.data;
+  // VC 録音(ADR-0020)か添付(ADR-0015)か。VC は返信先メッセージが無いため案内は本人 DM に送る。
+  const isVc = "source" in payload;
+  const idemKey = isVc ? payload.meetingId : payload.messageId;
+  const notify = (text: string): Promise<void> =>
+    "source" in payload
+      ? deps.messenger.dm(payload.authorId, text)
+      : deps.messenger.reply(payload.channelId, payload.messageId, text);
 
   try {
-    // 冪等: 同一メッセージの既存 PR(open/closed 問わず)があれば作り直さない
+    // 冪等: 同一メモの既存 PR(open/closed 問わず)があれば作り直さない
     // (PR 作成後・markActionDone 前にクラッシュしたケースのレジューム)。
-    const head = voiceMemoBranch(payload.messageId);
+    const head = voiceMemoBranch(idemKey);
     const existing = (await deps.gh.listPullRequests(kbRepo, { state: "all" })).find(
       (p) => p.headRef === head,
     );
@@ -168,32 +178,50 @@ async function processOne(
       return;
     }
 
-    // 音声ダウンロード。CDN URL は期限付きのため、4xx は恒久失敗として案内する。
-    const fetchFn = deps.fetchFn ?? fetch;
+    // 音声の入手。添付は CDN からダウンロード(期限付き URL・4xx は恒久失敗)、
+    // VC 録音は共有マウントのファイルを読む(欠落 = 恒久失敗・ADR-0020 D4)。
     let audio: Uint8Array;
-    try {
-      const res = await fetchFn(payload.attachmentUrl);
-      if (!res.ok) {
-        log.warn({ status: res.status }, "attachment download failed (permanent)");
-        await deps.messenger.reply(payload.channelId, payload.messageId, TRANSCRIBE_FAILED_MESSAGE);
+    if ("source" in payload) {
+      try {
+        const read =
+          deps.readLocalFile ?? (async (p: string) => new Uint8Array(await fsReadFile(p)));
+        audio = await read(payload.filePath);
+      } catch (err) {
+        log.warn({ err, filePath: payload.filePath }, "vc recording file missing (permanent)");
+        await notify(TRANSCRIBE_FAILED_MESSAGE);
         deps.store.markActionDone(actionId);
         return;
       }
-      audio = new Uint8Array(await res.arrayBuffer());
-    } catch (err) {
-      log.warn({ err }, "attachment download failed (transient); will retry");
-      return; // 一時的なネットワーク失敗 → pending を残す
+    } else {
+      const fetchFn = deps.fetchFn ?? fetch;
+      try {
+        const res = await fetchFn(payload.attachmentUrl);
+        if (!res.ok) {
+          log.warn({ status: res.status }, "attachment download failed (permanent)");
+          await notify(TRANSCRIBE_FAILED_MESSAGE);
+          deps.store.markActionDone(actionId);
+          return;
+        }
+        audio = new Uint8Array(await res.arrayBuffer());
+      } catch (err) {
+        log.warn({ err }, "attachment download failed (transient); will retry");
+        return; // 一時的なネットワーク失敗 → pending を残す
+      }
     }
 
     // STT(§7.1 リトライは Transcriber 内)。
     let transcript: string;
     let sttModel: string;
     try {
-      const result = await deps.transcriber({
-        audio,
-        filename: payload.attachmentName ?? "voice-memo.ogg",
-        ...(payload.contentType !== null ? { contentType: payload.contentType } : {}),
-      });
+      const result = await deps.transcriber(
+        "source" in payload
+          ? { audio, filename: "recording.m4a", contentType: "audio/mp4" }
+          : {
+              audio,
+              filename: payload.attachmentName ?? "voice-memo.ogg",
+              ...(payload.contentType !== null ? { contentType: payload.contentType } : {}),
+            },
+      );
       transcript = result.text;
       sttModel = result.model;
     } catch (err) {
@@ -202,19 +230,35 @@ async function processOne(
         return; // pending を残す(エラー返信は繰り返さない)
       }
       log.error({ err }, "STT permanent failure");
-      await deps.messenger.reply(payload.channelId, payload.messageId, TRANSCRIBE_FAILED_MESSAGE);
+      await notify(TRANSCRIBE_FAILED_MESSAGE);
       deps.store.markActionDone(actionId);
       return;
     }
     if (transcript.trim().length === 0) {
-      await deps.messenger.reply(payload.channelId, payload.messageId, EMPTY_TRANSCRIPT_MESSAGE);
+      await notify(EMPTY_TRANSCRIPT_MESSAGE);
       deps.store.markActionDone(actionId);
       return;
     }
 
     const now = deps.now?.() ?? new Date();
     const dateJst = jstDayKey(now);
-    const owner = githubForDiscord(await deps.getMembers(), payload.authorId) ?? "unassigned";
+    const members = await deps.getMembers();
+    const owner = githubForDiscord(members, payload.authorId) ?? "unassigned";
+    // VC 録音の参照 URL(メッセージ permalink が無いためチャンネルリンク)と参加者 → people 写像(ADR-0020 D3)。
+    const linkUrl =
+      "source" in payload
+        ? `https://discord.com/channels/${payload.guildId}/${payload.channelId}`
+        : payload.messageUrl;
+    const people =
+      "source" in payload
+        ? [
+            ...new Set(
+              payload.participantIds
+                .map((d) => githubForDiscord(members, d))
+                .filter((v): v is string => v !== undefined),
+            ),
+          ]
+        : [];
 
     // 草案(capture/draft.md 流用・standard)。入力は文字起こし全文。
     const candidate = await runDraft(
@@ -226,21 +270,24 @@ async function processOne(
     );
 
     // 原本 + 記事 + 採番を 1 PR に同梱(ADR-0015 D4)。
-    const transcriptPath = voiceMemoPath(dateJst, payload.messageId);
+    const transcriptPath = voiceMemoPath(dateJst, idemKey);
     const doc = buildVoiceMemoDoc({
       transcript,
-      messageUrl: payload.messageUrl,
+      messageUrl: linkUrl,
       author: owner,
       dateJst,
       sttModel,
     });
     const { id, counterJson } = await allocateCaptureId(deps.gh, kbRepo, now);
-    const built = buildCaptureEntry(id, candidate, payload.messageUrl, owner, now);
+    const built = buildCaptureEntry(id, candidate, linkUrl, owner, now);
     // 出典は原本(kind: voice-memo)+ 元メッセージの permalink(P2)。
-    const sources: Source[] = [
-      { kind: "voice-memo", repo: kbRepo, path: transcriptPath },
-      { kind: "discord", url: payload.messageUrl },
-    ];
+    // VC 録音は message permalink が無い(discord source の URL 形式を満たせない)ため原本のみ。
+    const sources: Source[] = isVc
+      ? [{ kind: "voice-memo", repo: kbRepo, path: transcriptPath }]
+      : [
+          { kind: "voice-memo", repo: kbRepo, path: transcriptPath },
+          { kind: "discord", url: linkUrl },
+        ];
     const pr = await deps.gh.createPullRequest({
       repo: kbRepo,
       head,
@@ -248,7 +295,7 @@ async function processOne(
       body: [
         "音声メモからナレッジ記事を起こしました(§6.4 ③-b / ADR-0015)。",
         "",
-        `- 元メッセージ: ${payload.messageUrl}`,
+        `- ${isVc ? "録音元 VC(ADR-0020)" : "元メッセージ"}: ${linkUrl}`,
         `- 原本(文字起こし全文): \`${transcriptPath}\``,
         `- 投稿者: <@${payload.authorId}>(👍 は本人の DM から)`,
         "",
@@ -259,7 +306,11 @@ async function processOne(
         {
           path: built.path,
           content: serializeEntry({
-            frontmatter: { ...built.frontmatter, sources },
+            frontmatter: {
+              ...built.frontmatter,
+              sources,
+              ...(people.length > 0 ? { people } : {}),
+            },
             body: built.body,
           }),
         },
@@ -269,24 +320,36 @@ async function processOne(
 
     // 「こう記録しました」スレッド返信(§6.4 L485)+ 本人 DM(👍 でマージ)。
     // 先頭マーカー・PR URL・原本パスは訂正検知(voiceCorrectionDecision)が解析する契約。
+    // VC 録音は返信先メッセージが無いためスレッド返信をスキップし、DM に冒頭抜粋を含める
+    // (訂正フライホイールは添付経路のみ。VC の修正は PR 直接編集・ADR-0020 D4)。
     const excerpt = transcript.trim().slice(0, 200);
-    await deps.messenger.reply(
-      payload.channelId,
-      payload.messageId,
-      [
-        `${VOICE_REPLY_MARKER}(冒頭): ${excerpt}${transcript.trim().length > 200 ? "…" : ""}`,
-        `原本と記事の PR: ${pr.url}`,
-        `原本: \`${transcriptPath}\``,
-        "訂正がある場合はこの返信にリプライしてください。",
-      ].join("\n"),
-    );
+    const excerptLine = `(冒頭): ${excerpt}${transcript.trim().length > 200 ? "…" : ""}`;
+    if (!("source" in payload)) {
+      await deps.messenger.reply(
+        payload.channelId,
+        payload.messageId,
+        [
+          `${VOICE_REPLY_MARKER}${excerptLine}`,
+          `原本と記事の PR: ${pr.url}`,
+          `原本: \`${transcriptPath}\``,
+          "訂正がある場合はこの返信にリプライしてください。",
+        ].join("\n"),
+      );
+    }
     try {
       await deps.messenger.dm(
         payload.authorId,
-        [
-          `🎙️ 音声メモをナレッジ化する PR を作成しました: ${pr.url}`,
-          "内容を確認して、この DM に 👍 を付けるとマージされます。修正したい場合は PR を直接編集してください。",
-        ].join("\n"),
+        isVc
+          ? [
+              `🎙️ VC 録音をナレッジ化する PR を作成しました: ${pr.url}`,
+              `記録${excerptLine}`,
+              `原本: \`${transcriptPath}\``,
+              "内容を確認して、この DM に 👍 を付けるとマージされます。修正したい場合は PR を直接編集してください。",
+            ].join("\n")
+          : [
+              `🎙️ 音声メモをナレッジ化する PR を作成しました: ${pr.url}`,
+              "内容を確認して、この DM に 👍 を付けるとマージされます。修正したい場合は PR を直接編集してください。",
+            ].join("\n"),
       );
     } catch (err) {
       log.warn({ err }, "DM 送信に失敗(受信拒否設定の可能性)");

@@ -195,6 +195,7 @@ describe("BOT_INTENTS (§9.5 最小権限)", () => {
       GatewayIntentBits.GuildMessageReactions,
       GatewayIntentBits.DirectMessageReactions,
       GatewayIntentBits.MessageContent,
+      GatewayIntentBits.GuildVoiceStates, // VC 録音の入退室検知(ADR-0020 D3)
     ]);
   });
 });

@@ -25,6 +25,12 @@ import { createQaSearch } from "./qa-search.js";
 import { createGitRepoSyncer } from "./repos.js";
 import { createSqliteStore } from "./sqlite-store.js";
 import { isoJst } from "./time.js";
+import {
+  createRecorderClient,
+  createVcRecorderWatcher,
+  type VcRecorderWatcher,
+  type VcSnapshot,
+} from "./vc-recorder.js";
 import { createVoiceMemoWorker } from "./voice-pipeline.js";
 
 async function main(): Promise<void> {
@@ -158,6 +164,9 @@ async function main(): Promise<void> {
 
   // ワーカーは client 依存(返信・DM)のため createBot 後に生成し、hook は遅延参照にする。
   let voiceWorker: { kick(): void } | undefined;
+  // §6.4 ③-b(ADR-0020): VC 録音は vc_channel_id + RECORDER_URL が揃ったときだけ有効。
+  const vcEnabled = voice.vc_channel_id !== null && env.RECORDER_URL !== undefined;
+  let vcWatcher: VcRecorderWatcher | undefined;
   const bot = createBot({
     logger,
     channels,
@@ -175,6 +184,14 @@ async function main(): Promise<void> {
     onVoiceMemoQueued: () => voiceWorker?.kick(),
     // §6.7: 鮮度確認 DM への 👍✏️🗑 応答(undefined なら OFF)。
     ...(freshness !== undefined ? { freshness } : {}),
+    // §6.4 ③-b(ADR-0020): VC 録音(watcher は messenger 依存のため遅延参照)。
+    ...(vcEnabled
+      ? {
+          vcRecorder: {
+            handleSnapshot: (s: VcSnapshot) => vcWatcher?.handleSnapshot(s) ?? Promise.resolve(),
+          },
+        }
+      : {}),
   });
   const messenger = createClientMessenger(bot);
   voiceWorker = createVoiceMemoWorker({
@@ -188,6 +205,22 @@ async function main(): Promise<void> {
     ...(transcriber !== undefined ? { transcriber } : {}),
     messenger,
   });
+  if (vcEnabled && voice.vc_channel_id !== null && env.RECORDER_URL !== undefined) {
+    vcWatcher = createVcRecorderWatcher({
+      vcChannelId: voice.vc_channel_id,
+      recordingsDir: env.RECORDINGS_DIR,
+      client: createRecorderClient(env.RECORDER_URL),
+      store,
+      dm: messenger.dm,
+      onQueued: () => voiceWorker?.kick(),
+      makeId: () => randomUUID(),
+      now: () => new Date(),
+      logger,
+      maxMinutes: voice.max_recording_minutes,
+    });
+  }
+  logger.info({ vcRecorder: vcEnabled }, "VC 録音入口(ADR-0020)");
+
   // §6.7(ADR-0019 D2): checker(VM timer)が積んだ鮮度確認 pending を DM で送る worker。
   // checker は日次(平日 11:00 JST)なので、起動時 + 定期ポーリングで拾えば十分。
   const freshnessWorker = createFreshnessDmWorker({ logger, store, dm: messenger.dm });

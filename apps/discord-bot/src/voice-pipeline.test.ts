@@ -448,3 +448,80 @@ describe("processVoiceCorrectionQueue", () => {
     expect(done).toEqual(["CORR-ACT1"]);
   });
 });
+
+// --- VC 録音入口(ADR-0020・PR-V7)---
+
+function vcPendingAction(): PendingAction {
+  const p = {
+    source: "vc" as const,
+    meetingId: `vm-1700000000000-${CHANNEL_ID}`,
+    filePath: `/recordings/vm-1700000000000-${CHANNEL_ID}/recording.m4a`,
+    guildId: GUILD_ID,
+    channelId: CHANNEL_ID,
+    authorId: "U1",
+    participantIds: ["U1", "U9"], // U9 は members 未登載 → people から除外される
+    recordedAtJst: "2026-07-17T10:00:00+09:00",
+  };
+  return {
+    id: "VC1",
+    type: "voice_memo",
+    queryId: null,
+    payloadJson: JSON.stringify(p),
+    state: "pending",
+    createdAt: "2026-07-17T10:00:00+09:00",
+  };
+}
+
+describe('processVoiceMemoQueue(VC 録音・source:"vc")', () => {
+  it("共有マウントのファイルを読んで PR + DM(スレッド返信なし・出典は原本のみ・people 写像)", async () => {
+    const { store, done } = fakeStore([vcPendingAction()]);
+    const { gh, created } = fakeGh();
+    const { messenger, replies, dms } = fakeMessenger();
+    const reads: string[] = [];
+    await processVoiceMemoQueue(
+      mkDeps({
+        store,
+        gh,
+        messenger,
+        fetchFn: (async () => {
+          throw new Error("fetch must not be called for vc");
+        }) as never,
+        readLocalFile: async (p) => {
+          reads.push(p);
+          return new Uint8Array([1, 2, 3]);
+        },
+      }),
+    );
+    expect(reads).toEqual([`/recordings/vm-1700000000000-${CHANNEL_ID}/recording.m4a`]);
+    expect(created).toHaveLength(1);
+    expect(created[0]?.head).toBe(`voice-memo/vm-1700000000000-${CHANNEL_ID}`);
+    const entry = created[0]?.files.find((f) => f.path.startsWith("knowledge/"));
+    expect(entry?.content).toContain('kind: "voice-memo"');
+    expect(entry?.content).not.toContain('kind: "discord"');
+    expect(entry?.content).toContain('"yamada"'); // people(U9 は未登載のため除外)
+    expect(replies).toEqual([]); // 返信先メッセージが無い
+    expect(dms).toHaveLength(1);
+    expect(dms[0]).toContain("VC 録音");
+    expect(dms[0]).toContain("pull/7");
+    expect(done).toEqual(["VC1"]);
+  });
+
+  it("録音ファイル欠落は恒久失敗として DM 案内 + done(PR を作らない)", async () => {
+    const { store, done } = fakeStore([vcPendingAction()]);
+    const { gh, created } = fakeGh();
+    const { messenger, dms } = fakeMessenger();
+    await processVoiceMemoQueue(
+      mkDeps({
+        store,
+        gh,
+        messenger,
+        readLocalFile: async () => {
+          throw new Error("ENOENT");
+        },
+      }),
+    );
+    expect(created).toHaveLength(0);
+    expect(dms).toHaveLength(1);
+    expect(done).toEqual(["VC1"]);
+  });
+});

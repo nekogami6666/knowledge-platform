@@ -5,3 +5,6 @@
 channel_id: "123456789012345678" # 音声メモ専用チャンネル(#voice-memo)の ID
 max_attachment_bytes: 26214400 # 受け付ける音声の上限(既定 25MB = OpenAI API 上限。ADR-0015 D6)
 daily_limit: 3 # user 1 日あたりの受付件数(乱用対策)
+# --- VC 録音入口(ADR-0020)。RECORDER_URL(env)とセットで有効化 ---
+# vc_channel_id: "123456789012345678"   # 録音専用ボイスチャンネル(名前/topic に「録音されます」を明記)
+# max_recording_minutes: 15             # 自動 finalize の上限(分)
