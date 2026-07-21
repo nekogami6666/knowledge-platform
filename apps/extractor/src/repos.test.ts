@@ -18,13 +18,14 @@ const config = (minutesUrl?: string): ExtractorConfig => ({
   base_branch: "main",
 });
 
-/** exec 呼び出しを記録する fake。existingDirs に無い dir の rev-parse --is-inside-work-tree は throw。 */
+/** exec 記録 fake。existingDirs に無い dir の --git-dir probe は throw、ある dir は独立リポ(".git")。 */
 function fakeExec(existingDirs: string[]): { exec: GitExec; calls: [string[], string][] } {
   const calls: [string[], string][] = [];
   const exec: GitExec = async (args, cwd) => {
     calls.push([[...args], cwd]);
-    if (args[0] === "rev-parse" && args[1] === "--is-inside-work-tree") {
+    if (args[0] === "rev-parse" && args[1] === "--git-dir") {
       if (!existingDirs.some((d) => cwd.endsWith(d))) throw new Error("not a repo");
+      return { stdout: ".git\n" };
     }
     return { stdout: "abc123\n" };
   };
@@ -65,5 +66,22 @@ describe("createGitRepoSyncer(トークン非永続化・ADR-0013)", () => {
     const r = await createGitRepoSyncer(config(undefined), "/c", exec).sync();
     expect(r.minutes.resolvedCommit).toBe("abc123");
     expect(calls.some(([a]) => a[0] === "fetch" || a[0] === "clone")).toBe(false);
+  });
+
+  it("親リポの内側(--git-dir が ../.git)は fetch/reset/clone せず throw(親リポ破壊防止)", async () => {
+    // --is-inside-work-tree 判定は親リポの内側でも true になり reset --hard が親を破壊した
+    // (VM 実害 2026-07-17)。--git-dir が相対 ".git" 以外なら独立リポでないとして fail-loud。
+    const calls: [string[], string][] = [];
+    const exec: GitExec = async (args, cwd) => {
+      calls.push([[...args], cwd]);
+      if (args[0] === "rev-parse" && args[1] === "--git-dir") return { stdout: "../../.git\n" };
+      return { stdout: "abc123\n" };
+    };
+    await expect(createGitRepoSyncer(config(TOKEN_URL), "/c", exec).sync()).rejects.toThrow(
+      /独立した git リポではありません/,
+    );
+    expect(calls.some(([a]) => a[0] === "fetch" || a[0] === "reset" || a[0] === "clone")).toBe(
+      false,
+    );
   });
 });

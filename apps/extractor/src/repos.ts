@@ -33,13 +33,22 @@ export function createGitRepoSyncer(
 ): RepoSyncer {
   const syncOne = async (spec: RepoSpec, baseBranch: string): Promise<SyncedRepo> => {
     const absDir = join(clonesDir, spec.dir);
-    let isRepo = true;
+    // 対象 dir が「自身が toplevel の独立リポ」か(cwd が toplevel のときだけ --git-dir は相対 ".git")。
+    // --is-inside-work-tree は親リポの内側でも true になり、fetch + reset --hard が親リポ全体を
+    // 対象リポ内容で破壊する(VM 実害 2026-07-17)。probe 失敗(dir 不存在・リポ外)は clone パスへ。
+    let gitDir: string | null;
     try {
-      await exec(["rev-parse", "--is-inside-work-tree"], absDir);
+      gitDir = (await exec(["rev-parse", "--git-dir"], absDir)).stdout.trim();
     } catch {
-      isRepo = false;
+      gitDir = null;
     }
-    if (isRepo) {
+    if (gitDir !== null && gitDir !== ".git") {
+      // 親リポの内側。url 無しでも rev-parse HEAD が親の commit を返す(provenance 汚染)ため fail-loud。
+      throw new Error(
+        `${absDir} は独立した git リポではありません(--git-dir: ${gitDir})。clones 配下は各ディレクトリを独立リポとして配置してください`,
+      );
+    }
+    if (gitDir !== null) {
       if (spec.url !== undefined) {
         // URL を引数で渡す(origin の保存 URL に依存しない=トークンを config に書かずに済む)。
         await exec(["fetch", spec.url, baseBranch], absDir);

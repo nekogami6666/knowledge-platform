@@ -50,13 +50,27 @@ export function createGitRepoSyncer(clonesDir: string): RepoSyncer {
       const out: SyncedRepo[] = [];
       for (const spec of specs) {
         const absDir = join(clonesDir, spec.dir);
+        // 対象 dir が「自身が toplevel の独立リポ」か(cwd が toplevel のときだけ --git-dir は
+        // 相対 ".git")。成功のみの判定だと親リポの内側でも通ってしまい、fetch + reset --hard が
+        // 親リポ全体を破壊する(VM 実害 2026-07-17)。probe 失敗(dir 不存在・リポ外)は clone へ。
+        let gitDir: string | null;
+        try {
+          gitDir = (await exec("git", ["-C", absDir, "rev-parse", "--git-dir"])).stdout.trim();
+        } catch {
+          gitDir = null;
+        }
+        if (gitDir !== null && gitDir !== ".git") {
+          // 親リポの内側。rev-parse HEAD も親の commit を返す(permalink 汚染)ため fail-loud。
+          throw new Error(
+            `${absDir} は独立した git リポではありません(--git-dir: ${gitDir})。clones 配下は各ディレクトリを独立リポとして配置してください`,
+          );
+        }
         if (spec.url !== undefined) {
           // 既存なら fetch/reset、無ければ clone。冪等(§7.1)。
-          try {
-            await exec("git", ["-C", absDir, "rev-parse", "--git-dir"]);
+          if (gitDir !== null) {
             await exec("git", ["-C", absDir, "fetch", "--depth=1", "origin"]);
             await exec("git", ["-C", absDir, "reset", "--hard", "FETCH_HEAD"]);
-          } catch {
+          } else {
             await exec("git", ["clone", "--depth=1", spec.url, absDir]);
           }
         }
