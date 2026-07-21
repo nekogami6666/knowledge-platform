@@ -61,6 +61,7 @@ jobs:
           echo "extractor.yaml generated (repos: ${{ vars.EXTRACTOR_MINUTES_REPO }}, ${{ vars.EXTRACTOR_KB_REPO }})"
 
       - name: Run extractor
+        if: vars.EXTRACTOR_MINUTES_REPO != '' && vars.EXTRACTOR_KB_REPO != ''
         env:
           CLAUDE_CODE_USE_ANTHROPIC_AWS: "1"
           ANTHROPIC_AWS_API_KEY: ${{ secrets.ANTHROPIC_AWS_API_KEY }}
