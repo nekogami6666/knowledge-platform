@@ -42,7 +42,9 @@ vc_channel_id: "<作った VC の ID>"
 
 ```sh
 cd /home/vm/knowledge-platform
-docker compose up -d --build recorder bot
+# recorder は profiles: ["vc"] で隔離されているため --profile vc が必須
+# (素の up -d は bot のみ。トークン未設定環境で recorder が事故起動しないための隔離)
+docker compose --profile vc up -d --build recorder bot
 docker compose logs recorder --tail 5   # listening 表示
 docker compose logs bot --tail 5        # {"vcRecorder":true,"msg":"VC 録音入口(ADR-0020)"}
 curl -s http://127.0.0.1:9488/health 2>/dev/null || docker compose exec bot sh -c 'wget -qO- http://recorder:9488/health'

@@ -34,7 +34,11 @@ services:
 
   # VC voice-memo 録音 sidecar(ADR-0020)。bot が compose 内部ネットワーク経由
   # (http://recorder:9488)で駆動する。ports は公開しない(受信面を増やさない・ADR-0010 D2)。
+  # VC 録音はオプトイン機能のため profiles で隔離: 素の `docker compose up -d`(update.sh 含む)
+  # では起動せず、RECORDER_DISCORD_TOKEN 未設定環境での restart ループ事故を防ぐ。
+  # 起動は `docker compose --profile vc up -d`(runbooks/voice-memo-vc.md)。
   recorder:
+    profiles: ["vc"]
     build:
       context: .
       dockerfile: Dockerfile.recorder
