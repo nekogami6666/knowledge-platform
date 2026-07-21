@@ -6,6 +6,7 @@ import {
   buildRepoManifest,
   handleAskRequest,
   NOT_FOUND_MESSAGE,
+  normalizeLineRange,
   type QaAnswer,
   type QaCitation,
   validateCitations,
@@ -53,13 +54,48 @@ describe("validateCitations (修正5: LLM 返却を信頼しない多層検証)"
     expect(validateCitations(cs, synced, exists)).toEqual([]);
   });
 
-  it("不正な lines(形式不正・逆順範囲・0開始)は破棄(kb-core parseLineRange に委譲)", () => {
-    for (const lines of ["10-20", "L9-L5", "L0"]) {
+  it("不正な lines(解釈不能・逆順範囲・0開始)は破棄(kb-core parseLineRange に委譲)", () => {
+    for (const lines of ["L9-L5", "L0", "abc", "L5,L9"]) {
       const cs: QaCitation[] = [
         { kind: "github_file", repo: "org/minutes", path: "2026/x.md", lines },
       ];
       expect(validateCitations(cs, synced, exists)).toEqual([]);
     }
+  });
+
+  it("lines の表記ゆれは正典形式へ正規化して通す(実在検証済みの出典を書式で全損させない)", () => {
+    const cases: Array<[string, string]> = [
+      ["26", "L26"],
+      ["26-31", "L26-L31"],
+      ["L26-31", "L26-L31"],
+      ["l26", "L26"],
+      ["10-20", "L10-L20"],
+    ];
+    for (const [input, canonical] of cases) {
+      const cs: QaCitation[] = [
+        { kind: "github_file", repo: "org/minutes", path: "2026/x.md", lines: input },
+      ];
+      expect(validateCitations(cs, synced, exists)).toEqual([
+        {
+          kind: "github_file",
+          repo: "org/minutes",
+          path: "2026/x.md",
+          ref: "sha-min",
+          lines: canonical,
+        },
+      ]);
+    }
+  });
+
+  it("normalizeLineRange: 一意に解釈できるものだけ正典化、それ以外は undefined", () => {
+    expect(normalizeLineRange(" 26 ")).toBe("L26");
+    expect(normalizeLineRange("L120-L141")).toBe("L120-L141");
+    expect(normalizeLineRange("026")).toBe("L26");
+    expect(normalizeLineRange("L05-L09")).toBe("L5-L9");
+    expect(normalizeLineRange("L9-L5")).toBeUndefined();
+    expect(normalizeLineRange("0")).toBeUndefined();
+    expect(normalizeLineRange("")).toBeUndefined();
+    expect(normalizeLineRange("五行目")).toBeUndefined();
   });
 
   it("github_pr は allowlist 内なら通す", () => {
@@ -291,6 +327,46 @@ describe("handleAskRequest synthetic 統合(§6.2 受け入れ条件)", () => {
     const res = await handleAskRequest(req, deps);
     expect(res.status).toBe("unanswered");
     expect(store.listPendingActions("question_queue")).toHaveLength(1);
+  });
+
+  it("回答ありで全 citation が破棄されたら logWarn で観測できる(notFound 時は出さない)", async () => {
+    const warns: string[] = [];
+    const { deps } = makeDeps({
+      search: async () => ({
+        value: {
+          answer: "それらしい回答",
+          citations: [{ kind: "github_file", repo: "evil/repo", path: "x.md" }],
+          notFound: false,
+        },
+        usage: { inputTokens: 1, outputTokens: 1 },
+      }),
+      logWarn: (_data, msg) => warns.push(msg),
+    });
+    const res = await handleAskRequest(req, deps);
+    expect(res.status).toBe("unanswered");
+    expect(warns).toHaveLength(1);
+
+    const warnsNotFound: string[] = [];
+    const { deps: deps2 } = makeDeps({ logWarn: (_d, msg) => warnsNotFound.push(msg) });
+    await handleAskRequest(req, deps2); // 既定 search は notFound:true(citations 空)
+    expect(warnsNotFound).toHaveLength(0);
+
+    // notFound:true + citations 非空(スキーマ上あり得る): valid=[] は「検証全滅」ではなく
+    // 「notFound なので検証スキップ」— 誤警報を出さないことが !value.notFound ガードの本質。
+    const warnsSkipped: string[] = [];
+    const { deps: deps3 } = makeDeps({
+      search: async () => ({
+        value: {
+          answer: "根拠なし",
+          citations: [{ kind: "github_file", repo: "evil/repo", path: "x.md" }],
+          notFound: true,
+        },
+        usage: { inputTokens: 1, outputTokens: 1 },
+      }),
+      logWarn: (_d, msg) => warnsSkipped.push(msg),
+    });
+    await handleAskRequest(req, deps3);
+    expect(warnsSkipped).toHaveLength(0);
   });
 
   it("検索が throw したら error として記録 + logError 通知(キューには積まない)", async () => {

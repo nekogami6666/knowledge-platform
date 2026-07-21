@@ -139,6 +139,7 @@ async function main(): Promise<void> {
       now: () => isoJst(),
       logError: (err) =>
         withCorrelation(logger, ctx.correlationId).error({ err }, "/ask pipeline error"),
+      logWarn: (data, msg) => withCorrelation(logger, ctx.correlationId).warn(data, msg),
     };
     return handleAskRequest(
       {

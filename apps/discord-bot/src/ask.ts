@@ -46,6 +46,25 @@ function isValidLineRange(lines: string): boolean {
   }
 }
 
+/**
+ * モデル出力の lines の表記ゆれを正典形式("L120" / "L120-L141")へ正規化する(修正5 の前段)。
+ * 一意に解釈できるものだけ: "26"→"L26"、"26-31"→"L26-L31"、"L26-31"→"L26-L31"、"l26"→"L26"。
+ * 解釈できない・正規化しても不正(逆順・0 開始)なものは undefined を返し、呼び出し側が従来
+ * どおり citation ごと破棄する(実在検証済みの出典を書式 1 文字で全損させない。VM 実証 2026-07-22:
+ * モデルが lines:"26" を返し、唯一の出典が破棄されて /ask が未回答に倒れた)。
+ */
+export function normalizeLineRange(lines: string): string | undefined {
+  const m = /^[Ll]?(\d+)(?:\s*-\s*[Ll]?(\d+))?$/.exec(lines.trim());
+  if (m === null) return undefined;
+  const [, startRaw, endRaw] = m;
+  if (startRaw === undefined) return undefined; // 正規表現上あり得ないが型ガード
+  // 先頭ゼロも剥がす("L026" は GitHub の行アンカーとして機能しない)。Number() は巨大数で
+  // 指数表記になり得るため BigInt で文字列化する。
+  const start = String(BigInt(startRaw));
+  const norm = endRaw === undefined ? `L${start}` : `L${start}-L${String(BigInt(endRaw))}`;
+  return isValidLineRange(norm) ? norm : undefined;
+}
+
 /** LLM が返す生の引用(ref/SHA は信頼しないので持たせない)。 */
 export const qaCitationSchema = z.discriminatedUnion("kind", [
   z
@@ -158,7 +177,9 @@ export function validateCitations(
     // github_file: path 安全性 / lines 形式 / ファイル実在 / ref=resolvedCommit。
     const syncedRepo = byRepo.get(c.repo);
     if (syncedRepo === undefined || !isSafeRelPath(c.path)) continue;
-    if (c.lines !== undefined && !isValidLineRange(c.lines)) continue;
+    // lines は表記ゆれを正規化してから採用する(正規化不能・不正範囲は citation ごと破棄)。
+    const lines = c.lines === undefined ? undefined : normalizeLineRange(c.lines);
+    if (c.lines !== undefined && lines === undefined) continue;
     const absPath = join(syncedRepo.absDir, c.path);
     if (!fileExists(absPath)) continue;
     // §6.7 / C8: stale な KB エントリの引用は落とさず、注記フラグを付けて通す(除外はしない)。
@@ -169,7 +190,7 @@ export function validateCitations(
       repo: c.repo,
       path: c.path,
       ref: syncedRepo.resolvedCommit,
-      ...(c.lines !== undefined ? { lines: c.lines } : {}),
+      ...(lines !== undefined ? { lines } : {}),
       ...(stale ? { stale: true } : {}),
     });
   }
@@ -212,6 +233,8 @@ export interface AskDeps {
   readFile?: (absPath: string) => string | null;
   /** エラー観測フック(§7.4。既定 no-op。PR-4b で相関 ID 付き pino を渡す)。 */
   logError?: (err: unknown) => void;
+  /** 警告観測フック(§7.4。既定 no-op。「回答はあるのに全 citation が検証で破棄」等の診断用)。 */
+  logWarn?: (data: Record<string, unknown>, msg: string) => void;
 }
 
 export interface AskResult {
@@ -265,6 +288,14 @@ export async function handleAskRequest(req: AskRequest, deps: AskDeps): Promise<
           deps.readFile ?? defaultReadFile,
         );
 
+    // 観測性(§7.4): モデルは回答+出典を返したのに検証で全滅したケースは、書式・allowlist 等の
+    // 系統的問題のシグナルなので必ず痕跡を残す(2026-07-22 の lines 書式ゆれ調査で必要になった)。
+    if (!value.notFound && value.citations.length > 0 && valid.length === 0) {
+      deps.logWarn?.(
+        { citations: value.citations },
+        "/ask: 回答は生成されたが全 citation が検証で破棄されました",
+      );
+    }
     // P6 / 出典規律: notFound、または出典が全滅したら捏造せず未回答に倒す(修正5 step6)。
     if (value.notFound || valid.length === 0) {
       deps.store.recordQuery({
