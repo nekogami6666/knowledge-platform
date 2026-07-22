@@ -10,9 +10,11 @@ import yaml from "js-yaml";
 import { z } from "zod";
 
 const assigneeSchema = z.object({
-  /** GitHub ユーザ名(QuestionLog.assignee に入る・§4.4)。 */
-  github: z.string().min(1),
-  /** Discord ユーザ ID(依頼メンション <@id> 用)。 */
+  /** 表示名(任意・gap.yaml の可読性用・ADR-0022)。選定/記録には使わない。 */
+  name: z.string().min(1).optional(),
+  /** GitHub ユーザ名(任意・ADR-0022)。expertise 突合と KB 記録に使う。未所持者は省略。 */
+  github: z.string().min(1).optional(),
+  /** Discord ユーザ ID(**主キー**・ADR-0022)。選定・予約・依頼メンション <@id> のキー。 */
   discord: z.string().min(1),
 });
 export type Assignee = z.infer<typeof assigneeSchema>;

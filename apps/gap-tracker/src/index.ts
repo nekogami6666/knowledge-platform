@@ -153,15 +153,16 @@ async function main(): Promise<void> {
   // 週3件/人の予約(§6.5 L501)。real は bot.db の rate_limits を使い、dry-run はローカルで模す
   // (dry-run が本番の週予算を消費しないように)。
   const localCounts = new Map<string, number>();
-  const reserveAssignee = (github: string): boolean => {
+  const reserveAssignee = (discord: string): boolean => {
     const week = isoWeekKey(new Date());
     if (!real) {
-      const key = `${github}|${week}`;
+      const key = `${discord}|${week}`;
       const n = (localCounts.get(key) ?? 0) + 1;
       localCounts.set(key, n);
       return n <= 3;
     }
-    return store.hitRateLimit(`assignee:${github}`, "gap_request", week, 3).allowed;
+    // subject は discord 主キー(ADR-0022)。汎用 rate_limits テーブルなのでスキーマ変更不要。
+    return store.hitRateLimit(`assignee:${discord}`, "gap_request", week, 3).allowed;
   };
 
   // 質問者・回答者の discord↔github 解決は KB `_meta/members.yaml`(唯一の正・ADR-0017 D3)を
@@ -189,6 +190,7 @@ async function main(): Promise<void> {
       postRequest: (content) => postWebhook(env.DISCORD_GAP_WEBHOOK, content, "依頼"),
       reserveAssignee,
       githubForDiscord,
+      discordForGithub,
       now: () => new Date(),
       logger,
       real,

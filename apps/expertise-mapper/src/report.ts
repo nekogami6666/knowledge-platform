@@ -3,7 +3,7 @@
  * validateRepo の走査対象外(自由 markdown)。前週比とトピック名安定率を毎回自動記載し、
  * AC「名前が週跨ぎ 9 割以上安定」(§6.6)を運用の中で機械的に観測できるようにする。
  */
-import type { ExpertiseMap } from "@stratum/kb-core";
+import { type ExpertiseMap, type Members, nameForGithub } from "@stratum/kb-core";
 
 /** JST の日付キー(YYYY-MM-DD)。cron が深夜 JST のため UTC 日付だと前日になり混乱する。 */
 export function reportDateKey(now: Date): string {
@@ -39,6 +39,8 @@ export interface ReportInput {
   /** 集計サマリ。 */
   kbMaterials: number;
   repoMaterials: number;
+  /** 表示名の写像用(github login → フルネーム・ADR-0022)。 */
+  members: Members;
 }
 
 export function buildReport(input: ReportInput): string {
@@ -68,8 +70,11 @@ export function buildReport(input: ReportInput): string {
       "|---|---|---|---|---|",
     );
     for (const t of high) {
+      const topLogin = t.people[0]?.name;
+      // people[].name は github login。表示はフルネーム優先(ADR-0022)。
+      const topName = topLogin ? (nameForGithub(input.members, topLogin) ?? topLogin) : "-";
       lines.push(
-        `| ${t.topic} | ${t.label} | ${t.people[0]?.name ?? "-"} | ${t.bus_factor} | ${t.documented_kb_count} |`,
+        `| ${t.topic} | ${t.label} | ${topName} | ${t.bus_factor} | ${t.documented_kb_count} |`,
       );
     }
   }

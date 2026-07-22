@@ -9,7 +9,10 @@ import { join } from "node:path";
 import type { GhClient } from "@stratum/gh-client";
 import {
   type ExpertiseMap,
+  type Members,
+  nameForGithub,
   parseExpertiseMap,
+  parseMembers,
   sameExpertiseContent,
   serializeExpertiseMap,
 } from "@stratum/kb-core";
@@ -130,6 +133,12 @@ export async function runExpertiseMapper(deps: RunDeps): Promise<RunSummary> {
     .then(() => true)
     .catch(() => false);
 
+  // 表示名の写像(github login → フルネーム・ADR-0022)。不在/壊れは空表フォールバック(名前は github login のまま)。
+  const members: Members = await deps
+    .readFile(join(kbRoot, "_meta", "members.yaml"))
+    .then((raw) => parseMembers(raw))
+    .catch(() => ({ members: [] }));
+
   const files: { path: string; content: string }[] = [];
   if (mapChanged) {
     files.push({ path: EXPERTISE_YAML, content: serializeExpertiseMap(next) });
@@ -147,6 +156,7 @@ export async function runExpertiseMapper(deps: RunDeps): Promise<RunSummary> {
         failedRepos: commits.failedRepos,
         kbMaterials: kbMaterials.length,
         repoMaterials: commits.materials.length,
+        members,
       }),
     });
   }
@@ -185,7 +195,14 @@ export async function runExpertiseMapper(deps: RunDeps): Promise<RunSummary> {
 
   // 7) risk:high 通知(実 commit 時のみ・§6.6 step4)
   await deps.notifier.notifyHighRisk(
-    highRisk.map((t) => ({ topic: t.topic, label: t.label, top: t.people[0]?.name ?? "-" })),
+    highRisk.map((t) => {
+      const login = t.people[0]?.name; // people[].name は github login
+      return {
+        topic: t.topic,
+        label: t.label,
+        top: login ? (nameForGithub(members, login) ?? login) : "-", // 表示はフルネーム優先(ADR-0022)
+      };
+    }),
     reportPath,
   );
   return { committed: true, reason: "committed", ...base };

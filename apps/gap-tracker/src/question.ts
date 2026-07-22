@@ -89,7 +89,8 @@ export function buildQuestion(
     question: query.question,
     bot_answer_quality: toBotAnswerQuality(query),
     status: assignee ? "asked" : "open",
-    ...(assignee ? { assignee: assignee.github } : {}),
+    // 記録値は asked_by と同一規約: GitHub 名が引ければ github、無ければ discord:<id>(ADR-0022)。
+    ...(assignee ? { assignee: assignee.github ?? `discord:${assignee.discord}` } : {}),
   };
   const body = [
     "",
@@ -125,21 +126,22 @@ export function isoWeekKey(d: Date): string {
 export function selectAssignee(
   assignees: readonly Assignee[],
   startIndex: number,
-  tryReserve: (github: string) => boolean,
+  tryReserve: (discord: string) => boolean,
   preferred: readonly string[] = [],
 ): Assignee | null {
   const tried = new Set<string>();
-  for (const name of preferred) {
-    const a = assignees.find((x) => x.github === name);
-    if (a === undefined || tried.has(a.github)) continue;
-    tried.add(a.github);
-    if (tryReserve(a.github)) return a;
+  // preferred は expertise 由来の **discord ID 配列**(run.ts が github→discord へ写像済み・ADR-0022)。
+  for (const discord of preferred) {
+    const a = assignees.find((x) => x.discord === discord);
+    if (a === undefined || tried.has(a.discord)) continue;
+    tried.add(a.discord);
+    if (tryReserve(a.discord)) return a;
   }
   for (let i = 0; i < assignees.length; i += 1) {
     const a = assignees[(startIndex + i) % assignees.length];
-    if (a === undefined || tried.has(a.github)) continue;
-    tried.add(a.github);
-    if (tryReserve(a.github)) return a;
+    if (a === undefined || tried.has(a.discord)) continue;
+    tried.add(a.discord);
+    if (tryReserve(a.discord)) return a;
   }
   return null;
 }

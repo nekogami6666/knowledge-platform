@@ -15,6 +15,7 @@ import { GhClientError } from "@stratum/gh-client";
 import {
   buildVoiceMemoDoc,
   githubForDiscord,
+  nameForDiscord,
   type Source,
   serializeEntry,
   voiceMemoPath,
@@ -297,7 +298,7 @@ async function processOne(
         "",
         `- ${isVc ? "録音元 VC(ADR-0020)" : "元メッセージ"}: ${linkUrl}`,
         `- 原本(文字起こし全文): \`${transcriptPath}\``,
-        `- 投稿者: <@${payload.authorId}>(👍 は本人の DM から)`,
+        `- 投稿者: ${nameForDiscord(members, payload.authorId) ?? `<@${payload.authorId}>`}(👍 は本人の DM から)`,
         "",
         "スキーマ検証はこのリポの validate CI が行います。",
       ].join("\n"),

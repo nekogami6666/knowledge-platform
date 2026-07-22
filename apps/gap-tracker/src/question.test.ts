@@ -84,8 +84,8 @@ describe("selectAssignee(ラウンドロビン + 週3件上限・§6.5 L501)", (
   it("startIndex から順に、予約できた最初の人を返す", () => {
     expect(selectAssignee(abc, 1, () => true)?.github).toBe("b");
   });
-  it("上限の人は飛ばす(a 満杯 → b)", () => {
-    expect(selectAssignee(abc, 0, (g) => g !== "a")?.github).toBe("b");
+  it("上限の人は飛ばす(a 満杯 → b。予約キーは discord・ADR-0022)", () => {
+    expect(selectAssignee(abc, 0, (d) => d !== "1")?.github).toBe("b"); // a の discord="1" を満杯扱い
   });
   it("全員上限なら null", () => {
     expect(selectAssignee(abc, 0, () => false)).toBeNull();

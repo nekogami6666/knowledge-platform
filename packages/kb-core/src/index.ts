@@ -35,7 +35,13 @@ export {
   type IdKind,
 } from "./id-allocator.js";
 // --- members 対応表(_meta/members.yaml・ADR-0017 D3)---
-export { discordForGithub, githubForDiscord, parseMembers } from "./members-io.js";
+export {
+  discordForGithub,
+  githubForDiscord,
+  nameForDiscord,
+  nameForGithub,
+  parseMembers,
+} from "./members-io.js";
 // --- provenance ---
 export {
   parseLineRange,

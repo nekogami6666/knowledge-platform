@@ -41,10 +41,12 @@ export interface RunDeps {
   writeFile: (absPath: string, content: string) => Promise<void>;
   /** 依頼の投稿(§6.5 step3。実装は Discord webhook)。 */
   postRequest: (content: string) => Promise<void>;
-  /** 週3件/人の予約(§6.5 L501)。true=割当可。real 時は BotStore.hitRateLimit、dry-run はローカル。 */
-  reserveAssignee: (github: string) => boolean;
+  /** 週3件/人の予約(§6.5 L501。キーは discord・ADR-0022)。true=割当可。real は hitRateLimit、dry-run はローカル。 */
+  reserveAssignee: (discord: string) => boolean;
   /** Discord ID → GitHub 名(KB members.yaml 優先 + assignees フォールバック・ADR-0017 D3)。未解決は undefined。 */
   githubForDiscord: (discordId: string) => string | undefined;
+  /** GitHub 名 → Discord ID(expertise の github preferred を discord 主キーへ写像・ADR-0022)。未解決は undefined。 */
+  discordForGithub: (github: string) => string | undefined;
   now: () => Date;
   logger: Logger;
   /** true で実 commit + 実依頼。false は計画ログのみ(既定)。 */
@@ -119,7 +121,13 @@ export async function runGapTracker(deps: RunDeps): Promise<RunSummary> {
       summary.skipped += 1;
       continue;
     }
-    const preferred = expertise === null ? [] : rankByExpertise(query.question, expertise);
+    // expertise は GitHub 名を返す。discord 主キーの assignees と突合するため discord へ写像(ADR-0022)。
+    const preferred =
+      expertise === null
+        ? []
+        : rankByExpertise(query.question, expertise)
+            .map((gh) => deps.discordForGithub(gh))
+            .filter((d): d is string => d !== undefined);
     const assignee: Assignee | null = selectAssignee(
       config.assignees,
       rr,
@@ -136,7 +144,8 @@ export async function runGapTracker(deps: RunDeps): Promise<RunSummary> {
     questionIds.push(id);
     doneIds.push(action.id);
     if (assignee) {
-      const asker = deps.githubForDiscord(query.discordUserId) ?? `<@${query.discordUserId}>`;
+      // 質問者ラベルは常にメンション(Discord が表示名を描画・ADR-0022。生 github 名を出さない)。
+      const asker = `<@${query.discordUserId}>`;
       requests.push(buildRequestMessage(assignee, asker, query.question, id));
       summary.requested += 1;
     } else {
