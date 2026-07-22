@@ -7,6 +7,7 @@
  * clone 直後に remote URL をトークン無しへ差し替え、fetch は URL を引数で渡す(origin 参照しない)。
  * reconcile の agentic Read が clone 配下の .git/config を読んでもトークンが漏れないようにする。
  */
+import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import type { ExtractorConfig, RepoSpec } from "./config.js";
 import type { GitExec } from "./diff.js";
@@ -70,6 +71,10 @@ export function createGitRepoSyncer(
   };
   return {
     async sync() {
+      // clone は cwd=clonesDir で走るため親を先に用意する(app 別 CLONES_DIR は初回に不在)。
+      // gap-tracker / freshness-checker / discord-bot の syncer と同流儀。未作成だと
+      // clone が cwd 不在で `spawn git ENOENT` になる(エフェメラル CI runner 実害 2026-07-22)。
+      await mkdir(clonesDir, { recursive: true });
       return {
         minutes: await syncOne(config.minutes, config.base_branch),
         kb: await syncOne(config.kb, config.base_branch),

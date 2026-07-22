@@ -1,10 +1,22 @@
-import { describe, expect, it } from "vitest";
+import { access, mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { ExtractorConfig } from "./config.js";
 import type { GitExec } from "./diff.js";
 import { createGitRepoSyncer, stripCredentials } from "./repos.js";
 
 const TOKEN_URL = "https://x-access-token:SECRET@github.com/org/minutes.git";
 const CLEAN_URL = "https://github.com/org/minutes.git";
+
+// createGitRepoSyncer は実 mkdir(clonesDir) を行うため、fake テストでも書き込める実 tmp dir を使う。
+let c: string;
+beforeEach(async () => {
+  c = await mkdtemp(join(tmpdir(), "extractor-repos-fake-"));
+});
+afterEach(async () => {
+  await rm(c, { recursive: true, force: true });
+});
 
 const config = (minutesUrl?: string): ExtractorConfig => ({
   minutes: {
@@ -45,16 +57,26 @@ describe("stripCredentials", () => {
 describe("createGitRepoSyncer(トークン非永続化・ADR-0013)", () => {
   it("新規 clone 後に remote URL をトークン無しへ差し替える", async () => {
     const { exec, calls } = fakeExec(["knowledge-base"]); // minutes は未 clone
-    await createGitRepoSyncer(config(TOKEN_URL), "/c", exec).sync();
-    const minuteCalls = calls.filter(([, cwd]) => cwd.includes("minutes") || cwd === "/c");
+    await createGitRepoSyncer(config(TOKEN_URL), c, exec).sync();
+    const minuteCalls = calls.filter(([, cwd]) => cwd.includes("minutes") || cwd === c);
     expect(minuteCalls.map(([a]) => a[0])).toContain("clone");
     const setUrl = calls.find(([a]) => a[0] === "remote" && a[1] === "set-url");
     expect(setUrl?.[0]).toEqual(["remote", "set-url", "origin", CLEAN_URL]);
   });
 
+  it("clonesDir が未作成でも先に mkdir してから clone する(spawn git ENOENT 回帰・2026-07-22)", async () => {
+    // エフェメラル CI runner では CLONES_DIR が初回不在。mkdir せずに clone すると cwd 不在で
+    // `spawn git ENOENT` になり、extractor が実走した瞬間に落ちる(#82 後の初稼働で顕在化)。
+    const nested = join(c, "does-not-exist-yet", "clones");
+    const { exec, calls } = fakeExec(["knowledge-base"]); // minutes は未 clone
+    await createGitRepoSyncer(config(TOKEN_URL), nested, exec).sync();
+    await access(nested); // 未作成なら throw。mkdir 済みなら成功
+    expect(calls.some(([a]) => a[0] === "clone")).toBe(true);
+  });
+
   it("既存 clone + url は URL 引数で fetch し FETCH_HEAD に reset + 未追跡残骸を clean", async () => {
     const { exec, calls } = fakeExec(["minutes", "knowledge-base"]);
-    await createGitRepoSyncer(config(TOKEN_URL), "/c", exec).sync();
+    await createGitRepoSyncer(config(TOKEN_URL), c, exec).sync();
     const fetch = calls.find(([a]) => a[0] === "fetch");
     expect(fetch?.[0]).toEqual(["fetch", TOKEN_URL, "main"]);
     const reset = calls.find(([a]) => a[0] === "reset");
@@ -68,7 +90,7 @@ describe("createGitRepoSyncer(トークン非永続化・ADR-0013)", () => {
 
   it("url 無しの既存 dir は fetch/clone/reset/clean せず rev-parse のみ(未 commit 作業を破壊しない)", async () => {
     const { exec, calls } = fakeExec(["minutes", "knowledge-base"]);
-    const r = await createGitRepoSyncer(config(undefined), "/c", exec).sync();
+    const r = await createGitRepoSyncer(config(undefined), c, exec).sync();
     expect(r.minutes.resolvedCommit).toBe("abc123");
     // clean は破壊的。url 無し(開発者の事前 checkout)では未 commit 作業がありうるため走らせない。
     expect(
@@ -87,7 +109,7 @@ describe("createGitRepoSyncer(トークン非永続化・ADR-0013)", () => {
       if (args[0] === "rev-parse" && args[1] === "--git-dir") return { stdout: "../../.git\n" };
       return { stdout: "abc123\n" };
     };
-    await expect(createGitRepoSyncer(config(TOKEN_URL), "/c", exec).sync()).rejects.toThrow(
+    await expect(createGitRepoSyncer(config(TOKEN_URL), c, exec).sync()).rejects.toThrow(
       /独立した git リポではありません/,
     );
     expect(
