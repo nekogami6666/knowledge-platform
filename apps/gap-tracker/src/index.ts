@@ -30,7 +30,12 @@ import { runAnswerIngestion } from "./ingest.js";
 import { type GitExec, syncKb } from "./kb-sync.js";
 import { createLogger } from "./logger.js";
 import { loadMembers } from "./members.js";
-import { isoWeekKey, resolveDiscordForGithub, resolveGithubForDiscord } from "./question.js";
+import {
+  assigneePool,
+  isoWeekKey,
+  resolveDiscordForGithub,
+  resolveGithubForDiscord,
+} from "./question.js";
 import { runGapTracker } from "./run.js";
 
 const execFileAsync = promisify(execFile);
@@ -170,15 +175,22 @@ async function main(): Promise<void> {
   // sync 失敗は握りつぶさない(親リポガード等の fail-loud を members 読み失敗に誤誘導しない)。
   const kb = await syncKbThunk();
   const members = await loadMembers(readFile, kb.absDir, logger);
+  // ADR-0022: assignees 空なら members.yaml 全員を回答者プールにする(「皆で OK」)。
+  const assignees = assigneePool(config.assignees, members);
+  if (config.assignees.length === 0) {
+    logger.info("gap.yaml の assignees が空のため members.yaml 全員を回答者プールにします。", {
+      count: assignees.length,
+    });
+  }
   const githubForDiscord = (discordId: string): string | undefined =>
-    resolveGithubForDiscord(members, config.assignees, discordId);
+    resolveGithubForDiscord(members, assignees, discordId);
   const discordForGithub = (github: string): string | undefined =>
-    resolveDiscordForGithub(members, config.assignees, github);
+    resolveDiscordForGithub(members, assignees, github);
 
   try {
     // step1-3: 未回答 → questions/open へ commit + 回答者へ依頼(PR-D1)。
     const summary = await runGapTracker({
-      config,
+      config: { ...config, assignees },
       store,
       syncKb: syncKbThunk,
       gh,

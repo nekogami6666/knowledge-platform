@@ -28,7 +28,8 @@ export const gapConfigSchema = z
     /** git remote URL(省略時は checkout 済みの dir を使う)。 */
     kb_url: z.string().optional(),
     base_branch: z.string().default("main"),
-    /** 回答者候補(ラウンドロビン。週3件/人の上限は §6.5 L501)。 */
+    /** 回答者候補(ラウンドロビン。週3件/人の上限は §6.5 L501)。**空にすると members.yaml 全員が
+     * プールになる**(ADR-0022・「皆で OK」)。 */
     assignees: z.array(assigneeSchema).default([]),
   })
   .strict();

@@ -51,6 +51,21 @@ export function resolveDiscordForGithub(
   );
 }
 
+/**
+ * 回答者プールを決める(ADR-0022): gap.yaml の `assignees` が空なら **members.yaml の全員**を
+ * プールにする(ユーザ裁定「回答者は皆で OK」。ADR-0017 D3 の「curated プール」既定を、空指定で
+ * 明示的に上書きする形)。members の Member は discord 主キー化後そのまま Assignee に写せる
+ * (name/github は任意・discord が主キー)。alts は依頼キーに不要なので落とす。
+ */
+export function assigneePool(configAssignees: readonly Assignee[], members: Members): Assignee[] {
+  if (configAssignees.length > 0) return [...configAssignees];
+  return members.members.map((m) => ({
+    ...(m.name !== undefined ? { name: m.name } : {}),
+    ...(m.github !== undefined ? { github: m.github } : {}),
+    discord: m.discord,
+  }));
+}
+
 /** questions/ 配下の生テキスト群に queryId が既出か(冪等ガード)。 */
 export function containsQueryId(rawEntries: readonly string[], queryId: string): boolean {
   const needle = queryIdLine(queryId);

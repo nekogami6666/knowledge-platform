@@ -2,6 +2,7 @@ import type { QueryRecord } from "@stratum/discord-bot/store";
 import { describe, expect, it } from "vitest";
 import type { Assignee } from "./config.js";
 import {
+  assigneePool,
   buildQuestion,
   buildRequestMessage,
   containsQueryId,
@@ -90,6 +91,25 @@ describe("selectAssignee(ラウンドロビン + 週3件上限・§6.5 L501)", (
   it("全員上限なら null", () => {
     expect(selectAssignee(abc, 0, () => false)).toBeNull();
     expect(selectAssignee([], 0, () => true)).toBeNull();
+  });
+});
+
+describe("assigneePool(ADR-0022: 空 assignees → members 全員)", () => {
+  const members = {
+    members: [
+      { name: "山田 太郎", github: "yamada", discord: "1" },
+      { name: "名無し", discord: "2" }, // GitHub 未所持
+    ],
+  };
+  it("assignees が空なら members 全員を写す(name/github/discord、github 未所持も)", () => {
+    expect(assigneePool([], members)).toEqual([
+      { name: "山田 太郎", github: "yamada", discord: "1" },
+      { name: "名無し", discord: "2" },
+    ]);
+  });
+  it("assignees が非空ならそのまま使う(members は無視)", () => {
+    const cfg: Assignee[] = [{ discord: "9", github: "x" }];
+    expect(assigneePool(cfg, members)).toEqual(cfg);
   });
 });
 
