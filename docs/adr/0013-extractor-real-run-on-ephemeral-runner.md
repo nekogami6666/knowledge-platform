@@ -1,7 +1,7 @@
 # ADR-0013: extractor 実運用の暫定実行境界を GitHub Actions エフェメラル runner とする
 
-- **ステータス**: proposed
-- **日付**: 2026-07-05
+- **ステータス**: accepted(2026-07-23。ユーザ承認「accept でok / 本番でok」で採択。D1 条件 (a)〜(e) 実装済み・GitHub App 発行済み。ただし実 PR 開始 `EXTRACTOR_REAL_PR=1` は precision≥0.80 + 監督付き dry-run の実行時ゲートを別途満たすこと=Phase D)
+- **日付**: 2026-07-05(起案)/ 2026-07-23 採択
 - **関連**: design.md §6.3(extractor)・§9.1(資格情報)・§9.5(封じ込め)・§11 Phase 2 DoD /
   ADR-0002(データポリシー・accepted)・ADR-0006(FS 封じ込め・proposed)・ADR-0011(auth-agnostic)・
   ADR-0012(実データローカル dry-run 例外・proposed)
@@ -86,3 +86,32 @@ GitHub App(§14 #9)を発行したため、**gh-client 経由のすべて**(`cre
 - repos.test.ts: clone 後の `remote set-url`(トークン除去)/ fetch の URL 引数渡しをユニットで固定。
 - workflow_dispatch の dry-run で config 生成・clone・scrub を確認 → 人間 GO で `EXTRACTOR_REAL_PR=1` の
   監督付き1回 → 生成 PR レビュー → 👍 マージ → 2週間運用(手順は docs/runbooks/extractor-real-run.md)。
+
+## 採択の根拠(2026-07-23 採択)
+
+> ユーザ承認「accept でok / 本番でok」により accepted 化(備考の人間レビュー要件を満たした)。
+> 実運用ロールアウト(Phase D)の上流ゲートとして、採択に必要な事実が揃っていることを整理する。
+
+### D1 条件 (a)〜(e) の充足状況
+
+| 条件 | 内容 | 状況 |
+|---|---|---|
+| (a) | checkout `persist-credentials: false` | ✅ `.github/workflows/extractor-nightly.yml`(ベクタ1遮断) |
+| (b) | clone `.git/config` のトークン scrub | ✅ `apps/discord-bot/src/repos.ts`(clone 後 `remote set-url` / fetch は URL 引数渡し)。`repos.test.ts` で固定 |
+| (c) | `buildAgentEnv` の秘密遮断 | ✅ 実装済み(PR-6a。ANTHROPIC_*/CLAUDE_*/AWS_* のみ許可) |
+| (d) | `EXTRACTOR_REAL_PR` は既定 dry-run・初回監督付き | ✅ `apps/extractor/src/run.ts:398`(dry-run 分岐)+ workflow の `# EXTRACTOR_REAL_PR` コメントアウト |
+| (e)→D4 | 認証 = read:PAT / write:App の hybrid | ✅ GitHub App(§14#9)発行済み。`packages/gh-client/src/auth.ts` `resolveGhAuthFromEnv` が App trio 必須・fail-loud |
+
+→ **D1 の技術条件は (a)〜(e) すべて実装済み**。採択の残る作業は人間レビューによる確認のみ。
+
+### 採択と別に扱う「実 PR 開始」の実行時ゲート(Phase D で消化)
+
+- **抽出品質 precision ≥ 0.80**(§11 Phase 2 DoD)は ADR 採択とは別の**実行時ゲート**。監督付き dry-run の
+  生成物をサンプル評価して満たすことを確認してから `EXTRACTOR_REAL_PR=1` にする(採択済みでも品質未達なら実 PR は開始しない)。
+
+## design.md 転記リスト(人間レビュー・保護パス — 大半は反映済み)
+
+- **§6.3(L476)**: 「本番・常駐・実 PR は ADR-0013(Actions エフェメラル runner)の実行境界に従う」— **反映済み**。
+- **§9.5(L650)**: 「実運用の実行境界は GitHub Actions エフェメラル runner(ADR-0013)」— **反映済み**。
+- **§11 Phase 2 DoD(L712)**: 「§6.3 受け入れ条件(precision 80%)+ 2 週間運用で承認フローが回る」は §6.3 経由で
+  本 ADR を参照済み(追加編集不要)。read=PAT / write=App の hybrid(D4)は §9.1 の GitHub App 記述に含む。
