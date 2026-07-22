@@ -10,6 +10,7 @@ import {
   type CloseDeps,
   classifyQuestion,
   daysSince,
+  resolveAskerMention,
   runFlywheelClose,
 } from "./close.js";
 import type { GapConfig } from "./config.js";
@@ -43,6 +44,19 @@ describe("askerMention", () => {
   it("discord:<id> は <@id>、github 名は null", () => {
     expect(askerMention("discord:111")).toBe("<@111>");
     expect(askerMention("yamada")).toBeNull();
+  });
+});
+
+describe("resolveAskerMention(ADR-0017 D3: github 名の asked_by も逆引きしてメンション)", () => {
+  const d4g = (g: string): string | undefined => (g === "yamada" ? "901" : undefined);
+  it("discord:<id> はそのまま <@id>", () => {
+    expect(resolveAskerMention("discord:111", d4g)).toBe("<@111>");
+  });
+  it("github 名は discordForGithub で逆引きして <@id>(退行 B-1 の修正)", () => {
+    expect(resolveAskerMention("yamada", d4g)).toBe("<@901>");
+  });
+  it("逆引き不能な github 名は null(メンション無し本文にフォールバック)", () => {
+    expect(resolveAskerMention("unknown-gh", d4g)).toBeNull();
   });
 });
 
@@ -187,6 +201,20 @@ describe("runFlywheelclose (A: merged → answered 移動)", () => {
     expect(deps.gapPosts[0]).toContain("<@111>"); // asked_by=discord:111
     expect(deps.gapPosts[0]).toContain("kb-2026-0143");
     expect(pending(deps.store, "gap_pr")).toHaveLength(0);
+  });
+
+  it("asked_by が members 由来の GitHub 名でも discordForGithub 逆引きでメンションが飛ぶ(B-1 退行防止)", async () => {
+    const { gh } = makeGh({ merged: true });
+    const deps = makeDeps({
+      gh,
+      // members.yaml で解決された結果、asked_by が GitHub 名 "yamada" になったケース。
+      readQuestionRaw: async (_r, qid) =>
+        qid === "q-2026-0007" ? openRaw("q-2026-0007", { asked_by: "yamada" }) : null,
+    });
+    const r = await runFlywheelClose(deps);
+    expect(r.moved).toBe(1);
+    // discordForGithub("yamada") = "901" 経由でメンションが付く(旧実装は null でメンション欠落)。
+    expect(deps.gapPosts[0]).toContain("<@901>");
   });
 
   it("未マージ(open)は move せず台帳を残す(次回持ち越し)", async () => {

@@ -6,6 +6,8 @@ import {
   buildRequestMessage,
   containsQueryId,
   isoWeekKey,
+  resolveDiscordForGithub,
+  resolveGithubForDiscord,
   selectAssignee,
   toBotAnswerQuality,
 } from "./question.js";
@@ -106,5 +108,46 @@ describe("buildRequestMessage(§6.5 L502 テンプレ)", () => {
     expect(m).toContain("tanaka さんが「校正手順は?」を探していました");
     expect(m).toContain("1〜2 文で");
     expect(m).toContain("(q-2026-0090)");
+  });
+});
+
+describe("resolveGithubForDiscord(ADR-0017 D3: members 優先 + assignees フォールバック)", () => {
+  const members = { members: [{ github: "alice-gh", discord: "111" }] };
+  const assignees: Assignee[] = [{ github: "bob-gh", discord: "222" }];
+
+  it("members.yaml 登載者は members から解決する", () => {
+    expect(resolveGithubForDiscord(members, assignees, "111")).toBe("alice-gh");
+  });
+
+  it("members 未登載でも assignees(依頼プール)に居れば解決する(移行期フォールバック)", () => {
+    expect(resolveGithubForDiscord(members, assignees, "222")).toBe("bob-gh");
+  });
+
+  it("どちらにも居なければ undefined(呼び出し側が discord:<id> へフォールバック)", () => {
+    expect(resolveGithubForDiscord(members, assignees, "999")).toBeUndefined();
+  });
+
+  it("両方に居る場合は members が勝つ(唯一の正)", () => {
+    const both = { members: [{ github: "alice-members", discord: "222" }] };
+    expect(resolveGithubForDiscord(both, assignees, "222")).toBe("alice-members");
+  });
+});
+
+describe("resolveDiscordForGithub(ADR-0017 D3: 逆引きも members 優先 + assignees フォールバック)", () => {
+  const members = { members: [{ github: "alice-gh", discord: "111" }] };
+  const assignees: Assignee[] = [{ github: "bob-gh", discord: "222" }];
+
+  it("members 登載者は members から逆引き", () => {
+    expect(resolveDiscordForGithub(members, assignees, "alice-gh")).toBe("111");
+  });
+  it("members 未登載でも assignees に居れば逆引き", () => {
+    expect(resolveDiscordForGithub(members, assignees, "bob-gh")).toBe("222");
+  });
+  it("どちらにも居なければ undefined", () => {
+    expect(resolveDiscordForGithub(members, assignees, "nobody")).toBeUndefined();
+  });
+  it("両方に居る場合は members が勝つ", () => {
+    const both = { members: [{ github: "bob-gh", discord: "999" }] };
+    expect(resolveDiscordForGithub(both, assignees, "bob-gh")).toBe("999");
   });
 });

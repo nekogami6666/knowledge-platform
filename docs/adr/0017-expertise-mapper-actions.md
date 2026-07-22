@@ -74,6 +74,10 @@ interview-kit も同じ表を必要とするため一度払えば回収できる
   解決にも assignees を流用しており(index.ts の githubForDiscord/discordForGithub)、assignees に
   居ない質問者の `asked_by` が `discord:<id>` に落ちる。単一ソース化後は本表へ付け替える
   (**C6 範囲外・C6 完了後の独立 PR**。依頼メンション用 discord ID を assignees に残すかもその PR で判断)。
+  - **解決済み(2026-07-22)**: `githubForDiscord`/`discordForGithub` とも members 優先 + assignees
+    フォールバックへ付け替え(`question.ts` の resolve*、`close.ts` の `resolveAskerMention`)。
+    判断: **依頼メンション用 discord ID は assignees に残す**(依頼 ping の正は gap.yaml、
+    質問者通知・リマインドの逆引きは members 優先)。`selectAssignee` の母集団は assignees のまま。
 
 ### D4. なぜ人物マスタを KB `_meta/` に置くのか(射程の限定)
 

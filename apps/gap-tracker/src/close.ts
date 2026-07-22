@@ -31,6 +31,20 @@ export function askerMention(askedBy: string): string | null {
   return m ? `<@${m[1]}>` : null;
 }
 
+/**
+ * asked_by → 通知メンション。"discord:<id>" は直接、GitHub 名は discordForGithub で逆引きする
+ * (members.yaml 由来の GitHub 名でも本人に届くように・ADR-0017 D3 / §6.5 step5)。逆引き不能は null。
+ */
+export function resolveAskerMention(
+  askedBy: string,
+  discordForGithub: (github: string) => string | undefined,
+): string | null {
+  const direct = askerMention(askedBy);
+  if (direct !== null) return direct;
+  const discord = discordForGithub(askedBy);
+  return discord !== undefined ? `<@${discord}>` : null;
+}
+
 export interface AnsweredMove {
   answeredPath: string;
   openPath: string;
@@ -123,7 +137,7 @@ export interface CloseDeps {
   writeFile: (absPath: string, content: string) => Promise<void>;
   /** ファイル削除(answered へ移す際に open の実体を消してから validateRepo する)。 */
   removeFile: (absPath: string) => Promise<void>;
-  /** Discord ID → GitHub 名の逆引き(assignee のメンション用)。 */
+  /** GitHub 名 → Discord ID の逆引き(質問者通知・リマインドのメンション用。members 優先 + assignees フォールバック・ADR-0017 D3)。 */
   discordForGithub: (github: string) => string | undefined;
   /** 依頼チャンネルへ投稿(質問者通知・リマインド)。 */
   postGap: (content: string) => Promise<void>;
@@ -211,7 +225,11 @@ export async function runFlywheelClose(deps: CloseDeps): Promise<CloseSummary> {
       moveFiles.push({ path: move.answeredPath, content: move.content });
       moveDeletions.push(move.openPath);
       askerNotifies.push(
-        buildAnsweredNotify(askerMention(move.askedBy), item.questionId, item.entryId),
+        buildAnsweredNotify(
+          resolveAskerMention(move.askedBy, deps.discordForGithub),
+          item.questionId,
+          item.entryId,
+        ),
       );
     }
     ledgerDone.push(action.id);

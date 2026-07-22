@@ -29,7 +29,8 @@ import { isReal, parseEnv } from "./env.js";
 import { runAnswerIngestion } from "./ingest.js";
 import { type GitExec, syncKb } from "./kb-sync.js";
 import { createLogger } from "./logger.js";
-import { isoWeekKey } from "./question.js";
+import { loadMembers } from "./members.js";
+import { isoWeekKey, resolveDiscordForGithub, resolveGithubForDiscord } from "./question.js";
 import { runGapTracker } from "./run.js";
 
 const execFileAsync = promisify(execFile);
@@ -163,8 +164,15 @@ async function main(): Promise<void> {
     return store.hitRateLimit(`assignee:${github}`, "gap_request", week, 3).allowed;
   };
 
+  // 質問者・回答者の discord↔github 解決は KB `_meta/members.yaml`(唯一の正・ADR-0017 D3)を
+  // 優先する。members は KB clone 内にあるため先に一度同期して読む(各フェーズの再同期は冪等)。
+  // sync 失敗は握りつぶさない(親リポガード等の fail-loud を members 読み失敗に誤誘導しない)。
+  const kb = await syncKbThunk();
+  const members = await loadMembers(readFile, kb.absDir, logger);
   const githubForDiscord = (discordId: string): string | undefined =>
-    config.assignees.find((a) => a.discord === discordId)?.github;
+    resolveGithubForDiscord(members, config.assignees, discordId);
+  const discordForGithub = (github: string): string | undefined =>
+    resolveDiscordForGithub(members, config.assignees, github);
 
   try {
     // step1-3: 未回答 → questions/open へ commit + 回答者へ依頼(PR-D1)。
@@ -229,7 +237,7 @@ async function main(): Promise<void> {
       listOpenQuestions,
       writeFile,
       removeFile: (p) => rm(p, { force: true }),
-      discordForGithub: (github) => config.assignees.find((a) => a.github === github)?.discord,
+      discordForGithub,
       postGap: (content) => postWebhook(env.DISCORD_GAP_WEBHOOK, content, "通知/リマインド"),
       postOps: (content) => postWebhook(env.DISCORD_OPS_WEBHOOK, content, "wontfix レポート"),
       now: () => new Date(),

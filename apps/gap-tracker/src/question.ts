@@ -6,11 +6,49 @@
  */
 import type { QueryRecord } from "@stratum/discord-bot/store";
 import type { QuestionLog } from "@stratum/kb-core";
+import {
+  type Members,
+  discordForGithub as membersDiscordForGithub,
+  githubForDiscord as membersGithubForDiscord,
+} from "@stratum/kb-core";
 import type { Assignee } from "./config.js";
 
 /** 本文に埋める冪等キー行(markActionDone 失敗時の二重 commit 防止)。 */
 export function queryIdLine(queryId: string): string {
   return `query-id: ${queryId}`;
+}
+
+/**
+ * discord→github 解決(ADR-0017 D3 既知課題の付け替え・質問者の asked_by 等)。
+ * KB `_meta/members.yaml`(全員名簿・唯一の正)を優先し、未登載は assignees
+ * (依頼プール。依頼メンション用に discord ID を保持する別概念)へフォールバックする。
+ * assignees プール自体の統合はしない(ADR-0017: selectAssignee の母集団を広げないため)。
+ */
+export function resolveGithubForDiscord(
+  members: Members,
+  assignees: readonly Assignee[],
+  discordId: string,
+): string | undefined {
+  return (
+    membersGithubForDiscord(members, discordId) ??
+    assignees.find((a) => a.discord === discordId)?.github
+  );
+}
+
+/**
+ * github→discord 逆引き(ADR-0017 D3 が名指しした discordForGithub 側の付け替え)。
+ * members 優先 + assignees フォールバック。回答完了通知・リマインドのメンション解決に使う。
+ * これが無いと、asked_by が members 由来の GitHub 名に変わった質問者への通知が
+ * メンション無しに落ちる(§6.5 step5 の退行)。
+ */
+export function resolveDiscordForGithub(
+  members: Members,
+  assignees: readonly Assignee[],
+  github: string,
+): string | undefined {
+  return (
+    membersDiscordForGithub(members, github) ?? assignees.find((a) => a.github === github)?.discord
+  );
 }
 
 /** questions/ 配下の生テキスト群に queryId が既出か(冪等ガード)。 */

@@ -43,7 +43,7 @@ export interface RunDeps {
   postRequest: (content: string) => Promise<void>;
   /** 週3件/人の予約(§6.5 L501)。true=割当可。real 時は BotStore.hitRateLimit、dry-run はローカル。 */
   reserveAssignee: (github: string) => boolean;
-  /** Discord ID → GitHub 名(gap.yaml assignees から。未登載は undefined)。 */
+  /** Discord ID → GitHub 名(KB members.yaml 優先 + assignees フォールバック・ADR-0017 D3)。未解決は undefined。 */
   githubForDiscord: (discordId: string) => string | undefined;
   now: () => Date;
   logger: Logger;
