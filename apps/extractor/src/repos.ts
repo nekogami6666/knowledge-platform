@@ -1,6 +1,6 @@
 /**
  * minutes / knowledge-base の clone 同期(design.md §6.3 step1)。git 実行は注入 seam。
- * url 指定時は clone/fetch+reset、未指定時は既に checkout 済みの dir を使う(workflow が fetch-depth:0 で配置)。
+ * url 指定時は clone/fetch+reset+clean、未指定時は既に checkout 済みの dir を使う(workflow が fetch-depth:0 で配置)。
  * これは合成根(index.ts)向けのグルー。ユニットテストでは fake syncer を注入する。
  *
  * 認証(ADR-0013 / ADR-0006): url にトークンが含まれても **.git/config に永続化しない**。
@@ -53,6 +53,9 @@ export function createGitRepoSyncer(
         // URL を引数で渡す(origin の保存 URL に依存しない=トークンを config に書かずに済む)。
         await exec(["fetch", spec.url, baseBranch], absDir);
         await exec(["reset", "--hard", "FETCH_HEAD"], absDir);
+        // reset --hard は追跡ファイルしか戻さず、未追跡ファイルは残る(gap-tracker の VM 実害
+        // 2026-07-22 と同根)。dry-run staging の残骸を clean で除去する。
+        await exec(["clean", "-fd"], absDir);
       }
     } else {
       if (spec.url === undefined) {

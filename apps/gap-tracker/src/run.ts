@@ -7,8 +7,9 @@
  *
  * 冪等性(2段): (1) markActionDone(消費の主機構)、(2) 本文の query-id 行スキャン
  * (commit 成功後 markActionDone 前に落ちた場合の二重 commit 防止)。
- * 本番は kb_url を設定する(sync が fetch+reset で毎回クリーンにする。url 無しの事前 checkout は
- * dry-run の staging が残留しうるため開発用)。
+ * 本番は kb_url を設定する(sync が fetch+reset+clean で毎回クリーンにする。reset --hard だけでは
+ * 未追跡の staging 残骸が残り、冪等スキャンが誤認して queue を消費する(VM 実害 2026-07-22)。
+ * url 無しの事前 checkout は残骸掃除が働かないため開発用)。
  */
 import { join } from "node:path";
 import type { BotStore } from "@stratum/discord-bot/store";

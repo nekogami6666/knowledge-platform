@@ -433,7 +433,7 @@ Discord Gateway(WebSocket)受信とボタンインタラクションには常駐
 **処理フロー**:
 
 1. 受信即時に「調べています…」をエフェメラルでなく**スレッド返信**で投稿(検索過程と回答を後から全員が参照できるようにする)
-2. ローカルの作業ディレクトリで対象リポジトリ(`minutes`, `knowledge-base`, 設定された開発リポジトリ群)を `git fetch && git reset --hard`(shallow clone を起動時に作成し、以後 fetch のみ)
+2. ローカルの作業ディレクトリで対象リポジトリ(`minutes`, `knowledge-base`, 設定された開発リポジトリ群)を `git fetch && git reset --hard && git clean -fd`(shallow clone を起動時に作成し、以後 fetch のみ)。`clean -fd` は `reset --hard` が消さない未追跡ファイル(同一 clone を共有する gap-tracker/freshness の staging 残骸)を除去し、未 commit ファイルへの permalink 生成を防ぐ
 3. Agent SDK `query()` を起動。許可ツールは **Read / Grep / Glob のみ**(Bash・Write・ネットワークは無効化)。システムプロンプトの要点:
    - 回答は日本語、簡潔に(Discord で読める長さ: 原則 1,500 字以内)
    - **すべての主張に出典を付ける**。出典は `kb-core` の provenance 形式 → Bot が GitHub permalink に変換して脚注表示

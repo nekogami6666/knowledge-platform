@@ -43,6 +43,9 @@ export async function syncKb(
     if (opts.url !== undefined) {
       await exec(["fetch", opts.url, opts.baseBranch], absDir);
       await exec(["reset", "--hard", "FETCH_HEAD"], absDir);
+      // reset --hard は追跡ファイルしか戻さず、未追跡ファイルは残る(gap-tracker の VM 実害
+      // 2026-07-22 と同根)。validateRepo 用 staging の残骸を clean で除去する。
+      await exec(["clean", "-fd"], absDir);
     }
   } else {
     if (opts.url === undefined) {

@@ -9,7 +9,8 @@
  * 再投入しない。owner→Discord は KB の _meta/members.yaml で解決(ADR-0017 D3)。
  * 未登載 owner は warn + スキップ(日次予算を消費しない)。
  * 全副作用は注入 seam(store/gh/git/fs/webhook/clock)。dry-run(既定)は store にも remote にも
- * 書かない(clone への staging は validateRepo 用で、次回 sync の reset --hard で消える)。
+ * 書かない(clone への staging は validateRepo 用で、次回 sync の reset --hard + clean -fd で消える。
+ * reset --hard 単体は未追跡ファイルを消さない — gap-tracker の VM 実害 2026-07-22)。
  */
 import { join } from "node:path";
 import {

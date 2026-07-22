@@ -42,6 +42,9 @@ export async function syncKb(
     if (opts.url !== undefined) {
       await exec(["fetch", opts.url, opts.baseBranch], absDir);
       await exec(["reset", "--hard", "FETCH_HEAD"], absDir);
+      // reset --hard は追跡ファイルしか戻さず、未追跡ファイルは残る。dry-run の staging 残骸が
+      // 残ると冪等スキャンが「commit 済み」と誤認して queue だけ消費する(VM 実害 2026-07-22)。
+      await exec(["clean", "-fd"], absDir);
     }
   } else {
     if (opts.url === undefined) {

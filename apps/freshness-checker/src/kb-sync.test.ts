@@ -37,15 +37,30 @@ describe("syncKb(トークン非永続化・ADR-0013 D1(b) と同流儀)", () =>
     expect(calls.some((a) => a[0] === "clone")).toBe(true);
     expect(calls).toContainEqual(["remote", "set-url", "origin", CLEAN_URL]);
   });
-  it("既存 clone + url は URL 引数 fetch + FETCH_HEAD reset", async () => {
+  it("既存 clone + url は URL 引数 fetch + FETCH_HEAD reset + 未追跡残骸の clean", async () => {
     const { exec, calls } = fakeExec(true);
     await syncKb({ dir: "knowledge-base", url: TOKEN_URL, baseBranch: "main" }, "/c", exec);
     expect(calls).toContainEqual(["fetch", TOKEN_URL, "main"]);
     expect(calls).toContainEqual(["reset", "--hard", "FETCH_HEAD"]);
+    // reset --hard は未追跡ファイルを消さないため、staging 残骸は clean で除去する。
+    const resetIdx = calls.findIndex((a) => a[0] === "reset");
+    const cleanIdx = calls.findIndex((a) => a[0] === "clean");
+    expect(calls[cleanIdx]).toEqual(["clean", "-fd"]);
+    expect(cleanIdx).toBeGreaterThan(resetIdx);
   });
   it("url 無し・clone 未存在は throw", async () => {
     const { exec } = fakeExec(false);
     await expect(syncKb({ dir: "kb", baseBranch: "main" }, "/c", exec)).rejects.toThrow();
+  });
+  it("url 無し・既存 dir は fetch/reset/clean せず rev-parse のみ(破壊的 clean を走らせない)", async () => {
+    const { exec, calls } = fakeExec(true);
+    const r = await syncKb({ dir: "knowledge-base", baseBranch: "main" }, "/c", exec);
+    expect(r.resolvedCommit).toBe("abc123");
+    expect(
+      calls.some(
+        (a) => a[0] === "fetch" || a[0] === "reset" || a[0] === "clean" || a[0] === "clone",
+      ),
+    ).toBe(false);
   });
   it("親リポの内側(--git-dir が ../.git)は fetch/reset/clone せず throw(親リポ破壊防止)", async () => {
     // --is-inside-work-tree 判定は親リポの内側でも true になり reset --hard が親を破壊した
@@ -59,6 +74,10 @@ describe("syncKb(トークン非永続化・ADR-0013 D1(b) と同流儀)", () =>
     await expect(
       syncKb({ dir: "knowledge-base", url: TOKEN_URL, baseBranch: "main" }, "/c", exec),
     ).rejects.toThrow(/独立した git リポではありません/);
-    expect(calls.some((a) => a[0] === "fetch" || a[0] === "reset" || a[0] === "clone")).toBe(false);
+    expect(
+      calls.some(
+        (a) => a[0] === "fetch" || a[0] === "reset" || a[0] === "clean" || a[0] === "clone",
+      ),
+    ).toBe(false);
   });
 });
