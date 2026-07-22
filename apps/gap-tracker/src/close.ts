@@ -300,9 +300,9 @@ export async function runFlywheelClose(deps: CloseDeps): Promise<CloseSummary> {
   return summary;
 }
 
-function mentionFor(deps: CloseDeps, github: string): string | null {
-  const discord = deps.discordForGithub(github);
-  return discord ? `<@${discord}>` : null;
+// assignee 値は GitHub 名 or "discord:<id>"(ADR-0022)。asker と同じ二形式で解決する。
+function mentionFor(deps: CloseDeps, assignee: string): string | null {
+  return resolveAskerMention(assignee, deps.discordForGithub);
 }
 
 function ledgerEntry(type: string, questionId: string, now: Date) {

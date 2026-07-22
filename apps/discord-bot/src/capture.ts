@@ -18,6 +18,7 @@ import {
   githubForDiscord,
   type IdCounterStore,
   type KnowledgeEntry,
+  nameForDiscord,
   serializeEntry,
 } from "@stratum/kb-core";
 import {
@@ -405,7 +406,8 @@ export async function handleLightbulb(
       { promptStore, ...(deps.draftSearch ? { search: deps.draftSearch } : {}) },
     );
     const { id, counterJson } = await allocateCaptureId(gh, ops.kb_repo, now);
-    const owner = githubForDiscord(await deps.getMembers(), reactor.id) ?? "unassigned";
+    const members = await deps.getMembers();
+    const owner = githubForDiscord(members, reactor.id) ?? "unassigned";
     const built = buildCaptureEntry(id, candidate, message.url, owner, now);
     const pr = await gh.createPullRequest({
       repo: ops.kb_repo,
@@ -415,7 +417,7 @@ export async function handleLightbulb(
         "💡 リアクションからナレッジ記事を起こしました(§6.4 ③-a)。",
         "",
         `- 元メッセージ: ${message.url}`,
-        `- 起票者: <@${reactor.id}>(👍 は本人の DM から)`,
+        `- 起票者: ${nameForDiscord(members, reactor.id) ?? `<@${reactor.id}>`}(👍 は本人の DM から)`,
         "",
         "スキーマ検証はこのリポの validate CI が行います。",
       ].join("\n"),

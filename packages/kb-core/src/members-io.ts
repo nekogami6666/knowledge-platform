@@ -40,3 +40,17 @@ export function discordForGithub(members: Members, github: string): string | und
     (m) => m.github === github || (m.github_alts?.includes(github) ?? false),
   )?.discord;
 }
+
+/** Discord ユーザ ID → 表示名(name。primary/別名一致・ADR-0022。未登載/name 未設定は undefined)。 */
+export function nameForDiscord(members: Members, discordId: string): string | undefined {
+  return members.members.find(
+    (m) => m.discord === discordId || (m.discord_alts?.includes(discordId) ?? false),
+  )?.name;
+}
+
+/** GitHub ユーザ名 → 表示名(name。primary/別名一致・ADR-0022。未登載/name 未設定は undefined)。 */
+export function nameForGithub(members: Members, github: string): string | undefined {
+  return members.members.find(
+    (m) => m.github === github || (m.github_alts?.includes(github) ?? false),
+  )?.name;
+}

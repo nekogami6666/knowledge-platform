@@ -258,7 +258,7 @@ owner: yamada                # 鮮度確認の宛先。原則 people の筆頭
 設計上の注意:
 - `type: decision` の本体は `decisions/` に置き、`knowledge/` には置かない(重複防止)。`knowledge/**` 内の `type: decision` は `validateRepo` がエラー検出する(ADR-0003 D3)
 - `review_interval_days` の `decision`=∞(鮮度確認対象外)は、値ではなくキー省略(null)で表現する(ADR-0003 D4)
-- 人物識別子は **GitHub ユーザ名に統一**し、Discord ID とのマッピングは KB `_meta/members.yaml` を唯一の正とする(各自が申告で PR 編集。discord-bot は KB clone から都度読む・ADR-0017 D3)。**GitHub 未所持のメンバーは `github` を省略し Discord ID を識別子とする**。1 人が複数の GitHub / Discord アカウントを持つ場合は `github_alts` / `discord_alts` で束ねる(ADR-0021)
+- 人物識別子は **GitHub ユーザ名に統一**し、Discord ID とのマッピングは KB `_meta/members.yaml` を唯一の正とする(各自が申告で PR 編集。discord-bot は KB clone から都度読む・ADR-0017 D3)。**GitHub 未所持のメンバーは `github` を省略し Discord ID を識別子とする**。1 人が複数の GitHub / Discord アカウントを持つ場合は `github_alts` / `discord_alts` で束ねる(ADR-0021)。表示名(フルネーム)は `_meta/members.yaml` の `name`(表示専用・解決キーは github/discord のまま)を唯一の構造化供給源とする(ADR-0022)
 - ID は不変。ファイル名変更(slug 変更)があっても ID で参照する
 
 ### 4.3 Decision Record スキーマ
@@ -295,12 +295,12 @@ tags: [dispenser-x, firmware]
 ```markdown
 ---
 id: q-2026-0088
-asked_by: tanaka             # GitHub ユーザ名
+asked_by: tanaka             # GitHub 名が引ければ GitHub 名、無ければ discord:<id>(ADR-0022)
 asked_at: "2026-06-09T14:22:00+09:00"
 channel: dev-hw
 question: "分注機 X のキャリブレーション、温度補正って入ってたっけ?"
 bot_answer_quality: unanswered   # unanswered | downvoted
-assignee: yamada             # gap-tracker が expertise.yaml から自動選定
+assignee: yamada             # Discord 主キーで選定。値は GitHub 名 or discord:<id>(ADR-0022)
 status: open                 # open | asked(依頼送付済) | answered | wontfix
 resulting_kb: kb-2026-0150   # 回答後に生成されたエントリ ID
 ---
@@ -503,7 +503,7 @@ Discord Gateway(WebSocket)受信とボタンインタラクションには常駐
 **処理フロー**:
 
 1. discord-bot の SQLite から未処理の `NOT_FOUND` / 👎 クエリを取得し、`questions/open/` にエントリとして commit
-2. 各 open 質問について、`expertise.yaml` から最適な回答者を選定(evidence_count とアクティブ度。同一人物への依頼は**週 3 件まで**のレート制限 — 専門家への負荷集中はフライホイール最大の失敗要因)
+2. 各 open 質問について、`expertise.yaml` から最適な回答者を選定(evidence_count とアクティブ度。同一人物への依頼は**週 3 件まで**のレート制限 — 専門家への負荷集中はフライホイール最大の失敗要因)。回答者候補は **Discord ID を主キー**に管理し(GitHub 未所持メンバーも母集団・ADR-0022)、expertise は GitHub 名で突合してから Discord へ写像する
 3. Discord で回答者にメンション付き依頼: 「@tanaka さんが『…』を探していました。**1〜2 文で**教えてもらえますか? このスレッドに返信するだけで OK です」
 4. 返信を受けたら `standard` モデルでナレッジエントリ化(出典 = 質問 + 回答メッセージの permalink)→ PR → 回答者の 👍 でマージ
 5. マージ後、元の質問者に「回答がナレッジ化されました」と通知し、質問を `answered/` へ移動

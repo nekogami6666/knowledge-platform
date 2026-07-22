@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
 import { KbParseError } from "./errors.js";
-import { discordForGithub, githubForDiscord, parseMembers } from "./members-io.js";
+import {
+  discordForGithub,
+  githubForDiscord,
+  nameForDiscord,
+  nameForGithub,
+  parseMembers,
+} from "./members-io.js";
 
 const VALID = `members:
   - github: yamada
@@ -18,6 +24,20 @@ const VALID_EXT = `members:
   - github: multi-discord-user
     discord: "333333333333333333"
     discord_alts: ["444444444444444444"]
+`;
+
+// ADR-0022: 表示名(name)。github 有無・別名の両方をカバー。
+const VALID_NAME = `members:
+  - name: 山田 太郎
+    github: yamada
+    discord: "123456789012345678"
+  - name: 名無しの権兵衛
+    discord: "555555555555555555"
+  - name: 根本 一輝
+    github: kazu-nemoto
+    github_alts: [nimotougou]
+    discord: "818654098194694165"
+    discord_alts: ["999999999999999999"]
 `;
 
 describe("parseMembers", () => {
@@ -123,5 +143,28 @@ describe("githubForDiscord / discordForGithub", () => {
     const mm = parseMembers(VALID_EXT);
     expect(githubForDiscord(mm, "333333333333333333")).toBe("multi-discord-user"); // primary
     expect(githubForDiscord(mm, "444444444444444444")).toBe("multi-discord-user"); // 別名
+  });
+});
+
+describe("name (ADR-0022 表示名)", () => {
+  it("name を parse する(github 有無どちらでも)", () => {
+    const m = parseMembers(VALID_NAME);
+    expect(m.members[0]).toEqual({
+      name: "山田 太郎",
+      github: "yamada",
+      discord: "123456789012345678",
+    });
+    expect(m.members[1]).toEqual({ name: "名無しの権兵衛", discord: "555555555555555555" });
+  });
+
+  it("nameForDiscord / nameForGithub で表示名を引く(primary/別名。未設定は undefined)", () => {
+    const m = parseMembers(VALID_NAME);
+    expect(nameForDiscord(m, "123456789012345678")).toBe("山田 太郎");
+    expect(nameForGithub(m, "yamada")).toBe("山田 太郎");
+    expect(nameForDiscord(m, "555555555555555555")).toBe("名無しの権兵衛"); // github 未所持
+    expect(nameForGithub(m, "nimotougou")).toBe("根本 一輝"); // github 別名
+    expect(nameForDiscord(m, "999999999999999999")).toBe("根本 一輝"); // discord 別名
+    expect(nameForGithub(m, "unknown")).toBeUndefined(); // 未登載
+    expect(nameForDiscord(parseMembers(VALID), "123456789012345678")).toBeUndefined(); // name 未設定
   });
 });

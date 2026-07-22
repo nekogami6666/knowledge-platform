@@ -1,6 +1,5 @@
 import { createMemoryStore } from "@stratum/discord-bot/store";
 import type { GhClient } from "@stratum/gh-client";
-import { createLocalIdCounterStore } from "@stratum/kb-core";
 import { describe, expect, it, vi } from "vitest";
 import type { GapConfig } from "./config.js";
 import { createLogger } from "./logger.js";
@@ -94,6 +93,7 @@ function makeDeps(over: Partial<RunDeps> = {}): RunDeps & { written: Map<string,
     postRequest: vi.fn(async () => {}),
     reserveAssignee: () => true,
     githubForDiscord: () => undefined,
+    discordForGithub: () => undefined,
     now: () => new Date("2026-07-06T01:00:00Z"),
     logger: createLogger([], () => {}),
     real: true,

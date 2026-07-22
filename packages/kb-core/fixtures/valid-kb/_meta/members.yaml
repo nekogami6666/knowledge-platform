@@ -1,6 +1,7 @@
 # メンバー対応表(github ↔ discord。ADR-0017 D3・§14#8: 各自が PR で申告)
 members:
-  - github: yamada
+  - name: 山田 太郎
+    github: yamada
     discord: "123456789012345678"
   - github: suzuki
     discord: "234567890123456789"

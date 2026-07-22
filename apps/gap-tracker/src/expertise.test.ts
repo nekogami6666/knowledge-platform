@@ -51,13 +51,14 @@ describe("selectAssignee の expertise 優先(preferred ∩ assignees → ラウ
     { github: "tanaka", discord: "2" },
   ];
 
-  it("preferred の先頭から assignees に居る人を優先する(yamada はプール外なので飛ばす)", () => {
-    const a = selectAssignee(assignees, 0, () => true, ["yamada", "suzuki"]);
+  // preferred は run.ts が github→discord へ写像した後の discord ID 配列(ADR-0022)。
+  it("preferred の先頭から assignees に居る人を優先する(プール外 discord は飛ばす)", () => {
+    const a = selectAssignee(assignees, 0, () => true, ["9", "1"]); // 9=プール外, 1=suzuki
     expect(a?.github).toBe("suzuki");
   });
 
   it("preferred が週上限ならラウンドロビンへフォールバック", () => {
-    const a = selectAssignee(assignees, 1, (g) => g !== "suzuki", ["suzuki"]);
+    const a = selectAssignee(assignees, 1, (d) => d !== "1", ["1"]); // suzuki(discord 1)満杯
     expect(a?.github).toBe("tanaka");
   });
 
@@ -66,17 +67,17 @@ describe("selectAssignee の expertise 優先(preferred ∩ assignees → ラウ
     expect(a?.github).toBe("tanaka"); // startIndex=1
   });
 
-  it("同じ人に tryReserve を二重に試さない(preferred とラウンドロビンの重複排除)", () => {
+  it("同じ人に tryReserve を二重に試さない(preferred とラウンドロビンの重複排除・discord キー)", () => {
     const calls: string[] = [];
     selectAssignee(
       assignees,
       0,
-      (g) => {
-        calls.push(g);
+      (d) => {
+        calls.push(d);
         return false;
       },
-      ["suzuki"],
+      ["1"], // suzuki の discord
     );
-    expect(calls).toEqual(["suzuki", "tanaka"]); // suzuki は 1 回だけ
+    expect(calls).toEqual(["1", "2"]); // suzuki(1) は 1 回だけ、次に tanaka(2)
   });
 });
