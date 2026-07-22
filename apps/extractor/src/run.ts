@@ -9,7 +9,7 @@ import { join } from "node:path";
 import { performance } from "node:perf_hooks";
 import type { FileChange, GhClient } from "@stratum/gh-client";
 import type { IdCounterStore, Source } from "@stratum/kb-core";
-import type { DecisionCandidate, LearningCandidate } from "./candidate.js";
+import type { DecisionCandidate, ExtractionResult, LearningCandidate } from "./candidate.js";
 import { mapWithLimit } from "./concurrency.js";
 import type { ExtractorConfig } from "./config.js";
 import { type ExtractorState, readState, serializeState } from "./cursor.js";
@@ -45,6 +45,8 @@ export interface RunDeps {
   realPr: boolean;
   /** reconcile の並列上限(⑱・§2-E。index.ts の EXTRACTOR_RECONCILE_CONCURRENCY・既定 4)。 */
   reconcileConcurrency: number;
+  /** 1 run で処理する最大ファイル数(ADR-0023 D3。既定=無制限。index.ts の EXTRACTOR_MAX_FILES)。 */
+  maxFilesPerRun?: number;
   /** 単調増加ミリ秒(段階別所要時間の計測。既定 performance.now。テストで注入)。 */
   monotonicMs?: () => number;
 }
@@ -76,6 +78,10 @@ export interface RunSummary {
   domains: DomainMetrics;
   timings?: StageTimings;
   fileCount: number;
+  /** 抽出失敗で skip し次回へ持ち越したファイル(ADR-0023 D4)。 */
+  skippedFiles: string[];
+  /** 上限(maxFilesPerRun)超過で今回処理しなかった件数(ADR-0023 D4)。 */
+  deferredCount: number;
 }
 
 function emptyCounts(): NotifyCounts {
@@ -84,6 +90,11 @@ function emptyCounts(): NotifyCounts {
 
 function emptyDomains(): DomainMetrics {
   return { candidateCount: 0, newDomains: [], reusedDomainCount: 0, nearDuplicates: [] };
+}
+
+/** 順序を保った重複除去(前回 pending ⧺ 今回 diff の合流用・ADR-0023 D2)。 */
+function dedupe(paths: readonly string[]): string[] {
+  return [...new Set(paths)];
 }
 
 /**
@@ -141,6 +152,8 @@ function buildPrBody(
   counts: NotifyCounts,
   domains: DomainMetrics,
   people: readonly string[],
+  skippedFiles: readonly string[],
+  deferredCount: number,
 ): string {
   const newDomains = domains.newDomains.length > 0 ? domains.newDomains.join(", ") : "なし";
   return [
@@ -156,6 +169,8 @@ function buildPrBody(
           .map((n) => `${n.domain}≈${n.near}`)
           .join(", ")}`
       : "",
+    deferredCount > 0 ? `- 次回持ち越し(上限超過): ${deferredCount} 件` : "",
+    skippedFiles.length > 0 ? `- ⚠️ 抽出失敗で skip(次回再試行): ${skippedFiles.join(", ")}` : "",
     people.length > 0 ? `関係者: ${people.join(", ")}` : "",
   ]
     .filter((l) => l.length > 0)
@@ -175,7 +190,8 @@ interface SourceBatch {
   headSha: string;
   promptName: string;
   label: string;
-  changed: string[];
+  /** 今回の処理対象 = dedupe(前回 pending ++ 今回 diff)。pending 先頭 → diff 順(ADR-0023 D2)。 */
+  workList: string[];
 }
 
 export async function runExtractor(deps: RunDeps): Promise<RunSummary> {
@@ -188,6 +204,25 @@ export async function runExtractor(deps: RunDeps): Promise<RunSummary> {
   const state = await readState(join(kbRoot, "_meta", "state.json"), deps.readFile);
 
   // ソース別 diff(§6.3 step1)。interviews は KB リポ内のディレクトリなので kb clone を diff する。
+  // work list = 前回持ち越し(pending)+ 今回 diff(dedupe)。カーソルは常に head へ前進するため、
+  // pending が無ければ diff は head からの新規のみになる(ADR-0023 D2)。
+  const minutesChanged = await changedSourceFiles(
+    synced.minutes.absDir,
+    state?.sources.minutes?.last_processed_sha ?? null,
+    minutesHead,
+    deps.exec,
+    { pathspec: "*.md", excludeBasenames: config.minutes.exclude },
+  );
+  const interviewsChanged = await changedSourceFiles(
+    kbRoot,
+    state?.sources.interviews?.last_processed_sha ?? null,
+    kbHead,
+    deps.exec,
+    {
+      pathspec: `${config.interviews.dir}/*.md`,
+      excludeDirs: config.interviews.exclude_dirs.map((d) => `${config.interviews.dir}/${d}`),
+    },
+  );
   const allBatches: SourceBatch[] = [
     {
       key: "minutes",
@@ -197,13 +232,7 @@ export async function runExtractor(deps: RunDeps): Promise<RunSummary> {
       headSha: minutesHead,
       promptName: "extract",
       label: "会議議事録",
-      changed: await changedSourceFiles(
-        synced.minutes.absDir,
-        state?.sources.minutes?.last_processed_sha ?? null,
-        minutesHead,
-        deps.exec,
-        { pathspec: "*.md", excludeBasenames: config.minutes.exclude },
-      ),
+      workList: dedupe([...(state?.sources.minutes?.pending ?? []), ...minutesChanged]),
     },
     {
       key: "interviews",
@@ -213,19 +242,10 @@ export async function runExtractor(deps: RunDeps): Promise<RunSummary> {
       headSha: kbHead,
       promptName: "extract-interview",
       label: "ナレッジインタビューの書き起こし",
-      changed: await changedSourceFiles(
-        kbRoot,
-        state?.sources.interviews?.last_processed_sha ?? null,
-        kbHead,
-        deps.exec,
-        {
-          pathspec: `${config.interviews.dir}/*.md`,
-          excludeDirs: config.interviews.exclude_dirs.map((d) => `${config.interviews.dir}/${d}`),
-        },
-      ),
+      workList: dedupe([...(state?.sources.interviews?.pending ?? []), ...interviewsChanged]),
     },
   ];
-  const batches = allBatches.filter((b) => b.changed.length > 0);
+  const batches = allBatches.filter((b) => b.workList.length > 0);
 
   if (batches.length === 0) {
     logger.info("変更された議事録・インタビューがありません。PR を作成しません。");
@@ -235,6 +255,8 @@ export async function runExtractor(deps: RunDeps): Promise<RunSummary> {
       counts: emptyCounts(),
       domains: emptyDomains(),
       fileCount: 0,
+      skippedFiles: [],
+      deferredCount: 0,
     };
   }
 
@@ -254,6 +276,8 @@ export async function runExtractor(deps: RunDeps): Promise<RunSummary> {
         counts: emptyCounts(),
         domains: emptyDomains(),
         fileCount: 0,
+        skippedFiles: [],
+        deferredCount: 0,
       };
     }
   }
@@ -272,17 +296,58 @@ export async function runExtractor(deps: RunDeps): Promise<RunSummary> {
   const domains = emptyDomains();
   const clock = deps.monotonicMs ?? (() => performance.now());
   const timings: StageTimings = { extractMs: 0, reconcileMs: 0, materializeMs: 0 };
+  // 1 run の処理上限(ADR-0023 D3)。既定=無制限。抽出に入った件数(read/抽出失敗も 1 件)で数える。
+  const maxFiles = deps.maxFilesPerRun ?? Number.POSITIVE_INFINITY;
+  let attempted = 0;
+  const skippedFiles: string[] = []; // 抽出失敗で今回 skip(次回持ち越し)。
+  let deferredCount = 0; // 上限超過で今回処理しなかった件数。
+  // source ごとの次回持ち越し(deferred + 失敗)。work list の順序を保つ。
+  const carryover = new Map<SourceBatch["key"], string[]>();
 
   for (const batch of batches) {
-    for (const path of batch.changed) {
-      const content = await deps.readFile(join(batch.root, path));
+    const pendingOut: string[] = []; // このソースで次回に持ち越すファイル(deferred + 失敗)。
+    for (const path of batch.workList) {
+      // 上限に達したら残りは処理せず持ち越す(ADR-0023 D3)。
+      if (attempted >= maxFiles) {
+        pendingOut.push(path);
+        deferredCount += 1;
+        continue;
+      }
+      attempted += 1;
+
+      let content: string;
+      try {
+        content = await deps.readFile(join(batch.root, path));
+      } catch (e) {
+        // 削除/改名された持ち越しファイル等。破棄(pending に残さない・ADR-0023 D1)。
+        logger.warn("ファイルを読めないため破棄", {
+          path,
+          error: e instanceof Error ? e.message : String(e),
+        });
+        continue;
+      }
       const participants = parseParticipants(content);
-      const tExtract = clock();
-      const { value: extraction } = await extractFromMinutes(
-        { repo: batch.repo, path, content, cwd: batch.root, label: batch.label },
-        { ...deps.extractDeps, existingDomains: [...domainSet], promptName: batch.promptName },
-      );
-      timings.extractMs += clock() - tExtract;
+
+      // 抽出はファイル単位で耐障害化(タイムアウト等の失敗は skip+持ち越し・ADR-0023 D1)。
+      // reconcile の候補単位 skip と同型だが、こちらはファイル 1 本を丸ごと次回へ回す。
+      let extraction: ExtractionResult;
+      try {
+        const tExtract = clock();
+        const r = await extractFromMinutes(
+          { repo: batch.repo, path, content, cwd: batch.root, label: batch.label },
+          { ...deps.extractDeps, existingDomains: [...domainSet], promptName: batch.promptName },
+        );
+        timings.extractMs += clock() - tExtract;
+        extraction = r.value;
+      } catch (e) {
+        logger.warn("抽出失敗のためファイルを skip(次回持ち越し)", {
+          path,
+          error: e instanceof Error ? e.message : String(e),
+        });
+        skippedFiles.push(path);
+        pendingOut.push(path);
+        continue;
+      }
       counts.openQuestions += extraction.openQuestions.length;
 
       const candidates = [...extraction.decisions, ...extraction.learnings];
@@ -343,6 +408,7 @@ export async function runExtractor(deps: RunDeps): Promise<RunSummary> {
       }
       timings.materializeMs += clock() - tMaterialize;
     }
+    if (pendingOut.length > 0) carryover.set(batch.key, pendingOut);
   }
   timings.extractMs = Math.round(timings.extractMs);
   timings.reconcileMs = Math.round(timings.reconcileMs);
@@ -352,6 +418,8 @@ export async function runExtractor(deps: RunDeps): Promise<RunSummary> {
     newDomains: domains.newDomains,
     reusedDomainCount: domains.reusedDomainCount,
     nearDuplicates: domains.nearDuplicates.length,
+    skippedFiles,
+    deferred: deferredCount,
     timings,
   });
 
@@ -359,18 +427,35 @@ export async function runExtractor(deps: RunDeps): Promise<RunSummary> {
     logger.info("materialize 対象がありません。PR を作成しません。", {
       openQuestions: counts.openQuestions,
     });
-    return { created: false, reason: "no-entries", counts, domains, timings, fileCount: 0 };
+    return {
+      created: false,
+      reason: "no-entries",
+      counts,
+      domains,
+      timings,
+      fileCount: 0,
+      skippedFiles,
+      deferredCount,
+    };
   }
 
   // clone に staging(validateRepo がディスクを読むため)+ カーソル/採番ファイルを PR に含める。
   for (const f of files) {
     await deps.writeFile(join(kbRoot, f.path), f.content);
   }
-  // 両ソースとも同期時 head まで処理済み(変更が無かった側も diff 済みなので取りこぼさない)。
+  // カーソルは常に head へ前進し、未処理分(上限超過・抽出失敗)は pending に持ち越す(ADR-0023 D2)。
+  const minutesPending = carryover.get("minutes") ?? [];
+  const interviewsPending = carryover.get("interviews") ?? [];
   const newState: ExtractorState = {
     sources: {
-      minutes: { last_processed_sha: minutesHead },
-      interviews: { last_processed_sha: kbHead },
+      minutes: {
+        last_processed_sha: minutesHead,
+        ...(minutesPending.length > 0 ? { pending: minutesPending } : {}),
+      },
+      interviews: {
+        last_processed_sha: kbHead,
+        ...(interviewsPending.length > 0 ? { pending: interviewsPending } : {}),
+      },
     },
     last_run_at: deps.now().toISOString(),
   };
@@ -391,6 +476,8 @@ export async function runExtractor(deps: RunDeps): Promise<RunSummary> {
       domains,
       timings,
       fileCount: files.length,
+      skippedFiles,
+      deferredCount,
     };
   }
 
@@ -400,7 +487,16 @@ export async function runExtractor(deps: RunDeps): Promise<RunSummary> {
       files: files.length,
       title,
     });
-    return { created: false, reason: "dry-run", counts, domains, timings, fileCount: files.length };
+    return {
+      created: false,
+      reason: "dry-run",
+      counts,
+      domains,
+      timings,
+      fileCount: files.length,
+      skippedFiles,
+      deferredCount,
+    };
   }
 
   const pr = await deps.gh.createPullRequest({
@@ -408,10 +504,19 @@ export async function runExtractor(deps: RunDeps): Promise<RunSummary> {
     head: `extract/${runKey}`,
     base: config.base_branch,
     title,
-    body: buildPrBody(counts, domains, [...people]),
+    body: buildPrBody(counts, domains, [...people], skippedFiles, deferredCount),
     files,
   });
   await deps.notifier.notifyPrCreated({ prUrl: pr.url, counts, people: [...people] });
   logger.info("抽出 PR を作成しました。", { prUrl: pr.url, files: files.length });
-  return { created: true, prUrl: pr.url, counts, domains, timings, fileCount: files.length };
+  return {
+    created: true,
+    prUrl: pr.url,
+    counts,
+    domains,
+    timings,
+    fileCount: files.length,
+    skippedFiles,
+    deferredCount,
+  };
 }

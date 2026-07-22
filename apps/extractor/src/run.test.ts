@@ -348,4 +348,134 @@ describe("runExtractor", () => {
     expect(typeof r.timings?.reconcileMs).toBe("number");
     expect(r.timings?.reconcileMs).toBeGreaterThanOrEqual(0);
   });
+
+  it("抽出失敗のファイルは skip して完走し、次回へ持ち越す(ADR-0023 D1)", async () => {
+    const gh = makeGh();
+    const prompt = { read: async () => "---\nrole: standard\n---\nR" };
+    const r = await runExtractor(
+      makeDeps({
+        gh,
+        exec: async (args: readonly string[]) =>
+          args.includes("interviews/*.md") ? { stdout: "" } : { stdout: "a.md\nb.md\n" },
+        readFile: async (p) => {
+          if (p === "/m/a.md") return "# 会議\n参加者: x\nPOISON 抽出でタイムアウトする議事録。";
+          if (p === "/m/b.md") return "# 会議\n参加者: y\n湿度しきい値を 40%RH に更新。";
+          if (p === "/kb/_meta/id-counter.json") return JSON.stringify({ kb: { "2026": 144 } });
+          throw new Error(`ENOENT ${p}`);
+        },
+        extractDeps: {
+          promptStore: prompt,
+          search: async (opts) => {
+            if (opts.prompt.includes("POISON")) {
+              throw new Error("Agent SDK query が 300000ms でタイムアウトしました");
+            }
+            return { value: oneLearning, usage: { inputTokens: 1, outputTokens: 1 } };
+          },
+        },
+      }),
+    );
+    expect(r.created).toBe(true); // b.md は抽出成功 → PR は出る
+    expect(r.skippedFiles).toEqual(["a.md"]);
+    expect(r.counts.new).toBe(1);
+    const arg = vi.mocked(gh.createPullRequest).mock.calls[0]?.[0];
+    const state = JSON.parse(arg?.files.find((f) => f.path === "_meta/state.json")?.content ?? "");
+    // カーソルは head へ前進し、失敗した a.md は pending に持ち越す。
+    expect(state.sources.minutes).toEqual({ last_processed_sha: HEAD, pending: ["a.md"] });
+  });
+
+  it("maxFilesPerRun を超えた分は今回処理せず持ち越す(ADR-0023 D3)", async () => {
+    const gh = makeGh();
+    const prompt = { read: async () => "---\nrole: standard\n---\nR" };
+    const r = await runExtractor(
+      makeDeps({
+        gh,
+        maxFilesPerRun: 2,
+        exec: async (args: readonly string[]) =>
+          args.includes("interviews/*.md") ? { stdout: "" } : { stdout: "a.md\nb.md\nc.md\n" },
+        readFile: async (p) => {
+          if (p === "/m/a.md") return "# 会議\nAAA";
+          if (p === "/m/b.md") return "# 会議\nBBB";
+          if (p === "/m/c.md") return "# 会議\nCCC";
+          if (p === "/kb/_meta/id-counter.json") return JSON.stringify({ kb: { "2026": 144 } });
+          throw new Error(`ENOENT ${p}`);
+        },
+        extractDeps: {
+          promptStore: prompt,
+          search: async (opts) => ({
+            value: opts.prompt.includes("AAA")
+              ? extractionWithDomain("da")
+              : opts.prompt.includes("BBB")
+                ? extractionWithDomain("db")
+                : extractionWithDomain("dc"),
+            usage: { inputTokens: 1, outputTokens: 1 },
+          }),
+        },
+      }),
+    );
+    expect(r.created).toBe(true);
+    expect(r.deferredCount).toBe(1);
+    const arg = vi.mocked(gh.createPullRequest).mock.calls[0]?.[0];
+    const state = JSON.parse(arg?.files.find((f) => f.path === "_meta/state.json")?.content ?? "");
+    expect(state.sources.minutes).toEqual({ last_processed_sha: HEAD, pending: ["c.md"] });
+    // 上限で c.md は未処理 = domain dc は作られない。
+    const paths = arg?.files.map((f) => f.path) ?? [];
+    expect(paths.some((p) => p.includes("/dc/"))).toBe(false);
+  });
+
+  it("前回 pending は work list 先頭で処理する(diff が空でも no-changes にしない・ADR-0023 D2)", async () => {
+    const gh = makeGh();
+    const r = await runExtractor(
+      makeDeps({
+        gh,
+        exec: async () => ({ stdout: "" }), // 両ソースとも diff 空
+        readFile: async (p) => {
+          if (p === "/kb/_meta/state.json") {
+            return JSON.stringify({
+              sources: { minutes: { last_processed_sha: "oldsha", pending: ["p.md"] } },
+              last_run_at: "2026-07-01T00:00:00.000Z",
+            });
+          }
+          if (p === "/m/p.md") return "# 会議\n参加者: z\n湿度しきい値を 40%RH に更新。";
+          if (p === "/kb/_meta/id-counter.json") return JSON.stringify({ kb: { "2026": 144 } });
+          throw new Error(`ENOENT ${p}`);
+        },
+      }),
+    );
+    expect(r.created).toBe(true);
+    expect(r.reason).toBeUndefined();
+    const arg = vi.mocked(gh.createPullRequest).mock.calls[0]?.[0];
+    const state = JSON.parse(arg?.files.find((f) => f.path === "_meta/state.json")?.content ?? "");
+    // p.md 処理済み → pending は消え、カーソルは head。
+    expect(state.sources.minutes).toEqual({ last_processed_sha: HEAD });
+  });
+
+  it("読めない pending は破棄して pending から外す(無限再キュー防止・ADR-0023 D1)", async () => {
+    const gh = makeGh();
+    const logs: string[] = [];
+    const r = await runExtractor(
+      makeDeps({
+        gh,
+        logger: createLogger([], (l) => logs.push(l)),
+        exec: async (args: readonly string[]) =>
+          args.includes("interviews/*.md") ? { stdout: "" } : { stdout: "ok.md\n" },
+        readFile: async (p) => {
+          if (p === "/kb/_meta/state.json") {
+            return JSON.stringify({
+              sources: { minutes: { last_processed_sha: "oldsha", pending: ["gone.md"] } },
+              last_run_at: "2026-07-01T00:00:00.000Z",
+            });
+          }
+          if (p === "/m/ok.md") return "# 会議\n参加者: z\n湿度しきい値を 40%RH に更新。";
+          if (p === "/kb/_meta/id-counter.json") return JSON.stringify({ kb: { "2026": 144 } });
+          throw new Error(`ENOENT ${p}`); // gone.md を含む
+        },
+      }),
+    );
+    expect(r.created).toBe(true);
+    expect(r.skippedFiles).toEqual([]); // read 失敗は「持ち越し」ではなく「破棄」
+    const arg = vi.mocked(gh.createPullRequest).mock.calls[0]?.[0];
+    const state = JSON.parse(arg?.files.find((f) => f.path === "_meta/state.json")?.content ?? "");
+    expect(state.sources.minutes).toEqual({ last_processed_sha: HEAD }); // gone.md は pending に残らない
+    expect(logs.some((l) => l.includes("読めない"))).toBe(true);
+  });
 });

@@ -21,6 +21,8 @@ on:
 jobs:
   extract:
     runs-on: ubuntu-latest
+    # 暴走時のコスト上限(通常は EXTRACTOR_MAX_FILES で早く終わる)。ADR-0023 D3。
+    timeout-minutes: 180
     steps:
       - uses: actions/checkout@v4
         with:
@@ -77,6 +79,10 @@ jobs:
           CONFIG_DIR: ${{ github.workspace }}/apps/extractor/config
           CLONES_DIR: ${{ github.workspace }}/.clones
           PROMPTS_DIR: ${{ github.workspace }}/prompts
+          # LLM 1 呼び出しのタイムアウト。既定 300000(5 分)では大きな議事録が落ちるため 10 分へ(ADR-0023 D3)。
+          EXTRACTOR_TIMEOUT_MS: "600000"
+          # 夜間 1 回あたりの処理ファイル上限。バックログを少量ずつ・有界コストで消化する(ADR-0023 D3)。
+          EXTRACTOR_MAX_FILES: "5"
           # 実 PR を出すときのみ設定(既定は dry-run)。初回 GO は人間判断(ADR-0013 D1(d)・runbook 参照)。
           # EXTRACTOR_REAL_PR: "1"
         run: pnpm --filter @stratum/extractor start
