@@ -8,7 +8,13 @@
 import { readFile as fsReadFile } from "node:fs/promises";
 import { z } from "zod";
 
-const sourceCursorSchema = z.object({ last_processed_sha: z.string().min(1) }).strict();
+const sourceCursorSchema = z
+  .object({
+    last_processed_sha: z.string().min(1),
+    /** 上限超過・抽出失敗で次回へ持ち越すファイル(repo 相対パス)。空なら省略(ADR-0023 D2)。 */
+    pending: z.array(z.string()).optional(),
+  })
+  .strict();
 export type SourceCursor = z.infer<typeof sourceCursorSchema>;
 
 const currentStateSchema = z

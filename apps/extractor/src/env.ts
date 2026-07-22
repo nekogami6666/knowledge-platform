@@ -24,6 +24,8 @@ const envSchema = z
     EXTRACTOR_TIMEOUT_MS: z.string().optional(),
     /** reconcile の並列上限(正の整数)。不正値/未設定は既定 4(index.ts で解釈)。 */
     EXTRACTOR_RECONCILE_CONCURRENCY: z.string().optional(),
+    /** 1 run で処理する最大ファイル数(正の整数)。未設定/不正値は無制限(index.ts で解釈・ADR-0023 D3)。 */
+    EXTRACTOR_MAX_FILES: z.string().optional(),
     CLONES_DIR: z.string().default("./.clones"),
     CONFIG_DIR: z.string().default("./config"),
     PROMPTS_DIR: z.string().default("./prompts"),

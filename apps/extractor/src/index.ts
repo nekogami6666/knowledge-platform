@@ -64,6 +64,19 @@ async function main(): Promise<void> {
   const concurrency = parsePositiveInt(env.EXTRACTOR_RECONCILE_CONCURRENCY, 4);
   if (concurrency.warning !== undefined)
     logger.warn(concurrency.warning, { env: "EXTRACTOR_RECONCILE_CONCURRENCY" });
+  // 未設定は無制限(undefined)。設定時のみ正の整数として解釈し、不正値は無制限へフォールバック(ADR-0023 D3)。
+  let maxFilesPerRun: number | undefined;
+  if (env.EXTRACTOR_MAX_FILES !== undefined && env.EXTRACTOR_MAX_FILES.trim() !== "") {
+    const parsed = parsePositiveInt(env.EXTRACTOR_MAX_FILES, 0);
+    if (parsed.value > 0) maxFilesPerRun = parsed.value;
+    else
+      logger.warn(
+        `不正な EXTRACTOR_MAX_FILES "${env.EXTRACTOR_MAX_FILES}" のため無制限で実行します`,
+        {
+          env: "EXTRACTOR_MAX_FILES",
+        },
+      );
+  }
 
   const summary = await runExtractor({
     config,
@@ -85,11 +98,14 @@ async function main(): Promise<void> {
     logger,
     realPr,
     reconcileConcurrency: concurrency.value,
+    maxFilesPerRun,
   });
   logger.info("extractor 完了", {
     created: summary.created,
     reason: summary.reason,
     files: summary.fileCount,
+    skipped: summary.skippedFiles.length,
+    deferred: summary.deferredCount,
   });
 }
 

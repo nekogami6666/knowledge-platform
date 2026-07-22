@@ -466,6 +466,8 @@ Discord Gateway(WebSocket)受信とボタンインタラクションには常駐
 5. Discord の #stratum-ops に PR リンクを投稿し、当該議事録の会議参加者をメンション。「内容に問題なければ 👍(Bot が代理マージ)、修正したければ PR 上で直接編集」
 6. `state.json` を更新 commit
 
+> **完走保証と部分処理(ADR-0023)**: 1 ファイルの抽出失敗(タイムアウト等)は run 全体を落とさず skip し次回へ持ち越す。1 run の処理上限は `EXTRACTOR_MAX_FILES`(既定無制限・CI で少量ずつバックログを消化)。カーソルは常に head へ前進し、未処理分(上限超過・失敗)は `state.json` の source ごとの `pending`(任意配列)に保存する。skip / 持ち越しは PR 本文とログに出す。
+
 **プロンプト上の重要ルール**(prompts/extractor/ に格納):
 - 「何を決めたか」だけの決定は confidence: low とし、「なぜ・代替案」が取れたものを優先する
 - 人事・評価・給与・特定個人の health 情報に該当する箇所は抽出対象から除外する(§9.3 の除外規程を system prompt に埋め込む)
