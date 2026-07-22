@@ -4,6 +4,7 @@
  * ADR-0013 D1(b))。これで 3 つ目の consumer になったため共有パッケージへの統合が必要 —
  * 独立 PR で行う(この PR では複製で進める・§2-F 方針)。
  */
+import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
 
 export type GitExec = (args: readonly string[], cwd: string) => Promise<{ stdout: string }>;
@@ -23,6 +24,8 @@ export async function syncKb(
   clonesDir: string,
   exec: GitExec,
 ): Promise<SyncedKb> {
+  // clone は cwd=clonesDir で走るため親を先に用意する(app 別 CLONES_DIR は初回に不在・R3)。
+  await mkdir(clonesDir, { recursive: true });
   const absDir = join(clonesDir, opts.dir);
   // 対象 dir が「自身が toplevel の独立リポ」か(cwd が toplevel のときだけ --git-dir は相対 ".git")。
   // --is-inside-work-tree は親リポの内側でも true になり、fetch + reset --hard が親リポ全体を

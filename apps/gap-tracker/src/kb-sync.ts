@@ -3,6 +3,7 @@
  * トークンを .git/config に永続化しない(clone 後 set-url scrub・fetch は URL 引数・ADR-0013 D1(b))。
  * 2つ目の consumer になったため、3つ目が現れたら共有パッケージへ統合する(TODO・§2-F 方針)。
  */
+import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
 
 export type GitExec = (args: readonly string[], cwd: string) => Promise<{ stdout: string }>;
@@ -22,6 +23,8 @@ export async function syncKb(
   clonesDir: string,
   exec: GitExec,
 ): Promise<SyncedKb> {
+  // clone は cwd=clonesDir で走るため親を先に用意する(app 別 CLONES_DIR は初回に不在・R3)。
+  await mkdir(clonesDir, { recursive: true });
   const absDir = join(clonesDir, opts.dir);
   // 対象 dir が「自身が toplevel の独立リポ」か(cwd が toplevel のときだけ --git-dir は相対 ".git")。
   // --is-inside-work-tree は親リポの内側でも true になり、fetch + reset --hard が親リポ全体を

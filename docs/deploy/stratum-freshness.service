@@ -16,7 +16,10 @@ WorkingDirectory=__REPO_DIR__
 # シークレット(GITHUB_TOKEN / DISCORD_OPS_WEBHOOK)は chmod 600 の env ファイルから(§9.1)。
 EnvironmentFile=__ENV_FILE__
 Environment=CONFIG_DIR=__REPO_DIR__/apps/freshness-checker/config
-Environment=CLONES_DIR=__DATA_DIR__/clones
+# clone は app 専用ディレクトリ(bot の /clones・gap-tracker の clones-gap と分離)。共有すると
+# bot の /ask 同期の git clean が本 app の validateRepo 前 staging を消しうる(検証バイパス)。
+Environment=CLONES_DIR=__DATA_DIR__/clones-freshness
+# bot.db は共有(bot と同じ SQLite・WAL + busy_timeout)。ここだけ分離しない。
 Environment=DB_PATH=__DATA_DIR__/data/bot.db
 # 実キュー投入 + 実 commit は明示 opt-in(初回は外して dry-run 検証)。
 # Environment=FRESHNESS_REAL=1

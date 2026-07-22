@@ -15,7 +15,10 @@ WorkingDirectory=__REPO_DIR__
 # シークレット(GITHUB_TOKEN / DISCORD_GAP_WEBHOOK)は chmod 600 の env ファイルから(§9.1)。
 EnvironmentFile=__ENV_FILE__
 Environment=CONFIG_DIR=__REPO_DIR__/apps/gap-tracker/config
-Environment=CLONES_DIR=__DATA_DIR__/clones
+# clone は app 専用ディレクトリ(bot の /clones と分離)。共有すると bot の /ask 同期の
+# git clean が本 app の validateRepo 前 staging を消し、未検証 commit が入りうる(検証バイパス)。
+Environment=CLONES_DIR=__DATA_DIR__/clones-gap
+# bot.db は共有(bot と同じ SQLite・WAL + busy_timeout)。ここだけ分離しない。
 Environment=DB_PATH=__DATA_DIR__/data/bot.db
 # 実 commit + 実依頼は明示 opt-in(初回は外して dry-run 検証)。
 # Environment=GAP_TRACKER_REAL=1

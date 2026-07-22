@@ -3,13 +3,22 @@ import { access, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { type GitExec, stripCredentials, syncKb } from "./kb-sync.js";
 
 const execFileAsync = promisify(execFile);
 
 const TOKEN_URL = "https://x-access-token:SECRET@github.com/org/knowledge-base.git";
 const CLEAN_URL = "https://github.com/org/knowledge-base.git";
+
+// syncKb は実 mkdir(clonesDir) を行うため、fake テストでも書き込める実 tmp dir を使う。
+let c: string;
+beforeEach(async () => {
+  c = await mkdtemp(join(tmpdir(), "gap-kbsync-fake-"));
+});
+afterEach(async () => {
+  await rm(c, { recursive: true, force: true });
+});
 
 /** exec 記録 fake。existing=false は --git-dir probe を throw(未 clone)、true は独立リポ(".git")。 */
 function fakeExec(existing: boolean): { exec: GitExec; calls: string[][] } {
@@ -35,18 +44,14 @@ describe("stripCredentials", () => {
 describe("syncKb(トークン非永続化・ADR-0013 D1(b) と同流儀)", () => {
   it("新規 clone 後に remote URL をトークン無しへ差し替える", async () => {
     const { exec, calls } = fakeExec(false);
-    const r = await syncKb(
-      { dir: "knowledge-base", url: TOKEN_URL, baseBranch: "main" },
-      "/c",
-      exec,
-    );
+    const r = await syncKb({ dir: "knowledge-base", url: TOKEN_URL, baseBranch: "main" }, c, exec);
     expect(r.resolvedCommit).toBe("abc123");
     expect(calls.some((a) => a[0] === "clone")).toBe(true);
     expect(calls).toContainEqual(["remote", "set-url", "origin", CLEAN_URL]);
   });
   it("既存 clone + url は URL 引数 fetch + FETCH_HEAD reset + 未追跡残骸の clean", async () => {
     const { exec, calls } = fakeExec(true);
-    await syncKb({ dir: "knowledge-base", url: TOKEN_URL, baseBranch: "main" }, "/c", exec);
+    await syncKb({ dir: "knowledge-base", url: TOKEN_URL, baseBranch: "main" }, c, exec);
     expect(calls).toContainEqual(["fetch", TOKEN_URL, "main"]);
     expect(calls).toContainEqual(["reset", "--hard", "FETCH_HEAD"]);
     // reset --hard は未追跡ファイルを消さない。dry-run staging の残骸が冪等スキャンに
@@ -58,11 +63,11 @@ describe("syncKb(トークン非永続化・ADR-0013 D1(b) と同流儀)", () =>
   });
   it("url 無し・clone 未存在は throw", async () => {
     const { exec } = fakeExec(false);
-    await expect(syncKb({ dir: "kb", baseBranch: "main" }, "/c", exec)).rejects.toThrow();
+    await expect(syncKb({ dir: "kb", baseBranch: "main" }, c, exec)).rejects.toThrow();
   });
   it("url 無し・既存 dir は fetch/reset/clean せず rev-parse のみ(破壊的 clean を走らせない)", async () => {
     const { exec, calls } = fakeExec(true);
-    const r = await syncKb({ dir: "knowledge-base", baseBranch: "main" }, "/c", exec);
+    const r = await syncKb({ dir: "knowledge-base", baseBranch: "main" }, c, exec);
     expect(r.resolvedCommit).toBe("abc123");
     expect(
       calls.some(
@@ -80,7 +85,7 @@ describe("syncKb(トークン非永続化・ADR-0013 D1(b) と同流儀)", () =>
       return { stdout: "abc123\n" };
     };
     await expect(
-      syncKb({ dir: "knowledge-base", url: TOKEN_URL, baseBranch: "main" }, "/c", exec),
+      syncKb({ dir: "knowledge-base", url: TOKEN_URL, baseBranch: "main" }, c, exec),
     ).rejects.toThrow(/独立した git リポではありません/);
     expect(
       calls.some(
