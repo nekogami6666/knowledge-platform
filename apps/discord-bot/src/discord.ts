@@ -608,19 +608,24 @@ export async function warmDmChannels(
   try {
     const { members } = await getMembers();
     let warmed = 0;
+    let total = 0;
     for (const member of members) {
-      try {
-        await client.users.createDM(member.discord);
-        warmed += 1;
-      } catch (err) {
-        // DM を開けない(相手の設定等)のは準正常系 — 該当者のリアクション応答だけが効かない。
-        logger.warn({ err, github: member.github }, "DM チャンネルのウォームに失敗しました");
+      // primary + 別名 Discord の両方を温める(1 人で複数アカウント・ADR-0021 D2)。
+      for (const discordId of [member.discord, ...(member.discord_alts ?? [])]) {
+        total += 1;
+        try {
+          await client.users.createDM(discordId);
+          warmed += 1;
+        } catch (err) {
+          // DM を開けない(相手の設定等)のは準正常系 — 該当者のリアクション応答だけが効かない。
+          logger.warn(
+            { err, github: member.github, discord: discordId },
+            "DM チャンネルのウォームに失敗しました",
+          );
+        }
       }
     }
-    logger.info(
-      { warmed, total: members.length },
-      "DM チャンネルをキャッシュしました(リアクション受信対策)",
-    );
+    logger.info({ warmed, total }, "DM チャンネルをキャッシュしました(リアクション受信対策)");
   } catch (err) {
     logger.warn({ err }, "DM チャンネルのウォームをスキップしました(members 読込失敗)");
   }

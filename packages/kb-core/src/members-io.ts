@@ -27,12 +27,16 @@ export function parseMembers(raw: string, file?: string): Members {
   return result.data;
 }
 
-/** Discord ユーザ ID → GitHub ユーザ名(未登載は undefined)。 */
+/** Discord ユーザ ID → GitHub ユーザ名(primary/別名のどちらでも一致・ADR-0021 D2。未登載は undefined)。 */
 export function githubForDiscord(members: Members, discordId: string): string | undefined {
-  return members.members.find((m) => m.discord === discordId)?.github;
+  return members.members.find(
+    (m) => m.discord === discordId || (m.discord_alts?.includes(discordId) ?? false),
+  )?.github;
 }
 
-/** GitHub ユーザ名 → Discord ユーザ ID(未登載は undefined)。 */
+/** GitHub ユーザ名 → Discord ユーザ ID(primary/別名のどちらでも一致・ADR-0021 D2。未登載は undefined)。 */
 export function discordForGithub(members: Members, github: string): string | undefined {
-  return members.members.find((m) => m.github === github)?.discord;
+  return members.members.find(
+    (m) => m.github === github || (m.github_alts?.includes(github) ?? false),
+  )?.discord;
 }
