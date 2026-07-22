@@ -258,7 +258,7 @@ owner: yamada                # 鮮度確認の宛先。原則 people の筆頭
 設計上の注意:
 - `type: decision` の本体は `decisions/` に置き、`knowledge/` には置かない(重複防止)。`knowledge/**` 内の `type: decision` は `validateRepo` がエラー検出する(ADR-0003 D3)
 - `review_interval_days` の `decision`=∞(鮮度確認対象外)は、値ではなくキー省略(null)で表現する(ADR-0003 D4)
-- 人物識別子は **GitHub ユーザ名に統一**し、Discord ID とのマッピングは KB `_meta/members.yaml` を唯一の正とする(各自が申告で PR 編集。discord-bot は KB clone から都度読む・ADR-0017 D3)
+- 人物識別子は **GitHub ユーザ名に統一**し、Discord ID とのマッピングは KB `_meta/members.yaml` を唯一の正とする(各自が申告で PR 編集。discord-bot は KB clone から都度読む・ADR-0017 D3)。**GitHub 未所持のメンバーは `github` を省略し Discord ID を識別子とする**。1 人が複数の GitHub / Discord アカウントを持つ場合は `github_alts` / `discord_alts` で束ねる(ADR-0021)
 - ID は不変。ファイル名変更(slug 変更)があっても ID で参照する
 
 ### 4.3 Decision Record スキーマ
@@ -791,7 +791,7 @@ KPI(§1.4)の月次レビュー、ゴールデンセット拡充、embedding 移
 | 5 | pr-miner の対象開発リポジトリ一覧 | 開発リーダー | Phase 3 着手前 |
 | 6 | ~~knowledge/ 直下の初期ドメイン分類(5〜7 個)~~ **決定済み(2026-06-10)**: §4.1.2 の 5 分類(hardware / software / wetlab / ops / failures)を暫定採用し運用開始。分類の再編はエージェントによる後付け再編方針(§実装ロードマップ末尾の注意)に従う | - | 済 |
 | 7 | ~~プロジェクト正式名称(`stratum` 継続可否)~~ **決定済み(2026-06-10)**: `stratum` を正式名称とする(パッケージスコープ @stratum として実装に反映済み) | - | 済 |
-| 8 | メンバーの GitHub ↔ Discord ID マッピング表(申告先 = KB `_meta/members.yaml` に各自 PR・ADR-0017 D3) | 各自申告 | Phase 1 着手前 |
+| 8 | メンバーの GitHub ↔ Discord ID マッピング表(申告先 = KB `_meta/members.yaml` に各自 PR・ADR-0017 D3。`github` 省略可・複数アカウントは `github_alts`/`discord_alts`・ADR-0021) | 各自申告 | Phase 1 着手前 |
 | 9 | GitHub Organization(Team プラン)への移行判断。ブランチ保護の強制(ADR-0004 D2)と GitHub App の組織インストール(§9.1)の前提になる | 経営 | Phase 2 着手前 |
 
 ---
