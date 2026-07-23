@@ -1,11 +1,11 @@
 # ADR-0020: voice-memo の第 2 入口として VC 録音を追加する(recorder sidecar 流用)
 
-- **ステータス**: proposed
+- **ステータス**: accepted(2026-07-23 人間承認)
 - **日付**: 2026-07-17
 - **関連**: design.md §6.4 ③-b(voice-memo)・§1.3(非目標)・§2 P1/P3/P7 /
   ADR-0015(STT = OpenAI 直呼び・添付方式・D6 分割なし)・ADR-0016(bot compose)/
   QB-Meeting-Ops `docs/recorder-sidecar-http-contract.md`(録音 sidecar の HTTP 契約)
-- **備考**: 採択(`accepted`)と design.md §6.4/§1.3 の転記は人間レビューで行う。
+- **備考**: 採択済み(人間承認 2026-07-23)。design.md §6.4/§1.3 への転記は人間タスクとして残る。
 
 ## 背景
 

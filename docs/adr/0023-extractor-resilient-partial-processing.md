@@ -1,6 +1,6 @@
 # ADR-0023: extractor は 1 ファイルの失敗で落とさず、上限 N 件 + 持ち越し(pending カーソル)で完走する
 
-- **ステータス**: proposed(本 PR のレビューをもって accepted 化・§6.3 転記は人間レビューで確定)
+- **ステータス**: accepted(2026-07-23 人間承認。§6.3 転記は人間タスクとして残る)
 - **日付**: 2026-07-23
 - **関連**: design.md §6.3(C2 抽出フロー)・§4.1.2/§7.1(state.json カーソル)/
   ADR-0009(Claude on AWS)・ADR-0013(Actions エフェメラル runner の実行境界)・ADR-0004 D2(push 前 validateRepo)/

@@ -1,12 +1,12 @@
 # ADR-0022: 回答者候補(assignee)を Discord 主キー化し、members.yaml に表示名(`name`)を追加する
 
-- **ステータス**: proposed
+- **ステータス**: accepted(2026-07-23 人間承認)
 - **日付**: 2026-07-23
 - **関連**: [ADR-0017](0017-expertise-mapper-actions.md) D3(members 単一ソース・assignees プール)/
   [ADR-0021](0021-members-schema-optional-github-and-alts.md)(`github` optional 化)/
   design.md §4.2(人物識別子)・§4.4(questions frontmatter)・§6.5(gap-tracker)/
   `apps/gap-tracker/src/{config,question,run,index,close}.ts`・`packages/kb-core/src/{schemas/members,members-io,schemas/question-log}.ts`
-- **備考**: 採択(`accepted`)および design.md への転記は人間レビューで行う。
+- **備考**: 採択済み(人間承認 2026-07-23)。design.md への転記は人間タスクとして残る。
 
 ## 背景
 
