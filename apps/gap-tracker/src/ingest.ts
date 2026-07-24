@@ -50,6 +50,12 @@ export interface IngestDeps {
 export interface IngestItem {
   questionId: string;
   entryId: string;
+  /**
+   * 起票時刻(同一性トークン・issue #92)。close が answered へ移す前に KB 質問の asked_at と照合し、
+   * ID 再利用(KB 巻き戻し等)で別質問に化けた questionId への誤移動を防ぐ。id は _meta/id-counter 由来で
+   * 再発番されうるが asked_at は不変・必須・TZ 付き高精度。
+   */
+  asked_at: string;
 }
 
 export interface IngestSummary {
@@ -131,7 +137,11 @@ export async function runAnswerIngestion(deps: IngestDeps): Promise<IngestSummar
     const content = serializeEntry({ frontmatter: built.frontmatter, body: built.body });
     await deps.writeFile(join(kb.absDir, built.path), content); // validateRepo がディスクを読む
     files.push({ path: built.path, content });
-    items.push({ questionId: payload.questionId, entryId: id });
+    items.push({
+      questionId: payload.questionId,
+      entryId: id,
+      asked_at: question.frontmatter.asked_at,
+    });
     doneIds.push(action.id);
     notifyLines.push(`- ${payload.questionId} → ${id}(${built.frontmatter.domain})`);
   }

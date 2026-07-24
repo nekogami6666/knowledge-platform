@@ -21,7 +21,17 @@ import type { Logger } from "./logger.js";
 export const gapPrPayloadSchema = z.object({
   prNumber: z.number().int().positive(),
   prRepo: z.string().min(1),
-  items: z.array(z.object({ questionId: z.string().min(1), entryId: z.string().min(1) })).min(1),
+  items: z
+    .array(
+      z.object({
+        questionId: z.string().min(1),
+        entryId: z.string().min(1),
+        // 整合トークン(issue #92)。移動前に KB 質問の asked_at と照合し ID 再利用の誤移動を防ぐ。
+        // 旧台帳(asked_at 無し)との後方互換のため optional。
+        asked_at: z.string().optional(),
+      }),
+    )
+    .min(1),
 });
 export type GapPrPayload = z.infer<typeof gapPrPayloadSchema>;
 
@@ -50,6 +60,8 @@ export interface AnsweredMove {
   openPath: string;
   content: string;
   askedBy: string;
+  /** KB 上の質問の asked_at(整合ガードの照合キー・issue #92)。 */
+  askedAt: string;
 }
 
 /** open の質問 raw → answered への移動(status:answered + resulting_kb を付す)。純関数。 */
@@ -67,6 +79,7 @@ export function buildAnsweredMove(
     openPath,
     content: serializeEntry({ frontmatter: moved, body: parsed.body }),
     askedBy: fm.asked_by,
+    askedAt: fm.asked_at,
   };
 }
 
@@ -194,45 +207,65 @@ export async function runFlywheelClose(deps: CloseDeps): Promise<CloseSummary> {
   const kb = await deps.syncKb();
 
   // --- (A) merged gap_pr → answered 移動 + 質問者通知 ---
+  // getPullRequest(gh)を使うため real 時のみ実行する。dry-run は merged を判定できず、gh に触れると
+  // nullGhClient が throw する(issue #92 Bug B: 台帳非空 + dry-run で毎朝 exit 1 になっていた)。
+  // dry-run では moveFiles 空のまま (B) と共に計画ログへ。gh 不使用の (B) は real/dry 問わず走る。
   const ledger = store.listPendingActions("gap_pr").filter((a) => a.state === "pending");
   const moveFiles: FileChange[] = [];
   const moveDeletions: string[] = [];
   const askerNotifies: string[] = [];
   const ledgerDone: string[] = [];
-  for (const action of ledger) {
-    const parsed = gapPrPayloadSchema.safeParse(safeJsonParse(action.payloadJson));
-    if (!parsed.success) {
-      store.markActionDone(action.id);
-      summary.skipped += 1;
-      continue;
-    }
-    const { prRepo, prNumber, items } = parsed.data;
-    const pr = await deps.gh.getPullRequest(prRepo, prNumber);
-    if (!pr.merged) {
-      if (pr.state === "closed") {
-        // マージされず閉じられた(却下)。台帳は畳む(質問は open のままリマインド対象)。
-        logger.warn("ナレッジ化 PR がマージされず閉じられました", { prNumber });
+  if (deps.real) {
+    for (const action of ledger) {
+      const parsed = gapPrPayloadSchema.safeParse(safeJsonParse(action.payloadJson));
+      if (!parsed.success) {
         store.markActionDone(action.id);
+        summary.skipped += 1;
+        continue;
       }
-      continue; // open のままなら次回に持ち越し
+      const { prRepo, prNumber, items } = parsed.data;
+      const pr = await deps.gh.getPullRequest(prRepo, prNumber);
+      if (!pr.merged) {
+        if (pr.state === "closed") {
+          // マージされず閉じられた(却下)。台帳は畳む(質問は open のままリマインド対象)。
+          logger.warn("ナレッジ化 PR がマージされず閉じられました", { prNumber });
+          store.markActionDone(action.id);
+        }
+        continue; // open のままなら次回に持ち越し
+      }
+      let anyMismatch = false;
+      for (const item of items) {
+        const raw = await deps.readQuestionRaw(kb.absDir, item.questionId);
+        if (raw === null) continue; // 既に移動済み(次回のためこの item は無害にスキップ)
+        const move = buildAnsweredMove(raw, item.entryId, item.questionId);
+        // 整合ガード(issue #92 Bug A): 台帳の asked_at と KB 質問の asked_at が食い違えば、その
+        // questionId は ID 再利用(KB 巻き戻し等)で別質問に化けている。誤移動を防ぐため skip + warn。
+        // 旧台帳(asked_at 無し)は照合スキップ=従来挙動(現状 pending な旧台帳は無い)。
+        if (item.asked_at !== undefined && item.asked_at !== move.askedAt) {
+          logger.warn("gap_pr 台帳と KB 質問の asked_at 不一致。誤移動を防ぐため skip します。", {
+            questionId: item.questionId,
+            ledgerAskedAt: item.asked_at,
+            kbAskedAt: move.askedAt,
+          });
+          summary.skipped += 1;
+          anyMismatch = true;
+          continue;
+        }
+        await deps.writeFile(join(kb.absDir, move.answeredPath), move.content);
+        await deps.removeFile(join(kb.absDir, move.openPath)); // validateRepo が重複 id を弾くため実体を消す
+        moveFiles.push({ path: move.answeredPath, content: move.content });
+        moveDeletions.push(move.openPath);
+        askerNotifies.push(
+          buildAnsweredNotify(
+            resolveAskerMention(move.askedBy, deps.discordForGithub),
+            item.questionId,
+            item.entryId,
+          ),
+        );
+      }
+      // mismatch があった台帳は consume しない(残置=毎 run 警告。runbook の掃除で解消。静かに落とさない)。
+      if (!anyMismatch) ledgerDone.push(action.id);
     }
-    for (const item of items) {
-      const raw = await deps.readQuestionRaw(kb.absDir, item.questionId);
-      if (raw === null) continue; // 既に移動済み
-      const move = buildAnsweredMove(raw, item.entryId, item.questionId);
-      await deps.writeFile(join(kb.absDir, move.answeredPath), move.content);
-      await deps.removeFile(join(kb.absDir, move.openPath)); // validateRepo が重複 id を弾くため実体を消す
-      moveFiles.push({ path: move.answeredPath, content: move.content });
-      moveDeletions.push(move.openPath);
-      askerNotifies.push(
-        buildAnsweredNotify(
-          resolveAskerMention(move.askedBy, deps.discordForGithub),
-          item.questionId,
-          item.entryId,
-        ),
-      );
-    }
-    ledgerDone.push(action.id);
   }
 
   // --- (B) リマインド / wontfix 走査(A で open から抜けた分は対象外)---

@@ -145,7 +145,14 @@ describe("runAnswerIngestion", () => {
     expect(JSON.parse(ledger[0]?.payloadJson ?? "{}")).toMatchObject({
       prNumber: 42,
       prRepo: "org/knowledge-base",
-      items: [{ questionId: "q-2026-0007", entryId: "kb-2026-0143" }],
+      // asked_at は close の整合ガード(§92)用。KB 質問の asked_at がそのまま台帳へ載る。
+      items: [
+        {
+          questionId: "q-2026-0007",
+          entryId: "kb-2026-0143",
+          asked_at: "2026-07-06T10:00:00+09:00",
+        },
+      ],
     });
     expect(pendingAnswers(deps.store)).toHaveLength(0);
   });

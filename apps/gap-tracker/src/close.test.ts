@@ -139,7 +139,7 @@ function makeGh(pr: Partial<PrDetail> = {}): {
   return { gh, commits, getPr };
 }
 
-function seedGapPr(store: BotStore): void {
+function seedGapPr(store: BotStore, over: { askedAt?: string } = {}): void {
   store.queueAction({
     id: "pr1",
     type: "gap_pr",
@@ -147,7 +147,14 @@ function seedGapPr(store: BotStore): void {
     payloadJson: JSON.stringify({
       prNumber: 42,
       prRepo: "org/knowledge-base",
-      items: [{ questionId: "q-2026-0007", entryId: "kb-2026-0143" }],
+      items: [
+        {
+          questionId: "q-2026-0007",
+          entryId: "kb-2026-0143",
+          // 既定は question() の asked_at と一致(移動する)。テストで不一致を注入して整合ガードを検証。
+          asked_at: over.askedAt ?? "2026-07-06T10:00:00+09:00",
+        },
+      ],
     }),
     state: "pending",
     createdAt: "t",
@@ -244,14 +251,41 @@ describe("runFlywheelclose (A: merged → answered 移動)", () => {
     expect(pending(deps.store, "gap_pr")).toHaveLength(1);
   });
 
-  it("dry-run は move も通知も台帳消費もしない", async () => {
-    const { gh, commits } = makeGh({ merged: true });
+  it("dry-run は section A(gh 使用)をスキップ。move も通知も台帳消費もしない", async () => {
+    const { gh, commits, getPr } = makeGh({ merged: true });
     const deps = makeDeps({ gh, real: false });
     const r = await runFlywheelClose(deps);
-    expect(r.moved).toBe(1); // 予定数
+    // Bug B 修正: dry-run は section A をスキップするため gh に触れず moved は 0(旧: 予定数を数えて 1)。
+    expect(r.moved).toBe(0);
+    expect(getPr).not.toHaveBeenCalled(); // dry-run で getPullRequest を呼ばない(nullGh crash 回避)
     expect(commits).toHaveLength(0);
     expect(deps.gapPosts).toHaveLength(0);
     expect(pending(deps.store, "gap_pr")).toHaveLength(1);
+  });
+
+  it("Bug B: dry-run + throw する gh + 非空台帳でも完走する(§92)", async () => {
+    // nullGhClient 相当: getPullRequest が throw。dry-run は section A に入らないので throw に到達しない。
+    const throwingGh = {
+      getPullRequest: vi.fn(async () => {
+        throw new Error("dry-run 中は gh を使いません");
+      }),
+      commitFiles: vi.fn(),
+    } as unknown as GhClient;
+    const deps = makeDeps({ gh: throwingGh, real: false });
+    await expect(runFlywheelClose(deps)).resolves.toBeDefined(); // throw せず完走
+    expect(throwingGh.getPullRequest).not.toHaveBeenCalled();
+  });
+
+  it("Bug A: 台帳 asked_at と KB 質問 asked_at が不一致なら移動せず台帳残置(ID 再利用の誤移動防止・§92)", async () => {
+    const store = createMemoryStore();
+    seedGapPr(store, { askedAt: "2026-01-01T00:00:00+09:00" }); // KB 質問は 2026-07-06 → 不一致
+    const { gh, commits } = makeGh({ merged: true });
+    const deps = makeDeps({ store, gh });
+    const r = await runFlywheelClose(deps);
+    expect(r.moved).toBe(0); // 誤移動しない
+    expect(commits).toHaveLength(0);
+    expect(deps.gapPosts).toHaveLength(0);
+    expect(pending(deps.store, "gap_pr")).toHaveLength(1); // 台帳は consume せず残置(毎 run 警告)
   });
 });
 
