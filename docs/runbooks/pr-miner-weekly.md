@@ -65,6 +65,11 @@ GitHub → Settings → Developer settings → Fine-grained personal access toke
 
 ## 5. 運用上の注意
 
+- **real 稼働中(2026-07-24 GO)**: `PR_MINER_REAL: "1"` 有効。cap = `PR_MINER_MAX_PRS` var で **15**(既定 5 から引き上げ)。
+  スループットは cron 頻度でなく**マージ速度**で律速される(冪等ガードで open な pr-miner PR は同時1本)。
+  週次でマージが回る運用なら、頻度を上げる(日次化)より cap を上げる方が低摩擦で効く(§6.4「週次」非逸脱・ADR-0024 D1)。
+  初回 real 完走後に**実消化件数を #stratum-ops の通知で確認し、cap/window を予算(月¥2-3万・ADR-0024 D1)に合わせて
+  var で調整**する。滞留が続くなら cap を上げ、コストが跳ねるなら下げる。
 - **id-counter.json のコンフリクト**: extractor(日次)と pr-miner(週次)は同じ `_meta/id-counter.json` を
   提案 PR に含める。両方の PR が同時に open のまま片方がマージされると、もう片方は id-counter が
   コンフリクトする。後着の PR を人間が rebase(または close して次回実行で作り直し)する。

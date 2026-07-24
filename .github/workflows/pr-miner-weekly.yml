@@ -106,6 +106,8 @@ jobs:
           CONFIG_DIR: ${{ github.workspace }}/apps/pr-miner/config
           PROMPTS_DIR: ${{ github.workspace }}/prompts
           KB_ROOT: ${{ github.workspace }}/.clones/knowledge-base
-          # 実 PR を出すときのみ設定(既定は dry-run)。初回 GO は人間判断(ADR-0013 D1(d)・runbook 参照)。
-          # PR_MINER_REAL: "1"
+          # 実 PR 有効化(2026-07-24 人間 GO・ADR-0013 D1(d))。初回は監督付き dispatch でカーソルを立てる
+          # (runbook §3)。real 化でカーソルが main に反映され、以後は増分処理(dry-run の窓再処理を解消)。
+          # cap は PR_MINER_MAX_PRS(既定 5 → var で 15)で有界化。dry-run に戻すときは再コメント化。
+          PR_MINER_REAL: "1"
         run: pnpm --filter @stratum/pr-miner start
