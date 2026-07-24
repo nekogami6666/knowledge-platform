@@ -56,6 +56,8 @@ export interface PrMinerSummary {
   prUrl?: string;
   counts: NotifyCounts;
   minedPrs: number;
+  /** cap(max_prs)到達により今回処理せず次回へ持ち越した PR 数(ADR-0023 D4 の可視化)。 */
+  deferredPrs: number;
   fileCount: number;
 }
 
@@ -81,13 +83,36 @@ function sinceFor(state: PrMinerState | null, repo: string, now: Date, windowDay
   return new Date(now.getTime() - windowDays * 86_400_000).toISOString();
 }
 
+/**
+ * cap(max_prs)指定時のみ、開始リポを日替わりでローテートした配列を返す(公平性)。
+ * config 順のままだと後方のリポが毎回予算切れで永久に処理されない(飢餓)。日次ローテートで
+ * targets.length 日かけて全リポが先頭側に回る(gap-tracker のラウンドロビンと同方式)。
+ * uncapped(max_prs 未指定)や単一リポでは config 順のまま=現挙動を変えない。
+ */
+export function rotateTargets(
+  targets: readonly string[],
+  maxPrs: number | undefined,
+  now: Date,
+): string[] {
+  if (maxPrs === undefined || targets.length <= 1) return [...targets];
+  const start = Math.floor(now.getTime() / 86_400_000) % targets.length;
+  return [...targets.slice(start), ...targets.slice(0, start)];
+}
+
 export async function runPrMiner(deps: RunDeps): Promise<PrMinerSummary> {
   const { config, logger } = deps;
   const counts = EMPTY_COUNTS();
 
   if (config.targets.length === 0) {
     logger.info("targets が空です。マイニングをスキップします(§14#5 未決・機能 OFF)。");
-    return { created: false, reason: "disabled", counts, minedPrs: 0, fileCount: 0 };
+    return {
+      created: false,
+      reason: "disabled",
+      counts,
+      minedPrs: 0,
+      deferredPrs: 0,
+      fileCount: 0,
+    };
   }
 
   const statePath = join(deps.kbRoot, "_meta", "pr-miner-state.json");
@@ -99,7 +124,14 @@ export async function runPrMiner(deps: RunDeps): Promise<PrMinerSummary> {
     const existing = open.find((p) => p.headRef.startsWith("pr-miner/"));
     if (existing !== undefined) {
       logger.info("未マージの pr-miner PR があるため今回はスキップします。", { pr: existing.url });
-      return { created: false, reason: "already-exists", counts, minedPrs: 0, fileCount: 0 };
+      return {
+        created: false,
+        reason: "already-exists",
+        counts,
+        minedPrs: 0,
+        deferredPrs: 0,
+        fileCount: 0,
+      };
     }
   }
 
@@ -111,9 +143,17 @@ export async function runPrMiner(deps: RunDeps): Promise<PrMinerSummary> {
   const files: { path: string; content: string }[] = [];
   const newRepoCursors: PrMinerState["repos"] = { ...(state?.repos ?? {}) };
   const now = deps.now();
+  // 1 run の PR 上限(全リポ合計・ADR-0023 D3 の pr-miner 版)。未指定 = 無制限(現挙動)。
+  const cap = config.max_prs ?? Number.POSITIVE_INFINITY;
+  const targets = rotateTargets(config.targets, config.max_prs, now);
   let minedPrs = 0;
+  let deferredPrs = 0;
 
-  for (const repo of config.targets) {
+  for (const repo of targets) {
+    if (minedPrs >= cap) {
+      // 予算切れ。残りのリポは今回スキャンしない(カーソル据え置き=次回ローテートで先頭側に回り優先)。
+      break;
+    }
     try {
       const since = sinceFor(state, repo, now, config.window_days);
       const cursor = state?.repos[repo]?.last_merged_at ?? null;
@@ -128,7 +168,13 @@ export async function runPrMiner(deps: RunDeps): Promise<PrMinerSummary> {
       }
       logger.info("PR を取得しました。", { repo, count: fresh.length });
 
+      let processedMerged: string | undefined;
+      let processedInRepo = 0;
       for (const pr of fresh) {
+        // 予算超過後は打ち切るが、直前の PR と同一 merged_at の PR だけは巻き込む。カーソルは
+        // 単一 timestamp なので、同時刻の PR 群を境界で分割するとカーソル前進で未処理側が > cursor
+        // から漏れて静かに欠落する。timestamp 単位で不可分に処理して欠落を防ぐ(超過は最大でも同時刻分)。
+        if (minedPrs >= cap && pr.mergedAt !== processedMerged) break;
         await minePr(
           repo,
           pr,
@@ -137,10 +183,15 @@ export async function runPrMiner(deps: RunDeps): Promise<PrMinerSummary> {
           files,
         );
         minedPrs += 1;
+        processedInRepo += 1;
+        processedMerged = pr.mergedAt;
       }
-      // このリポのカーソルを、処理した PR の最大 merged_at に前進させる。
-      const maxMerged = fresh[fresh.length - 1]?.mergedAt;
-      if (maxMerged !== undefined) newRepoCursors[repo] = { last_merged_at: maxMerged };
+      deferredPrs += fresh.length - processedInRepo;
+      // カーソルは「処理した最後の PR」まで前進(未処理は次回 > cursor で再取得=持ち越し安全)。
+      // 全件処理なら processedMerged === fresh[last].mergedAt で現挙動と一致する。
+      if (processedMerged !== undefined) {
+        newRepoCursors[repo] = { last_merged_at: processedMerged };
+      }
     } catch (e) {
       // リポ単位で失敗を隔離(1 リポの API 失敗で全体を落とさない)。
       logger.error("リポの処理に失敗。スキップして続行します。", {
@@ -150,9 +201,17 @@ export async function runPrMiner(deps: RunDeps): Promise<PrMinerSummary> {
     }
   }
 
+  if (deferredPrs > 0) {
+    logger.info("cap 到達により PR を次回 run へ持ち越します(ADR-0023 と同型)。", {
+      cap: config.max_prs,
+      minedPrs,
+      deferredPrs,
+    });
+  }
+
   if (files.length === 0) {
     logger.info("materialize 対象がありません。PR を作成しません。", { minedPrs });
-    return { created: false, reason: "no-entries", counts, minedPrs, fileCount: 0 };
+    return { created: false, reason: "no-entries", counts, minedPrs, deferredPrs, fileCount: 0 };
   }
 
   // clone に staging(validateRepo がディスクを読む)+ カーソル/採番ファイルを PR に含める。
@@ -177,6 +236,7 @@ export async function runPrMiner(deps: RunDeps): Promise<PrMinerSummary> {
       reason: "validation-failed",
       counts,
       minedPrs,
+      deferredPrs,
       fileCount: files.length,
     };
   }
@@ -188,7 +248,14 @@ export async function runPrMiner(deps: RunDeps): Promise<PrMinerSummary> {
       files: files.length,
       title,
     });
-    return { created: false, reason: "dry-run", counts, minedPrs, fileCount: files.length };
+    return {
+      created: false,
+      reason: "dry-run",
+      counts,
+      minedPrs,
+      deferredPrs,
+      fileCount: files.length,
+    };
   }
 
   const pr = await deps.gh.createPullRequest({
@@ -196,7 +263,7 @@ export async function runPrMiner(deps: RunDeps): Promise<PrMinerSummary> {
     head,
     base: config.base_branch,
     title,
-    body: buildPrBody(counts, minedPrs, config.targets),
+    body: buildPrBody(counts, minedPrs, deferredPrs, config.targets),
     files,
   });
   await deps.notifier.notifyPrCreated({
@@ -206,7 +273,7 @@ export async function runPrMiner(deps: RunDeps): Promise<PrMinerSummary> {
     counts,
   });
   logger.info("PR マイニングの提案 PR を作成しました。", { prUrl: pr.url, files: files.length });
-  return { created: true, prUrl: pr.url, counts, minedPrs, fileCount: files.length };
+  return { created: true, prUrl: pr.url, counts, minedPrs, deferredPrs, fileCount: files.length };
 }
 
 /** 1 PR を extract → reconcile → materialize し、counts と files に反映する。 */
@@ -280,15 +347,24 @@ async function minePr(
   }
 }
 
-function buildPrBody(counts: NotifyCounts, minedPrs: number, targets: readonly string[]): string {
-  return [
+function buildPrBody(
+  counts: NotifyCounts,
+  minedPrs: number,
+  deferredPrs: number,
+  targets: readonly string[],
+): string {
+  const lines = [
     "直近のマージ済み PR から、設計判断・ハマりどころを抽出しました(§6.4 ③-c)。",
     "コード/diff は知識化していません(判断と理由のみ)。",
     "",
     `- 対象リポ: ${targets.join(", ")}`,
     `- マイニングした PR 数: ${minedPrs}`,
     `- 新規 ${counts.new} / 追記 ${counts.append} / 矛盾 ${counts.supersede} / skip ${counts.skip}`,
-    "",
-    "スキーマ検証はこのリポの validate CI が行います。問題なければ 👍 で代理マージ。",
-  ].join("\n");
+  ];
+  if (deferredPrs > 0) {
+    // ADR-0023 D4: cap 到達の持ち越しを本文にも出す(カーソル前進で静かに消えないように)。
+    lines.push(`- 持ち越し: 1 run 上限に達したため ${deferredPrs} 件は次回 run で処理します`);
+  }
+  lines.push("", "スキーマ検証はこのリポの validate CI が行います。問題なければ 👍 で代理マージ。");
+  return lines.join("\n");
 }

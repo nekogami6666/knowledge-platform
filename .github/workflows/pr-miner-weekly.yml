@@ -14,6 +14,10 @@
 #   任意: DISCORD_OPS_WEBHOOK(#stratum-ops 通知)
 # 必要 vars(リポ名はハードコードしない・ADR-0013 D3):
 #   PR_MINER_KB_REPO(例 org/knowledge-base)/ PR_MINER_TARGETS(カンマ区切り。空 = 機能 OFF・§14#5)
+# 任意 vars(コスト有界化・ADR-0023 と同型):
+#   PR_MINER_MAX_PRS(1 run で materialize する PR 数の上限・全リポ合計。既定 5。繁忙 run の LLM コスト暴走を防ぐ。
+#     上限超過分は次回へ持ち越し=カーソルは処理済みまでしか前進しない。cap 時は開始リポを日替わりローテート)
+#   PR_MINER_WINDOW_DAYS(初回カーソル無し時の遡及日数。既定 7)
 # 手順の詳細: docs/runbooks/pr-miner-weekly.md
 name: pr-miner-weekly
 
@@ -77,7 +81,9 @@ jobs:
             echo "kb:"
             echo "  repo: ${{ vars.PR_MINER_KB_REPO }}"
             echo "base_branch: main"
-            echo "window_days: 7"
+            echo "window_days: ${{ vars.PR_MINER_WINDOW_DAYS || '7' }}"
+            # 1 run の PR 上限(全リポ合計)。未設定なら 5(ADR-0023 の EXTRACTOR_MAX_FILES と同型のコスト床)。
+            echo "max_prs: ${{ vars.PR_MINER_MAX_PRS || '5' }}"
           } > apps/pr-miner/config/pr-miner.yaml
           echo "pr-miner.yaml generated:"
           cat apps/pr-miner/config/pr-miner.yaml

@@ -12,7 +12,7 @@ import type { IdCounterFile, IdCounterStore } from "@stratum/kb-core";
 import { describe, expect, it, vi } from "vitest";
 import type { PrMinerConfig } from "./config.js";
 import { createLogger } from "./logger.js";
-import { type RunDeps, runPrMiner } from "./run.js";
+import { type RunDeps, rotateTargets, runPrMiner } from "./run.js";
 
 const config: PrMinerConfig = {
   targets: ["org/dev"],
@@ -334,5 +334,84 @@ describe("runPrMiner", () => {
     });
     const summary = await runPrMiner(deps);
     expect(summary.minedPrs).toBe(1); // #10 は除外、#11 のみ
+  });
+
+  it("max_prs: 1 run の処理 PR 数を上限で打ち切り、残りは次回へ持ち越す(カーソルは処理済みまで)", async () => {
+    const gh = makeGh({
+      listMergedPullRequests: vi.fn(async () => [
+        mergedPr({ number: 10, mergedAt: "2026-07-05T00:00:00Z" }),
+        mergedPr({ number: 11, mergedAt: "2026-07-06T00:00:00Z" }),
+        mergedPr({ number: 12, mergedAt: "2026-07-07T00:00:00Z" }),
+      ]),
+    });
+    const { deps, written } = makeDeps({ gh, config: { ...config, max_prs: 2 } });
+    const summary = await runPrMiner(deps);
+
+    expect(summary.minedPrs).toBe(2); // 上限 2 で打ち切り
+    expect(summary.deferredPrs).toBe(1); // #12 は持ち越し
+    // カーソルは処理した最後(#11=07-06)まで。#12(07-07)は > cursor で次回再取得=欠落しない。
+    const state = JSON.parse(written["/kb/_meta/pr-miner-state.json"] ?? "{}") as {
+      repos: Record<string, { last_merged_at: string }>;
+    };
+    expect(state.repos["org/dev"]?.last_merged_at).toBe("2026-07-06T00:00:00Z");
+    // PR 本文に持ち越しが可視化される(ADR-0023 D4)
+    const create = (gh.createPullRequest as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as {
+      body: string;
+    };
+    expect(create.body).toContain("持ち越し");
+  });
+
+  it("max_prs: 同一 merged_at の PR は境界で分割せず巻き込む(カーソル前進での欠落防止)", async () => {
+    const gh = makeGh({
+      listMergedPullRequests: vi.fn(async () => [
+        mergedPr({ number: 10, mergedAt: "2026-07-05T00:00:00Z" }),
+        mergedPr({ number: 11, mergedAt: "2026-07-05T00:00:00Z" }), // 同時刻 → 巻き込む
+        mergedPr({ number: 12, mergedAt: "2026-07-06T00:00:00Z" }),
+      ]),
+    });
+    const { deps, written } = makeDeps({ gh, config: { ...config, max_prs: 1 } });
+    const summary = await runPrMiner(deps);
+
+    // 上限 1 だが #10 と #11 は同 merged_at のため両方処理(超過は最大でも同時刻分)。
+    expect(summary.minedPrs).toBe(2);
+    expect(summary.deferredPrs).toBe(1); // #12 のみ持ち越し(欠落なし)
+    const state = JSON.parse(written["/kb/_meta/pr-miner-state.json"] ?? "{}") as {
+      repos: Record<string, { last_merged_at: string }>;
+    };
+    expect(state.repos["org/dev"]?.last_merged_at).toBe("2026-07-05T00:00:00Z");
+  });
+
+  it("max_prs: 上限は全リポ合計。到達後のリポはスキャンしない(次回ローテートで優先)", async () => {
+    const gh = makeGh({
+      listMergedPullRequests: vi.fn(async () => [
+        mergedPr({ number: 1, mergedAt: "2026-07-05T00:00:00Z" }),
+        mergedPr({ number: 2, mergedAt: "2026-07-06T00:00:00Z" }),
+      ]),
+    });
+    const { deps } = makeDeps({
+      gh,
+      config: { ...config, targets: ["org/a", "org/b", "org/c"], max_prs: 3 },
+    });
+    const summary = await runPrMiner(deps);
+
+    // 各リポ 2 PR・上限 3: 1 リポ完了(2)+ 1 リポで 1 件処理し 1 件持ち越し。3 リポ目は未スキャン。
+    expect(summary.minedPrs).toBe(3);
+    expect(summary.deferredPrs).toBe(1); // 境界リポの残り 1 件(未スキャンのリポは数えない)
+    // ローテート順に依らず listMergedPullRequests は最大 2 リポぶんしか呼ばれない(3 リポ目は break)
+    expect((gh.listMergedPullRequests as ReturnType<typeof vi.fn>).mock.calls.length).toBe(2);
+  });
+
+  it("rotateTargets: uncapped は現挙動(identity)、cap ありは日次ローテート", () => {
+    const now = new Date("2026-07-09T00:00:00Z");
+    const arr = ["a", "b", "c"];
+    // uncapped(max_prs 未指定)は config 順そのまま
+    expect(rotateTargets(arr, undefined, now)).toEqual(arr);
+    // cap ありは同じ要素の回転。翌日は先頭が 1 つ進む(飢餓防止のラウンドロビン)。
+    const day0 = rotateTargets(arr, 5, now);
+    const day1 = rotateTargets(arr, 5, new Date("2026-07-10T00:00:00Z"));
+    expect([...day0].sort()).toEqual(arr); // 同じ要素
+    expect(day0).not.toEqual(day1); // 日替わりで回転が進む
+    // 単一リポはローテートしない(先頭問題が起きない)
+    expect(rotateTargets(["solo"], 5, now)).toEqual(["solo"]);
   });
 });

@@ -19,6 +19,12 @@ export const prMinerConfigSchema = z
     base_branch: z.string().default("main"),
     /** 遡る日数(初回カーソル無し時の since を now − window_days で決める)。 */
     window_days: z.number().int().positive().default(7),
+    /**
+     * 1 run で materialize する PR 数の上限(全リポ合計)。未指定 = 無制限(現挙動)。
+     * extractor の EXTRACTOR_MAX_FILES(ADR-0023 D3)と同型: バックログをコスト有界で少量ずつ消化する。
+     * cap 到達分は次回へ持ち越し(カーソルは処理した PR までしか前進しない)。
+     */
+    max_prs: z.number().int().positive().optional(),
   })
   .strict();
 export type PrMinerConfig = z.infer<typeof prMinerConfigSchema>;

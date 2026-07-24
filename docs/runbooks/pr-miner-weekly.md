@@ -40,6 +40,8 @@ GitHub → Settings → Developer settings → Fine-grained personal access toke
 | secret | `DISCORD_OPS_WEBHOOK` | #stratum-ops の webhook URL(👍 マージ導線に必要) |
 | var | `PR_MINER_KB_REPO` | `org/knowledge-base` 形式の実リポ名 |
 | var | `PR_MINER_TARGETS` | 対象リポをカンマ区切り(例 `org/app,org/lib`)。**空 = 機能 OFF** |
+| var(任意) | `PR_MINER_MAX_PRS` | 1 run で処理する PR 数の上限(全リポ合計)。**未設定なら 5**。繁忙 run の LLM コスト暴走防止 |
+| var(任意) | `PR_MINER_WINDOW_DAYS` | 初回(カーソル無し)の遡及日数。未設定なら 7 |
 
 `PR_MINER_KB_REPO` が空の間は workflow の KB checkout / config 生成 / 実行がすべてスキップされる(安全な既定)。
 
@@ -68,6 +70,11 @@ GitHub → Settings → Developer settings → Fine-grained personal access toke
   コンフリクトする。後着の PR を人間が rebase(または close して次回実行で作り直し)する。
 - **冪等**: 先週の pr-miner PR が未マージのまま翌週の実行が走った場合、pr-miner は
   「open な `pr-miner/*` PR がある」ことを検出して新規提案を**保留**する(reason: already-exists)。
+- **1 run の PR 上限(`PR_MINER_MAX_PRS`・既定 5)**: 繁忙期に 1 run で大量の PR を LLM 抽出してコストが
+  跳ねるのを防ぐ(extractor の `EXTRACTOR_MAX_FILES`・ADR-0023 と同型)。上限超過分は**次回へ持ち越し**
+  (カーソルは処理済みの PR までしか前進しないので欠落しない)。PR 本文とログに「持ち越し N 件」が出る。
+  cap があるときは**開始リポを日替わりでローテート**するため、config 後方のリポも順番に処理される
+  (毎回同じ先頭リポだけが処理される飢餓を防ぐ)。上限を上げたい/外したいときは var を調整する。
   滞留した PR を先に処理すること。
 - **カーソル**: 対象リポごとの `last_merged_at` は提案 PR に同梱される `_meta/pr-miner-state.json` で
   前進する。PR がマージされて初めてカーソルが進む(extractor と同方式)。
