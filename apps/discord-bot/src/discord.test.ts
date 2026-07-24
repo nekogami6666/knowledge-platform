@@ -1,10 +1,17 @@
 import type { GhClient, PrDetail } from "@stratum/gh-client";
-import type { ButtonInteraction, Message, MessageReaction, User } from "discord.js";
+import type {
+  ButtonInteraction,
+  ChatInputCommandInteraction,
+  Message,
+  MessageReaction,
+  User,
+} from "discord.js";
 import { GatewayIntentBits } from "discord.js";
 import type { Logger } from "pino";
 import { describe, expect, it, vi } from "vitest";
 import type { ChannelGateInput, ChannelsConfig, OpsConfig } from "./config.js";
 import type { BotStore } from "./db.js";
+import { createMemoryStore } from "./db.js";
 import {
   askCommand,
   BOT_INTENTS,
@@ -17,12 +24,15 @@ import {
   handleButton,
   handleGapAnswer,
   handleProxyMergeReaction,
+  handleStats,
   parseFeedbackCustomId,
   parseGithubPrUrl,
   proxyMergeDecision,
+  statsCommand,
   warmDmChannels,
   windowKey,
 } from "./discord.js";
+import { isoJst } from "./time.js";
 
 /** discord.js を起動せずゲート配線(§9.2 / ADR-0018)の判定だけを検証する。 */
 const channels = (over: Partial<ChannelsConfig> = {}): ChannelsConfig => ({
@@ -685,5 +695,73 @@ describe("warmDmChannels(discord.js DM リアクション欠落対策)", () => {
       logger,
     );
     expect(warns).toHaveLength(1);
+  });
+});
+
+describe("handleStats / statsCommand (§1.4 KPI)", () => {
+  const statsDeps = (logger: Logger, store: BotStore): BotDeps => ({
+    logger,
+    channels: channels(),
+    store,
+  });
+
+  function fakeChatInput(): {
+    interaction: ChatInputCommandInteraction;
+    replies: { content: string; ephemeral?: boolean }[];
+  } {
+    const replies: { content: string; ephemeral?: boolean }[] = [];
+    const interaction = {
+      replied: false,
+      deferred: false,
+      reply: async (o: { content: string; ephemeral?: boolean }) => {
+        replies.push(o);
+      },
+    };
+    return { interaction: interaction as unknown as ChatInputCommandInteraction, replies };
+  }
+
+  const sampleQ = {
+    id: "1",
+    correlationId: "c",
+    discordUserId: "u",
+    discordChannelId: "ch",
+    threadId: null,
+    question: "q?",
+    answer: null,
+    sourcesJson: null,
+    answerStatus: "answered" as const,
+    feedback: "up" as const,
+    inputTokens: null,
+    outputTokens: null,
+    elapsedMs: null,
+    createdAt: isoJst(),
+  };
+
+  it("statsCommand は name=stats", () => {
+    expect(statsCommand.toJSON().name).toBe("stats");
+  });
+
+  it("集計を ephemeral で返す(本人だけに表示)", async () => {
+    const { logger } = fakeLogger();
+    const store = createMemoryStore();
+    store.recordQuery(sampleQ);
+    const { interaction, replies } = fakeChatInput();
+    await handleStats(interaction, statsDeps(logger, store));
+    expect(replies).toHaveLength(1);
+    expect(replies[0]?.ephemeral).toBe(true);
+    expect(replies[0]?.content).toContain("📊");
+  });
+
+  it("listQueries が throw しても封じ込め、ガード付き ephemeral 通知", async () => {
+    const { logger, errors } = fakeLogger();
+    const store = {
+      listQueries: () => {
+        throw new Error("db locked");
+      },
+    } as unknown as BotStore;
+    const { interaction, replies } = fakeChatInput();
+    await expect(handleStats(interaction, statsDeps(logger, store))).resolves.toBeUndefined();
+    expect(errors.length).toBeGreaterThan(0);
+    expect(replies).toHaveLength(1); // ガード付き通知
   });
 });

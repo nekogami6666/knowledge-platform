@@ -32,36 +32,40 @@ UNIT_DIR="$HOME/.config/systemd/user"
 for app in gap-tracker freshness-checker; do
   [ -f "$REPO_DIR/apps/$app/dist/index.js" ] || echo "WARN: apps/$app/dist が未ビルドです。先に 'pnpm -r build'(または update.sh)を実行してください。" >&2
 done
+[ -f "$REPO_DIR/apps/discord-bot/dist/stats-cli.js" ] || echo "WARN: apps/discord-bot/dist/stats-cli.js が未ビルドです。先に 'pnpm -r build' を実行してください。" >&2
 
 mkdir -p "$UNIT_DIR" "$DATA_DIR/data" "$DATA_DIR/clones-gap" "$DATA_DIR/clones-freshness"
 
-# $1=unit basename(stratum-xxx) / $2=有効化する REAL 環境変数名
+# $1=unit basename(stratum-xxx) / $2=有効化する REAL 環境変数名(空 = REAL ゲート無し=read-only)
 render() {
-  local base="$1" realvar="$2" dst="$UNIT_DIR/$1.service"
+  local base="$1" realvar="${2:-}" dst="$UNIT_DIR/$1.service" label="read-only"
   sed -e "s|__REPO_DIR__|$REPO_DIR|g" \
     -e "s|__ENV_FILE__|$ENV_FILE|g" \
     -e "s|__DATA_DIR__|$DATA_DIR|g" \
     -e "s|__NODE_BIN__|$NODE_BIN|g" \
     "$SCRIPT_DIR/$base.service" >"$dst"
-  if [ "$REAL" = "1" ]; then
-    sed -i "s|^# Environment=$realvar=1|Environment=$realvar=1|" "$dst"
+  if [ -n "$realvar" ]; then
+    label=$([ "$REAL" = 1 ] && echo REAL || echo dry-run)
+    [ "$REAL" = "1" ] && sed -i "s|^# Environment=$realvar=1|Environment=$realvar=1|" "$dst"
   fi
   cp "$SCRIPT_DIR/$base.timer" "$UNIT_DIR/$base.timer"
-  echo "  installed: $dst  ($([ "$REAL" = 1 ] && echo REAL || echo dry-run))"
+  echo "  installed: $dst  ($label)"
 }
 
 echo "REPO_DIR=$REPO_DIR  DATA_DIR=$DATA_DIR  ENV_FILE=$ENV_FILE  NODE=$NODE_BIN  REAL=$REAL"
 render stratum-gap-tracker GAP_TRACKER_REAL
 render stratum-freshness FRESHNESS_REAL
+render stratum-stats # read-only 集計(REAL ゲート無し。DISCORD_OPS_WEBHOOK 有無が実質ゲート)
 
 systemctl --user daemon-reload
-systemctl --user enable --now stratum-gap-tracker.timer stratum-freshness.timer
+systemctl --user enable --now stratum-gap-tracker.timer stratum-freshness.timer stratum-stats.timer
 loginctl enable-linger "$USER" >/dev/null 2>&1 || echo "WARN: enable-linger に失敗(polkit 制限)。IT に一度だけ依頼してください(母艦再起動後の自動起動に必要)。"
 
 echo ""
-echo "完了。次回タイマーで自動起動します(gap=平日10:00 JST / freshness=平日11:00 JST):"
-systemctl --user list-timers stratum-gap-tracker.timer stratum-freshness.timer --no-pager || true
+echo "完了。次回タイマーで自動起動します(gap=平日10:00 / freshness=平日11:00 / stats=月09:00 JST):"
+systemctl --user list-timers stratum-gap-tracker.timer stratum-freshness.timer stratum-stats.timer --no-pager || true
 echo ""
 echo "初回は手動起動で検証してください(まず --real 無しの dry-run 推奨):"
 echo "  systemctl --user start stratum-gap-tracker.service && journalctl --user -u stratum-gap-tracker -n 40 --no-pager"
 echo "  systemctl --user start stratum-freshness.service   && journalctl --user -u stratum-freshness   -n 40 --no-pager"
+echo "  systemctl --user start stratum-stats.service       && journalctl --user -u stratum-stats       -n 40 --no-pager"

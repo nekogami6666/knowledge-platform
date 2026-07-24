@@ -41,6 +41,7 @@ import type { BotStore } from "./db.js";
 import { type FreshnessApplyDeps, handleFreshnessReaction } from "./freshness-flow.js";
 import { withCorrelation } from "./logger.js";
 import { EMPTY_MEMBERS, type MembersLoader } from "./members.js";
+import { aggregateStats, formatStatsMessage } from "./stats.js";
 import { isoJst } from "./time.js";
 import type { VcRecorderWatcher, VcSnapshot } from "./vc-recorder.js";
 import { gateInputFromInteraction } from "./visibility.js";
@@ -51,6 +52,11 @@ export const askCommand = new SlashCommandBuilder()
   .setName("ask")
   .setDescription("社内ナレッジに質問する")
   .addStringOption((o) => o.setName("question").setDescription("質問内容").setRequired(true));
+
+/** /stats コマンド定義(利用状況・👍👎 集計・§1.4 KPI)。応答は本人だけに見える ephemeral。 */
+export const statsCommand = new SlashCommandBuilder()
+  .setName("stats")
+  .setDescription("Q&A の利用状況と 👍👎 評価の集計を表示する(自分だけに表示)");
 
 /** /ask の処理本体(PR-4a の handleAskRequest を index.ts で包んで注入する)。 */
 export type AskHandler = (
@@ -177,7 +183,7 @@ export function createBot(deps: BotDeps): Client {
   // 起動時に /ask を Discord へ登録する。guildId 指定ならそのギルドへ即時、未指定はグローバル
   // (反映に最大 1 時間)。登録失敗は致命ではないのでログのみで起動を続ける。
   client.once(Events.ClientReady, async (ready) => {
-    const commands = [askCommand.toJSON()];
+    const commands = [askCommand.toJSON(), statsCommand.toJSON()];
     try {
       // guildId 指定はそのギルドへ即時、未指定はグローバル登録(set の guildId 引数は string 必須)。
       if (deps.guildId !== undefined) {
@@ -213,6 +219,8 @@ export function createBot(deps: BotDeps): Client {
   client.on(Events.InteractionCreate, async (interaction: Interaction) => {
     if (interaction.isChatInputCommand() && interaction.commandName === "ask") {
       await handleAsk(interaction, onAsk, deps, queue);
+    } else if (interaction.isChatInputCommand() && interaction.commandName === "stats") {
+      await handleStats(interaction, deps);
     } else if (interaction.isButton()) {
       await handleButton(interaction, deps);
     }
@@ -584,6 +592,31 @@ export async function handleButton(interaction: ButtonInteraction, deps: BotDeps
         });
       } catch {
         // noop: Discord への通知自体が失敗。ログ済みなのでこれ以上は何もしない。
+      }
+    }
+  }
+}
+
+/**
+ * /stats(§1.4 KPI・利用状況 + 👍👎 集計)。応答は本人だけに見える ephemeral。
+ * LLM 非使用の読み取りのみなので rate-limit・チャンネルゲートは掛けない(集計値は機微でない)。
+ * 例外は handleButton と同型の封じ込め(catch → log + 未応答ならガード付き ephemeral 通知)。
+ */
+export async function handleStats(
+  interaction: ChatInputCommandInteraction,
+  deps: BotDeps,
+): Promise<void> {
+  const log = withCorrelation(deps.logger, "stats");
+  try {
+    const summary = aggregateStats(deps.store.listQueries(), new Date());
+    await interaction.reply({ content: formatStatsMessage(summary), ephemeral: true });
+  } catch (err) {
+    log.error({ err }, "stats command failed");
+    if (!interaction.replied && !interaction.deferred) {
+      try {
+        await interaction.reply({ content: "集計の取得に失敗しました。", ephemeral: true });
+      } catch {
+        // noop: 通知自体が失敗。ログ済み。
       }
     }
   }

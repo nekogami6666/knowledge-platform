@@ -1,0 +1,13 @@
+# 週次利用レポートの起動タイマー(§7.3「週次サマリを #stratum-ops へ」)。
+# 月曜 09:00 JST(gap-tracker 10:00 / freshness 11:00 の前・週初にその週の前週分を報告)。
+# VM のタイムゾーンが UTC の場合も動くよう Asia/Tokyo を明示する。
+# 配置: ~/.config/systemd/user/stratum-stats.timer → `systemctl --user enable --now` で有効化。
+[Unit]
+Description=Run stratum weekly usage report on Monday mornings (JST)
+
+[Timer]
+OnCalendar=Mon 09:00 Asia/Tokyo
+Persistent=true
+
+[Install]
+WantedBy=timers.target
