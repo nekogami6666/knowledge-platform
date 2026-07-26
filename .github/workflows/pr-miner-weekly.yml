@@ -123,3 +123,20 @@ jobs:
           # cap は PR_MINER_MAX_PRS(既定 5 → var で 15)で有界化。dry-run に戻すときは再コメント化。
           PR_MINER_REAL: "1"
         run: pnpm --filter @stratum/pr-miner start
+
+      # job 失敗を #stratum-ops へ通知(weekly-eval が 3 週黙って失敗していた 2026-06/07 の反省)。
+      # 同一週の 2 回目実 run はブランチ名衝突(pr-miner/<週キー>)で失敗するため、その検知もここが担う。
+      - name: Notify job failure
+        if: failure()
+        env:
+          DISCORD_OPS_WEBHOOK: ${{ secrets.DISCORD_OPS_WEBHOOK }}
+          WORKFLOW_NAME: ${{ github.workflow }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          if [ -z "${DISCORD_OPS_WEBHOOK:-}" ]; then
+            echo "DISCORD_OPS_WEBHOOK 未設定。失敗通知をスキップ。"
+            exit 0
+          fi
+          jq -n --arg c "❌ ${WORKFLOW_NAME} が失敗しました: ${RUN_URL}" '{content: $c}' \
+            | curl -fsS -X POST -H "Content-Type: application/json" -d @- "$DISCORD_OPS_WEBHOOK"

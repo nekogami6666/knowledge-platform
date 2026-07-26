@@ -65,3 +65,20 @@ jobs:
           jq -n --arg s "$SUMMARY" \
             '{content: ("⚠️ 週次 golden eval 回帰検出(§10.2)\n```json\n" + $s + "\n```")}' \
             | curl -fsS -X POST -H "Content-Type: application/json" -d @- "$DISCORD_OPS_WEBHOOK"
+
+      # 役割分担: 上の Alert on regression(always)は「eval が完走して回帰を検出した」通知。
+      # このステップは「job 自体が失敗した」通知(2026-06/07 に 3 週黙って失敗していた反省)。
+      - name: Notify job failure
+        if: failure()
+        env:
+          DISCORD_OPS_WEBHOOK: ${{ secrets.DISCORD_OPS_WEBHOOK }}
+          WORKFLOW_NAME: ${{ github.workflow }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          if [ -z "${DISCORD_OPS_WEBHOOK:-}" ]; then
+            echo "DISCORD_OPS_WEBHOOK 未設定。失敗通知をスキップ。"
+            exit 0
+          fi
+          jq -n --arg c "❌ ${WORKFLOW_NAME} が失敗しました: ${RUN_URL}" '{content: $c}' \
+            | curl -fsS -X POST -H "Content-Type: application/json" -d @- "$DISCORD_OPS_WEBHOOK"

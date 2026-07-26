@@ -101,3 +101,20 @@ jobs:
           # 実 commit ON(2026-07-16 有効化。dry-run 目視済み — runbook 手順 3)。
           EXPERTISE_REAL: "1"
         run: pnpm --filter @stratum/expertise-mapper start
+
+      # job 失敗を #stratum-ops へ通知(weekly-eval が 3 週黙って失敗していた 2026-06/07 の反省)。
+      # 成功時の通知(risk:high)はアプリ内 webhook が担うため、ここは failure() のみ。
+      - name: Notify job failure
+        if: failure()
+        env:
+          DISCORD_OPS_WEBHOOK: ${{ secrets.DISCORD_OPS_WEBHOOK }}
+          WORKFLOW_NAME: ${{ github.workflow }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          if [ -z "${DISCORD_OPS_WEBHOOK:-}" ]; then
+            echo "DISCORD_OPS_WEBHOOK 未設定。失敗通知をスキップ。"
+            exit 0
+          fi
+          jq -n --arg c "❌ ${WORKFLOW_NAME} が失敗しました: ${RUN_URL}" '{content: $c}' \
+            | curl -fsS -X POST -H "Content-Type: application/json" -d @- "$DISCORD_OPS_WEBHOOK"

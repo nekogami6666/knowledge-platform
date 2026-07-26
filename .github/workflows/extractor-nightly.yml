@@ -87,3 +87,20 @@ jobs:
           # (ナレッジ4件・既存 domain 再利用)。nightly + workflow_dispatch とも実 PR を出す。
           EXTRACTOR_REAL_PR: "1"
         run: pnpm --filter @stratum/extractor start
+
+      # job 失敗を #stratum-ops へ通知(weekly-eval が 3 週黙って失敗していた 2026-06/07 の反省)。
+      # 成功時の通知はアプリ内 webhook(notify.ts)が担うため、ここは failure() のみ。未設定なら静かに skip。
+      - name: Notify job failure
+        if: failure()
+        env:
+          DISCORD_OPS_WEBHOOK: ${{ secrets.DISCORD_OPS_WEBHOOK }}
+          WORKFLOW_NAME: ${{ github.workflow }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          if [ -z "${DISCORD_OPS_WEBHOOK:-}" ]; then
+            echo "DISCORD_OPS_WEBHOOK 未設定。失敗通知をスキップ。"
+            exit 0
+          fi
+          jq -n --arg c "❌ ${WORKFLOW_NAME} が失敗しました: ${RUN_URL}" '{content: $c}' \
+            | curl -fsS -X POST -H "Content-Type: application/json" -d @- "$DISCORD_OPS_WEBHOOK"
