@@ -46,6 +46,7 @@ describe("createOpenAiTranscriber", () => {
     expect(form.get("model")).toBe(STT_MODEL);
     expect(form.get("language")).toBe("ja"); // 既定 ja(§7.5)
     expect(form.get("response_format")).toBe("json");
+    expect(form.get("chunking_strategy")).toBe("auto"); // diarize 系は必須(400 対策)
     const file = form.get("file") as File;
     expect(file.name).toBe("memo.ogg");
     expect(file.size).toBe(3);
@@ -66,6 +67,22 @@ describe("createOpenAiTranscriber", () => {
     expect(result.model).toBe("gpt-4o-transcribe-diarize");
     expect(form?.get("model")).toBe("gpt-4o-transcribe-diarize");
     expect(form?.get("language")).toBe("en");
+    expect(form?.get("chunking_strategy")).toBe("auto");
+  });
+
+  it("非 diarize モデルには chunking_strategy を送らない", async () => {
+    let form: FormData | undefined;
+    const fetchFn = async (_url: unknown, init?: RequestInit) => {
+      form = init?.body as FormData;
+      return okResponse();
+    };
+    const transcribe = createOpenAiTranscriber({
+      apiKey: "sk-test",
+      model: "gpt-4o-transcribe",
+      fetchFn: fetchFn as unknown as typeof fetch,
+    });
+    await transcribe(input());
+    expect(form?.get("chunking_strategy")).toBeNull();
   });
 
   it("429 はリトライして成功する(§7.1)", async () => {

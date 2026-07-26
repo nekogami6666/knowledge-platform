@@ -72,6 +72,12 @@ export function createOpenAiTranscriber(options: OpenAiTranscriberOptions): Tran
       form.append("model", model);
       form.append("language", input.language ?? "ja");
       form.append("response_format", "json");
+      // diarize 系モデルは chunking_strategy 必須(未指定は 400 "chunking_strategy is required
+      // for diarization models")。"auto" = サーバー側で自動分割。非 diarize モデルには送らない
+      // (whisper-1 等は未対応パラメータのため)。
+      if (model.includes("diarize")) {
+        form.append("chunking_strategy", "auto");
+      }
 
       let res: Response;
       try {
