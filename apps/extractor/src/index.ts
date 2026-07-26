@@ -93,7 +93,7 @@ async function main(): Promise<void> {
     },
     exec: gitExec,
     readdir: (dir) => fsReaddir(dir, { withFileTypes: true }),
-    notifier: createWebhookNotifier(env.DISCORD_OPS_WEBHOOK),
+    notifier: createWebhookNotifier(env.DISCORD_OPS_WEBHOOK, undefined, logger),
     now: () => new Date(),
     logger,
     realPr,

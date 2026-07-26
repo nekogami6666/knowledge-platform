@@ -1,7 +1,11 @@
 /**
  * #stratum-ops への通知(design.md §6.3 step5)。webhook に POST(cron に Gateway 接続は不要・weekly-eval と同形)。
  * webhook 未設定なら no-op。fetch は注入可能(テスト)。
+ * 通知は best-effort(失敗しても run は落とさない)が、無音の握りつぶしは経路故障に気づけないため
+ * 必ず warn を残す(2026-07-26 の webhook 誤設定が 2 日間無検知だった反省)。
  */
+import type { Logger } from "./logger.js";
+
 export interface NotifyCounts {
   new: number;
   append: number;
@@ -26,7 +30,11 @@ export type FetchFn = (
   init: { method: string; headers: Record<string, string>; body: string },
 ) => Promise<{ ok: boolean; status: number }>;
 
-export function createWebhookNotifier(webhookUrl: string | undefined, fetchFn?: FetchFn): Notifier {
+export function createWebhookNotifier(
+  webhookUrl: string | undefined,
+  fetchFn?: FetchFn,
+  logger?: Logger,
+): Notifier {
   return {
     async notifyPrCreated(msg) {
       if (webhookUrl === undefined || webhookUrl.length === 0) return; // 未設定 → no-op
@@ -40,11 +48,22 @@ export function createWebhookNotifier(webhookUrl: string | undefined, fetchFn?: 
       ]
         .filter((l) => l.length > 0)
         .join("\n");
-      await f(webhookUrl, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ content }),
-      });
+      let res: { ok: boolean; status: number };
+      try {
+        res = await f(webhookUrl, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ content }),
+        });
+      } catch (err) {
+        logger?.warn("通知の投稿に失敗", {
+          error: err instanceof Error ? err.message : String(err),
+        });
+        return;
+      }
+      if (!res.ok) {
+        logger?.warn("通知の投稿に失敗", { status: res.status });
+      }
     },
   };
 }

@@ -5,6 +5,7 @@
  * NOTE(重複回避): extractor/pr-miner の notify と同型だが文面が別。3 つ目の同型が既に現れているが、
  * 週次バッチごとに文面・payload が違うため当面は複製を維持(統合は packages/shared 検討時に一括)。
  */
+import type { Logger } from "./logger.js";
 
 /** risk:high トピックの通知 1 行分。 */
 export interface RiskNotice {
@@ -23,7 +24,11 @@ export type FetchFn = (
   init: { method: string; headers: Record<string, string>; body: string },
 ) => Promise<{ ok: boolean; status: number }>;
 
-export function createWebhookNotifier(webhookUrl: string | undefined, fetchFn?: FetchFn): Notifier {
+export function createWebhookNotifier(
+  webhookUrl: string | undefined,
+  fetchFn?: FetchFn,
+  logger?: Logger,
+): Notifier {
   return {
     async notifyHighRisk(items, reportPath) {
       if (webhookUrl === undefined || webhookUrl.length === 0) return; // 未設定 → no-op
@@ -36,11 +41,23 @@ export function createWebhookNotifier(webhookUrl: string | undefined, fetchFn?: 
         `詳細: knowledge-base の ${reportPath}`,
         "インタビュー(⑤-b)の実施を検討してください。",
       ].join("\n");
-      await f(webhookUrl, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ content }),
-      });
+      // 通知は best-effort: 失敗しても run は落とさないが、無音にせず必ず warn を残す。
+      let res: { ok: boolean; status: number };
+      try {
+        res = await f(webhookUrl, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ content }),
+        });
+      } catch (err) {
+        logger?.warn("通知の投稿に失敗", {
+          error: err instanceof Error ? err.message : String(err),
+        });
+        return;
+      }
+      if (!res.ok) {
+        logger?.warn("通知の投稿に失敗", { status: res.status });
+      }
     },
   };
 }

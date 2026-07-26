@@ -6,6 +6,8 @@
  * NOTE(重複回避): extractor/notify.ts と実装は同型だが文面が別(「PR マイニング」)。3 つ目の通知者が
  * 現れたら packages/shared 等へ統合する(週次バッチごとに文面を変えたいので当面は複製)。
  */
+import type { Logger } from "./logger.js";
+
 export interface NotifyCounts {
   new: number;
   append: number;
@@ -31,7 +33,11 @@ export type FetchFn = (
   init: { method: string; headers: Record<string, string>; body: string },
 ) => Promise<{ ok: boolean; status: number }>;
 
-export function createWebhookNotifier(webhookUrl: string | undefined, fetchFn?: FetchFn): Notifier {
+export function createWebhookNotifier(
+  webhookUrl: string | undefined,
+  fetchFn?: FetchFn,
+  logger?: Logger,
+): Notifier {
   return {
     async notifyPrCreated(msg) {
       if (webhookUrl === undefined || webhookUrl.length === 0) return; // 未設定 → no-op
@@ -43,11 +49,23 @@ export function createWebhookNotifier(webhookUrl: string | undefined, fetchFn?: 
         `新規 ${c.new} / 追記 ${c.append} / 矛盾 ${c.supersede} / skip ${c.skip}`,
         "問題なければ 👍(bot が代理マージ)、修正は PR で直接編集してください。",
       ].join("\n");
-      await f(webhookUrl, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ content }),
-      });
+      // 通知は best-effort: 失敗しても run は落とさないが、無音にせず必ず warn を残す。
+      let res: { ok: boolean; status: number };
+      try {
+        res = await f(webhookUrl, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ content }),
+        });
+      } catch (err) {
+        logger?.warn("通知の投稿に失敗", {
+          error: err instanceof Error ? err.message : String(err),
+        });
+        return;
+      }
+      if (!res.ok) {
+        logger?.warn("通知の投稿に失敗", { status: res.status });
+      }
     },
   };
 }

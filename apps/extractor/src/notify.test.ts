@@ -32,4 +32,38 @@ describe("createWebhookNotifier", () => {
     });
     expect(called).toBe(false);
   });
+  it("非 2xx 応答は warn を残す(throw しない)", async () => {
+    const warns: unknown[] = [];
+    const logger = {
+      info: () => {},
+      warn: (msg: string, data?: Record<string, unknown>) => warns.push([msg, data]),
+      error: () => {},
+    };
+    const fetchFn: FetchFn = async () => ({ ok: false, status: 404 });
+    await createWebhookNotifier("https://hook", fetchFn, logger).notifyPrCreated({
+      prUrl: "x",
+      counts,
+      people: [],
+    });
+    expect(warns).toEqual([["通知の投稿に失敗", { status: 404 }]]);
+  });
+  it("fetch の例外は握りつぶして warn を残す(run を落とさない)", async () => {
+    const warns: unknown[] = [];
+    const logger = {
+      info: () => {},
+      warn: (msg: string, data?: Record<string, unknown>) => warns.push([msg, data]),
+      error: () => {},
+    };
+    const fetchFn: FetchFn = async () => {
+      throw new Error("ECONNREFUSED");
+    };
+    await expect(
+      createWebhookNotifier("https://hook", fetchFn, logger).notifyPrCreated({
+        prUrl: "x",
+        counts,
+        people: [],
+      }),
+    ).resolves.toBeUndefined();
+    expect(warns).toEqual([["通知の投稿に失敗", { error: "ECONNREFUSED" }]]);
+  });
 });

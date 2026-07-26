@@ -87,7 +87,7 @@ async function main(): Promise<void> {
       await fsWriteFile(p, content, "utf8");
     },
     readdir: (dir) => fsReaddir(dir, { withFileTypes: true }),
-    notifier: createWebhookNotifier(env.DISCORD_OPS_WEBHOOK),
+    notifier: createWebhookNotifier(env.DISCORD_OPS_WEBHOOK, undefined, logger),
     now: () => new Date(),
     logger,
     realPr,

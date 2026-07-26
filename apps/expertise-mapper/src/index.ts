@@ -100,7 +100,7 @@ async function main(): Promise<void> {
       }
     },
     validate: (kbRoot) => validateRepo(kbRoot),
-    notifier: createWebhookNotifier(env.DISCORD_OPS_WEBHOOK),
+    notifier: createWebhookNotifier(env.DISCORD_OPS_WEBHOOK, undefined, logger),
     now: () => new Date(),
     logger,
     real: isReal(env),
