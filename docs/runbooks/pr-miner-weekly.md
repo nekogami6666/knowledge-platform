@@ -83,3 +83,22 @@ GitHub → Settings → Developer settings → Fine-grained personal access toke
   滞留した PR を先に処理すること。
 - **カーソル**: 対象リポごとの `last_merged_at` は提案 PR に同梱される `_meta/pr-miner-state.json` で
   前進する。PR がマージされて初めてカーソルが進む(extractor と同方式)。
+
+## 6. バックフィル(過去 PR の遡及)
+
+2026-07-27 から `PR_MINER_WINDOW_DAYS=180` で運用(ユーザー決定)。仕組み上の要点:
+
+- **window はカーソルが無いリポにしか効かない**(since はカーソル優先)。初回実行前に var を
+  設定したため全対象リポが 180 日遡及になる。処理は mergedAt **古い順**× cap(全リポ合計・
+  日替わり開始ローテート)なので、数週かけて古→新へ欠落なく消化される。
+- **量の調節**: 恒常は var(`PR_MINER_MAX_PRS` / `PR_MINER_WINDOW_DAYS`)、単発は
+  workflow_dispatch の inputs(`max_prs` / `window_days`)で 1 回だけ上書きできる。
+- **加速手順**: KB の pr-miner PR をマージ → dispatch、の繰り返し(open PR がある間は
+  冪等ガードで空振り)。同一 ISO 週内の 2 回目以降の実 run はブランチ名(`pr-miner/<YYYY-Www>`)
+  衝突で失敗する既知制約があるため、加速は翌週に回すか衝突エラーを許容する。
+- **さらに過去へ遡りたい場合**(カーソル確定後): window は効かないため、knowledge-base の
+  `_meta/pr-miner-state.json` から該当リポのエントリを削除する PR を作ってマージする
+  (そのリポだけ初回扱いに戻り window 遡及が復活する)。
+- **既知の縁**: 1 run の mine 結果が 0 件だと state が書かれずカーソルが前進しない
+  (同じ PR 群を次回再 mine)。抽出ヒットの薄い古い PR 帯で発生しうる。数回続く場合はコードで
+  対処するので報告すること。

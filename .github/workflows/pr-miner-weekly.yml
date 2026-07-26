@@ -24,7 +24,18 @@ name: pr-miner-weekly
 on:
   schedule:
     - cron: "0 22 * * 0" # 22:00 UTC 日曜 = 07:00 JST 月曜
-  workflow_dispatch: {}
+  # バックフィル・量調節用の手動実行(未指定なら vars → 既定へフォールバック)。
+  # 消化はマージ速度律速: open な pr-miner PR がある間の dispatch は冪等ガードで空振りする。
+  workflow_dispatch:
+    inputs:
+      max_prs:
+        description: "この run の処理 PR 数上限(空 = vars.PR_MINER_MAX_PRS → 5)"
+        required: false
+        type: string
+      window_days:
+        description: "カーソル未作成リポの遡及日数(空 = vars.PR_MINER_WINDOW_DAYS → 7)"
+        required: false
+        type: string
 
 jobs:
   mine:
@@ -81,9 +92,10 @@ jobs:
             echo "kb:"
             echo "  repo: ${{ vars.PR_MINER_KB_REPO }}"
             echo "base_branch: main"
-            echo "window_days: ${{ vars.PR_MINER_WINDOW_DAYS || '7' }}"
+            # dispatch inputs > repo vars > 既定(schedule 実行では inputs は空 = vars が効く)。
+            echo "window_days: ${{ inputs.window_days || vars.PR_MINER_WINDOW_DAYS || '7' }}"
             # 1 run の PR 上限(全リポ合計)。未設定なら 5(ADR-0023 の EXTRACTOR_MAX_FILES と同型のコスト床)。
-            echo "max_prs: ${{ vars.PR_MINER_MAX_PRS || '5' }}"
+            echo "max_prs: ${{ inputs.max_prs || vars.PR_MINER_MAX_PRS || '5' }}"
           } > apps/pr-miner/config/pr-miner.yaml
           echo "pr-miner.yaml generated:"
           cat apps/pr-miner/config/pr-miner.yaml
