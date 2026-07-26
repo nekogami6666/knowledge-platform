@@ -33,13 +33,13 @@ jobs:
   kit:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           persist-credentials: false
 
       - name: Enable corepack (pnpm)
         run: corepack enable
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: 22
           cache: pnpm
@@ -52,7 +52,7 @@ jobs:
       # checkout 側の認証は読み取りのみで足りる(ADR-0013 の実行境界)。
       - name: Checkout knowledge-base
         if: vars.EXPERTISE_KB_REPO != ''
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           repository: ${{ vars.EXPERTISE_KB_REPO }}
           token: ${{ secrets.EXTRACTOR_PAT }}

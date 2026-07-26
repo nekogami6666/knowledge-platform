@@ -41,13 +41,13 @@ jobs:
   mine:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           persist-credentials: false
 
       - name: Enable corepack (pnpm)
         run: corepack enable
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: 22
           cache: pnpm
@@ -61,7 +61,7 @@ jobs:
       # PR_MINER_KB_REPO 未設定ならスキップ(= 機能 OFF。以降のステップも同ガードで no-op)。
       - name: Checkout knowledge-base
         if: vars.PR_MINER_KB_REPO != ''
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           repository: ${{ vars.PR_MINER_KB_REPO }}
           token: ${{ secrets.EXTRACTOR_PAT }}

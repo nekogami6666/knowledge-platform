@@ -24,14 +24,14 @@ jobs:
     # 暴走時のコスト上限(通常は EXTRACTOR_MAX_FILES で早く終わる)。ADR-0023 D3。
     timeout-minutes: 180
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           # ADR-0013 D1(a): GITHUB_TOKEN を .git/config に残さない(agentic Read からの漏洩遮断)。
           persist-credentials: false
 
       - name: Enable corepack (pnpm)
         run: corepack enable
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: 22
           cache: pnpm
