@@ -33,8 +33,9 @@ for app in gap-tracker freshness-checker; do
   [ -f "$REPO_DIR/apps/$app/dist/index.js" ] || echo "WARN: apps/$app/dist が未ビルドです。先に 'pnpm -r build'(または update.sh)を実行してください。" >&2
 done
 [ -f "$REPO_DIR/apps/discord-bot/dist/stats-cli.js" ] || echo "WARN: apps/discord-bot/dist/stats-cli.js が未ビルドです。先に 'pnpm -r build' を実行してください。" >&2
+[ -f "$REPO_DIR/apps/discord-bot/dist/recordings-cleanup-cli.js" ] || echo "WARN: apps/discord-bot/dist/recordings-cleanup-cli.js が未ビルドです。先に 'pnpm -r build' を実行してください。" >&2
 
-mkdir -p "$UNIT_DIR" "$DATA_DIR/data" "$DATA_DIR/clones-gap" "$DATA_DIR/clones-freshness"
+mkdir -p "$UNIT_DIR" "$DATA_DIR/data" "$DATA_DIR/clones-gap" "$DATA_DIR/clones-freshness" "$DATA_DIR/recordings"
 
 # $1=unit basename(stratum-xxx) / $2=有効化する REAL 環境変数名(空 = REAL ゲート無し=read-only)
 render() {
@@ -56,16 +57,18 @@ echo "REPO_DIR=$REPO_DIR  DATA_DIR=$DATA_DIR  ENV_FILE=$ENV_FILE  NODE=$NODE_BIN
 render stratum-gap-tracker GAP_TRACKER_REAL
 render stratum-freshness FRESHNESS_REAL
 render stratum-stats # read-only 集計(REAL ゲート無し。DISCORD_OPS_WEBHOOK 有無が実質ゲート)
+render stratum-recordings-cleanup RECORDINGS_CLEANUP_REAL
 
 systemctl --user daemon-reload
-systemctl --user enable --now stratum-gap-tracker.timer stratum-freshness.timer stratum-stats.timer
+systemctl --user enable --now stratum-gap-tracker.timer stratum-freshness.timer stratum-stats.timer stratum-recordings-cleanup.timer
 loginctl enable-linger "$USER" >/dev/null 2>&1 || echo "WARN: enable-linger に失敗(polkit 制限)。IT に一度だけ依頼してください(母艦再起動後の自動起動に必要)。"
 
 echo ""
-echo "完了。次回タイマーで自動起動します(gap=平日10:00 / freshness=平日11:00 / stats=月09:00 JST):"
-systemctl --user list-timers stratum-gap-tracker.timer stratum-freshness.timer stratum-stats.timer --no-pager || true
+echo "完了。次回タイマーで自動起動します(gap=平日10:00 / freshness=平日11:00 / stats=月09:00 / recordings-cleanup=毎日04:30 JST):"
+systemctl --user list-timers stratum-gap-tracker.timer stratum-freshness.timer stratum-stats.timer stratum-recordings-cleanup.timer --no-pager || true
 echo ""
 echo "初回は手動起動で検証してください(まず --real 無しの dry-run 推奨):"
 echo "  systemctl --user start stratum-gap-tracker.service && journalctl --user -u stratum-gap-tracker -n 40 --no-pager"
 echo "  systemctl --user start stratum-freshness.service   && journalctl --user -u stratum-freshness   -n 40 --no-pager"
 echo "  systemctl --user start stratum-stats.service       && journalctl --user -u stratum-stats       -n 40 --no-pager"
+echo "  systemctl --user start stratum-recordings-cleanup.service && journalctl --user -u stratum-recordings-cleanup -n 40 --no-pager"

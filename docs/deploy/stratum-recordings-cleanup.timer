@@ -1,0 +1,14 @@
+# VC 録音の保持期限掃除の起動タイマー(ADR-0020)。
+# 毎日 04:30 JST(db-backup 04:00 の後・stats 09:00 / gap-tracker 10:00 / freshness 11:00 の前。
+# 夜間の録音が finalize 済みになる時刻で、他バッチと重ならない枠を選ぶ)。
+# VM のタイムゾーンが UTC の場合も動くよう Asia/Tokyo を明示する。
+# 配置: ~/.config/systemd/user/stratum-recordings-cleanup.timer → `systemctl --user enable --now` で有効化。
+[Unit]
+Description=Run stratum VC recording cleanup daily (JST)
+
+[Timer]
+OnCalendar=*-*-* 04:30 Asia/Tokyo
+Persistent=true
+
+[Install]
+WantedBy=timers.target

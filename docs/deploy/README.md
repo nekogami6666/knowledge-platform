@@ -8,7 +8,7 @@ systemd user サービス直実行だった ADR-0010 D1 を差し替え)。落�
 | 何 | どこで | 例 |
 |---|---|---|
 | 常駐 | VM の rootless Docker(compose) | discord-bot |
-| bot のローカル状態(bot.db)に触る oneshot バッチ | VM の systemd user timer(ホスト node) | gap-tracker / freshness-checker |
+| bot のローカル状態(bot.db)に触る oneshot バッチ | VM の systemd user timer(ホスト node) | gap-tracker / freshness-checker / stats / recordings-cleanup |
 | リポジトリで完結するバッチ | GitHub Actions | extractor / pr-miner / eval |
 
 - 開発はローカル(WSL2 等)、**本番はこの VM**(分離)。
@@ -129,6 +129,11 @@ cd ~/stratum/knowledge-platform && ./docs/deploy/update.sh
 bot の Docker 化後も gap-tracker は**ホスト側 systemd のまま**です(`docs/deploy/stratum-gap-tracker.{service,timer}`)。
 freshness-checker(§6.7)も同型です(`stratum-freshness.{service,timer}`・平日 11:00 JST。
 開始手順は `docs/runbooks/freshness.md`)。
+**recordings-cleanup**(`stratum-recordings-cleanup.{service,timer}`・毎日 04:30 JST)も同型で、
+VC 録音(`~/stratum/recordings/`)を保持期限で掃除します(既定: ディレクトリ 14 日 / 生 PCM 3 日。
+`RECORDINGS_RETENTION_DAYS` / `RECORDINGS_TMP_RETENTION_DAYS` で調整)。bot.db の pending な
+voice_memo に対応する録音は年齢に関わらず保持し、warn で滞留を知らせます(ADR-0020)。
+実削除は `install-timers.sh --real`(= `RECORDINGS_CLEANUP_REAL=1`)のときのみで、既定は dry-run です。
 bot.db は bind mount + uid 0 によりホストユーザ所有のままなので、同一ホスト別プロセスの共有
 (WAL + busy_timeout)が従来どおり成立します(ADR-0016 D2)。gap-tracker の更新はホスト側 build
 (update.sh がやる `pnpm -r build`)で反映されます。

@@ -64,8 +64,11 @@ curl -s http://127.0.0.1:9488/health 2>/dev/null || docker compose exec bot sh -
 - 録音の開始/終了は入退室に完全連動(コマンド無し・P3)。**2 人目以降が入っても録音は継続**
   (owner = 最初の入室者・D3)
 - 録音失敗(sidecar 不達・finalize failed)は owner に DM 案内(pending は積まない = 録り直し)
-- 音声(recording.m4a)は `~/stratum/recordings/` にのみ残る(PR には載せない)。容量が気になったら
-  古い meeting ディレクトリを削除してよい(原本 = 文字起こしは KB にある)
+- 音声(recording.m4a)は `~/stratum/recordings/` にのみ残る(PR には載せない)。原本 = 文字起こしは
+  KB にあるため、音声は保持期限で自動削除される(ADR-0020): `stratum-recordings-cleanup.timer`
+  (毎日 04:30 JST)がディレクトリを 14 日・生 PCM(`tmp/`)を 3 日で掃除する。処理待ち(pending)の
+  録音は年齢に関わらず残し warn で知らせるので、warn が続くならパイプライン失敗の滞留を疑う。
+  日数は `stratum.env` の `RECORDINGS_RETENTION_DAYS` / `RECORDINGS_TMP_RETENTION_DAYS` で変更可
 - 話者分離は v1 では無し。必要になったら `STT_MODEL` を diarize 版へ(ADR-0015 D2)
 
 ## トラブルシュート
