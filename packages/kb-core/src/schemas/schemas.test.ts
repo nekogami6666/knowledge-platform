@@ -44,6 +44,25 @@ describe("knowledgeEntrySchema", () => {
     expect(parsed.tags).toEqual(["dispenser-x"]);
   });
 
+  it("verification_status / verified_by を受理する(ADR-0027 D4・v5)", () => {
+    const parsed = knowledgeEntrySchema.parse(
+      validKnowledge({ verification_status: "unverified" }),
+    );
+    expect(parsed.verification_status).toBe("unverified");
+    const verified = knowledgeEntrySchema.parse(
+      validKnowledge({ verification_status: "verified", verified_by: "yamada" }),
+    );
+    expect(verified.verified_by).toBe("yamada");
+    // 省略 = legacy(既存エントリの後方互換)
+    expect(knowledgeEntrySchema.parse(validKnowledge()).verification_status).toBeUndefined();
+  });
+
+  it("verification_status の enum 外を拒否する", () => {
+    expect(
+      knowledgeEntrySchema.safeParse(validKnowledge({ verification_status: "checked" })).success,
+    ).toBe(false);
+  });
+
   it("review_interval_days を type 別デフォルトで補完する", () => {
     expect(
       knowledgeEntrySchema.parse(validKnowledge({ type: "procedure" })).review_interval_days,
@@ -258,6 +277,15 @@ describe("decisionRecordSchema", () => {
 
   it("status enum 外を拒否する", () => {
     expect(decisionRecordSchema.safeParse({ ...valid, status: "active" }).success).toBe(false);
+  });
+
+  it("supersedes(dr-ID)を受理し、dr- 以外を拒否する(ADR-0027 D4・v5)", () => {
+    expect(decisionRecordSchema.safeParse({ ...valid, supersedes: "dr-2026-0001" }).success).toBe(
+      true,
+    );
+    expect(decisionRecordSchema.safeParse({ ...valid, supersedes: "kb-2026-0001" }).success).toBe(
+      false,
+    );
   });
 });
 

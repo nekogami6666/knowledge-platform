@@ -29,10 +29,12 @@ const KEY_ORDER: Record<DocKind, readonly string[]> = {
     "supersedes",
     "created",
     "last_verified",
+    "verification_status",
+    "verified_by",
     "review_interval_days",
     "owner",
   ],
-  decision: ["id", "title", "date", "status", "deciders", "sources", "tags"],
+  decision: ["id", "title", "date", "status", "supersedes", "deciders", "sources", "tags"],
   question: [
     "id",
     "asked_by",

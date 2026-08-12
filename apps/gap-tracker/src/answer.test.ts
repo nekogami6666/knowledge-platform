@@ -61,6 +61,7 @@ describe("buildAnswerEntry", () => {
       created: "2026-07-06",
       last_verified: "2026-07-06",
       sources: [{ kind: "discord", url: URL }],
+      verification_status: "unverified", // 機械生成は常に unverified(ADR-0027 D4)
     });
     expect(built.frontmatter.tags).toEqual([]);
     expect(built.path).toBe("knowledge/hardware/kb-2026-0143-entry.md");

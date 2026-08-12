@@ -6,6 +6,7 @@ import {
   entryStatusSchema,
   entryTypeSchema,
   kbIdSchema,
+  verificationStatusSchema,
 } from "./common.js";
 import { sourcesSchema } from "./source.js";
 
@@ -29,6 +30,10 @@ const knowledgeEntryBaseSchema = z
     supersedes: kbIdSchema.optional(),
     created: dateOnlySchema,
     last_verified: dateOnlySchema,
+    // 検証状態(ADR-0027 D4・v5)。省略 = legacy(v5 以前のエントリ)。機械生成は常に unverified。
+    verification_status: verificationStatusSchema.optional(),
+    /** verified にした人(GitHub ユーザ名)。 */
+    verified_by: z.string().min(1).optional(),
     // 省略時は type 別デフォルトを適用(下記 transform)。decision は null(鮮度確認対象外)。
     review_interval_days: z.number().int().positive().optional(),
     owner: z.string().min(1),

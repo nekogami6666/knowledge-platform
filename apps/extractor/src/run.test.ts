@@ -558,6 +558,40 @@ describe("runExtractor", () => {
     expect(arg?.body).toContain("安全情報のため要確認");
   });
 
+  it("決定者不明で skip した decision は open question として起票される(ADR-0027 D1/D3)", async () => {
+    const gh = makeGh();
+    const noDeciders: ExtractionResult = {
+      decisions: [
+        {
+          kind: "decision",
+          title: "Z 案の採用",
+          decision: "Z 案を採用する。",
+          deciders: [],
+          confidence: "medium",
+          lines: "L5-L8",
+        },
+      ],
+      learnings: [],
+      openQuestions: [],
+    };
+    const r = await runExtractor(
+      makeDeps({
+        gh,
+        extractDeps: {
+          promptStore: { read: async () => "---\nrole: standard\n---\nR" },
+          search: async () => ({ value: noDeciders, usage: { inputTokens: 1, outputTokens: 1 } }),
+        },
+      }),
+    );
+    expect(r.counts.skip).toBe(1); // decision 自体は skip
+    expect(r.counts.openQuestions).toBe(1); // ただし問いとして残る
+    expect(r.created).toBe(true);
+    const arg = vi.mocked(gh.createPullRequest).mock.calls[0]?.[0];
+    const q = arg?.files.find((f) => f.path.startsWith("questions/open/q-"));
+    expect(q?.content).toContain("Z 案の採用");
+    expect(q?.content).toContain("決定者を特定できなかった");
+  });
+
   it("review_mentions 設定時は PR 作成・冪等 skip の両通知にレビュー担当が渡る(㉘)", async () => {
     const withReviewer: ExtractorConfig = { ...config, review_mentions: ["999"] };
     const notifier = makeNotifier();

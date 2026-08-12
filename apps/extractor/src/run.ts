@@ -509,6 +509,37 @@ export async function runExtractor(deps: RunDeps): Promise<RunSummary> {
         if (c.kind === "learning" && change.action === "new") {
           recordLearningDomain(c.domain, domainSet, domains, logger);
         }
+        // 決定者不明で skip した decision は破棄せず問いとして残す(ADR-0027 D1/D3)。
+        // 「誰が決めたか」を人間に確認してもらう導線(gap-tracker の open スイープが依頼を送る)。
+        if (
+          change.action === "skip" &&
+          change.reasonCode === "no_deciders" &&
+          c.kind === "decision" &&
+          !seenQuestionTitles.has(c.title)
+        ) {
+          seenQuestionTitles.add(c.title);
+          const questionMoment = sourceDate ?? deps.now();
+          files.push(
+            materializeOpenQuestion({
+              id: deps.makeId("q", questionMoment),
+              candidate: {
+                kind: "open_question",
+                title: c.title,
+                body: `決定者を特定できなかった決定事項。誰が(本当に)決定したかの確認が必要。\n\n${c.decision}`,
+                ...(c.lines !== undefined ? { lines: c.lines } : {}),
+              },
+              source: {
+                kind: batch.sourceKind,
+                repo: batch.repo,
+                path,
+                ref: batch.headSha,
+                ...(c.lines !== undefined ? { lines: c.lines } : {}),
+              },
+              askedAt: questionMoment,
+            }),
+          );
+          counts.openQuestions += 1;
+        }
       }
       timings.materializeMs += clock() - tMaterialize;
     }

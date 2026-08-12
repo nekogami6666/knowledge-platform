@@ -66,6 +66,8 @@ export {
   riskSchema,
   type SourceKind,
   sourceKindSchema,
+  type VerificationStatus,
+  verificationStatusSchema,
 } from "./schemas/common.js";
 export {
   type DecisionRecord,

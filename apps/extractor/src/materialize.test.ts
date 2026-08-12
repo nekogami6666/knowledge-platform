@@ -177,6 +177,33 @@ describe("materializeOne — new", () => {
     );
     expect(r.action).toBe("skip");
     expect(r.files).toHaveLength(0);
+    expect(r.reasonCode).toBe("no_deciders"); // 呼び出し側が open question 化する(ADR-0027 D3)
+  });
+});
+
+describe("materializeOne — 検証状態(ADR-0027 D4・kb-core v5)", () => {
+  it("新規 learning は verification_status: unverified で作られる(機械生成)", async () => {
+    const r = await materializeOne(
+      {
+        kbRoot: "/kb",
+        source: { kind: "meeting", repo: "org/minutes", path: "m.md", ref: "sha" },
+        fallbackPeople: [],
+        candidate: {
+          kind: "learning",
+          title: "t",
+          body: "b",
+          entryType: "fact",
+          domain: "hardware",
+          people: ["yamada"],
+          tags: [],
+          confidence: "high",
+          slug: "t",
+        },
+        verdict: { classification: "new", reason: "新規" },
+      },
+      { makeId: stubMakeId(), now: NOW },
+    );
+    expect(r.files[0]?.content).toContain('verification_status: "unverified"');
   });
 });
 
@@ -383,5 +410,51 @@ describe("materializeOne — contradiction", () => {
     const newParsed = parseEntry(newF?.content ?? "", "knowledge");
     expect(newParsed.frontmatter.supersedes).toBe("kb-2026-0142");
     expect(newParsed.frontmatter.status).toBe("active");
+  });
+
+  it("decision の矛盾更新は新 DR に supersedes(dr-ID)を付ける(ADR-0027 D4・v5)", async () => {
+    const existingDr = `---
+id: "dr-2026-0031"
+title: "旧決定"
+date: "2026-06-03"
+status: "accepted"
+deciders:
+  - "yamada"
+sources:
+  - kind: "meeting"
+    repo: "org/minutes"
+    path: "old.md"
+tags: []
+---
+本文
+`;
+    const r = await materializeOne(
+      {
+        kbRoot: "/kb",
+        source: { kind: "meeting", repo: "org/minutes", path: "m.md", ref: "sha" },
+        fallbackPeople: [],
+        candidate: {
+          kind: "decision",
+          title: "新決定",
+          decision: "方式を B に変更する。",
+          deciders: ["yamada"],
+          confidence: "high",
+          slug: "new-decision",
+        },
+        verdict: {
+          classification: "contradiction",
+          targetPath: "decisions/2026/dr-2026-0031-old.md",
+          targetId: "dr-2026-0031",
+          reason: "決定の置き換え",
+        },
+      },
+      { makeId: stubMakeId(), now: NOW, readFile: async () => existingDr },
+    );
+    expect(r.action).toBe("supersede");
+    const newF = r.files.find((f) => f.path.includes("dr-2026-t00001"));
+    const newParsed = parseEntry(newF?.content ?? "", "decision");
+    expect(newParsed.frontmatter.supersedes).toBe("dr-2026-0031");
+    const oldF = r.files.find((f) => f.path.includes("dr-2026-0031"));
+    expect(parseEntry(oldF?.content ?? "", "decision").frontmatter.status).toBe("superseded");
   });
 });

@@ -134,6 +134,7 @@ describe("buildCaptureEntry", () => {
       status: "active",
       created: "2026-07-06",
       sources: [{ kind: "discord", url: URL }],
+      verification_status: "unverified", // 機械生成は常に unverified(ADR-0027 D4)
     });
     expect(built.path).toBe("knowledge/hardware/kb-2026-0143-entry.md");
   });

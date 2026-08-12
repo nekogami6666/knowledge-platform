@@ -30,6 +30,15 @@ export const SOURCE_KINDS = [
 export const sourceKindSchema = z.enum(SOURCE_KINDS);
 export type SourceKind = z.infer<typeof sourceKindSchema>;
 
+/**
+ * 検証状態(ADR-0027 D4・kb-core v5)。機械生成エントリは常に unverified で作られ、人間の
+ * 確認をもって verified に更新される。省略(既存エントリ)は legacy = 未分類。
+ * last_verified は「内容の as-of 日(源泉日)」であり人間検証日ではない(ADR-0026 D3 の明確化)。
+ */
+export const VERIFICATION_STATUSES = ["unverified", "verified"] as const;
+export const verificationStatusSchema = z.enum(VERIFICATION_STATUSES);
+export type VerificationStatus = z.infer<typeof verificationStatusSchema>;
+
 export const DR_STATUSES = ["proposed", "accepted", "superseded"] as const;
 export const drStatusSchema = z.enum(DR_STATUSES);
 export type DrStatus = z.infer<typeof drStatusSchema>;

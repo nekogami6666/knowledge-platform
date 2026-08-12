@@ -157,6 +157,8 @@ export function buildCaptureEntry(
     status: "active",
     created: today,
     last_verified: today,
+    // 機械生成(LLM 草案)なので常に unverified(ADR-0027 D4)。人間確認で verified に更新される。
+    verification_status: "unverified",
     owner,
   };
   const body = `\n## 概要\n${candidate.body}\n`;
