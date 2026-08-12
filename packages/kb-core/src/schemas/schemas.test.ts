@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { DEFAULT_REVIEW_INTERVAL_DAYS } from "./common.js";
+import { DEFAULT_REVIEW_INTERVAL_DAYS, ID_PREFIX_RE } from "./common.js";
 import { decisionRecordSchema } from "./decision-record.js";
 import { expertiseMapSchema } from "./expertise-map.js";
 import { knowledgeEntrySchema } from "./knowledge-entry.js";
@@ -88,9 +88,43 @@ describe("knowledgeEntrySchema", () => {
   });
 
   it("不正な ID 形式を検出する", () => {
-    for (const bad of ["kb-26-0142", "KB-2026-0142", "kb-2026-142", "dr-2026-0001"]) {
+    for (const bad of [
+      "kb-26-0142",
+      "KB-2026-0142",
+      "kb-2026-142",
+      "dr-2026-0001",
+      // 新形式(ADR-0026)の境界: 5文字・7文字・大文字・`-` 入り suffix は不正
+      "kb-2026-a3f8x",
+      "kb-2026-a3f8x7z",
+      "kb-2026-A3F8X7",
+      "kb-2026-a3-8x7",
+    ]) {
       const result = knowledgeEntrySchema.safeParse(validKnowledge({ id: bad }));
       expect(result.success, bad).toBe(false);
+    }
+  });
+
+  it("ランダム6文字の新 ID 形式(ADR-0026)を旧形式と併せて受理する", () => {
+    // 新: base36 ちょうど6文字(全数字6文字も有効 = 長さで旧4桁と判別)
+    for (const good of ["kb-2026-a3f8x7", "kb-2026-123456", "kb-2027-000abc"]) {
+      expect(knowledgeEntrySchema.safeParse(validKnowledge({ id: good })).success, good).toBe(true);
+    }
+    // 旧: 4桁連番は恒久共存(既存49エントリ)
+    expect(knowledgeEntrySchema.safeParse(validKnowledge({ id: "kb-2026-0142" })).success).toBe(
+      true,
+    );
+  });
+
+  it("ID_PREFIX_RE はファイル名から新旧 ID を正しく切り出す(全数字6文字を途中切りしない)", () => {
+    const cases: [string, string][] = [
+      ["kb-2026-0142-wiring-diagram.md", "kb-2026-0142"], // 旧4桁 + slug
+      ["kb-2026-a3f8x7-allegro-specs.md", "kb-2026-a3f8x7"], // 新6文字 + slug
+      ["kb-2026-123456-edge-case.md", "kb-2026-123456"], // 全数字6文字(選択順が \d{4} 先だと途中切りされる)
+      ["dr-2026-0031-panel-material.md", "dr-2026-0031"],
+      ["q-2026-b7c1zx.md", "q-2026-b7c1zx"],
+    ];
+    for (const [filename, expected] of cases) {
+      expect(ID_PREFIX_RE.exec(filename)?.[0], filename).toBe(expected);
     }
   });
 

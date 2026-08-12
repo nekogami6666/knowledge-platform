@@ -46,28 +46,36 @@ export const RISK_LEVELS = ["high", "medium", "low"] as const;
 export const riskSchema = z.enum(RISK_LEVELS);
 export type Risk = z.infer<typeof riskSchema>;
 
-// --- ID 形式(design.md §4.2〜4.4。kind-<年4桁>-<連番4桁>) ---
+// --- ID 形式(design.md §4.2〜4.4 / ADR-0026) ---
+// 新形式 = kind-<年4桁>-<base36 6文字>(乱数採番・counter 不要)。旧形式 = kind-<年4桁>-<連番4桁>。
+// 既存エントリの旧 ID はリネームせず恒久共存するため、スキーマは両形式の和で受ける。
+// suffix はちょうど4桁数字(旧)/ちょうど6文字(新)なので長さだけで新旧を機械判別できる。
+// 新 suffix に `-` を含めないこと(ID_PREFIX_RE の前方一致がファイル名 slug に食い込まないための制約)。
 
-export const KB_ID_RE = /^kb-\d{4}-\d{4}$/;
-export const DR_ID_RE = /^dr-\d{4}-\d{4}$/;
-export const Q_ID_RE = /^q-\d{4}-\d{4}$/;
+// 6文字を先に試す(正規表現の選択は順序評価)。全数字6文字の新 ID をファイル名から前方一致で
+// 切り出すとき、\d{4} が先だと先頭4桁で途中切りされるため、長い方を優先する。
+const ID_SUFFIX = String.raw`(?:[0-9a-z]{6}|\d{4})`;
+
+export const KB_ID_RE = new RegExp(`^kb-\\d{4}-${ID_SUFFIX}$`);
+export const DR_ID_RE = new RegExp(`^dr-\\d{4}-${ID_SUFFIX}$`);
+export const Q_ID_RE = new RegExp(`^q-\\d{4}-${ID_SUFFIX}$`);
 
 export const kbIdSchema = z
   .string()
-  .regex(KB_ID_RE, "id は kb-<年4桁>-<連番4桁> 形式である必要があります");
+  .regex(KB_ID_RE, "id は kb-<年4桁>-<連番4桁|ランダム6文字> 形式である必要があります");
 export const drIdSchema = z
   .string()
-  .regex(DR_ID_RE, "id は dr-<年4桁>-<連番4桁> 形式である必要があります");
+  .regex(DR_ID_RE, "id は dr-<年4桁>-<連番4桁|ランダム6文字> 形式である必要があります");
 export const qIdSchema = z
   .string()
-  .regex(Q_ID_RE, "id は q-<年4桁>-<連番4桁> 形式である必要があります");
+  .regex(Q_ID_RE, "id は q-<年4桁>-<連番4桁|ランダム6文字> 形式である必要があります");
 
 export type KbId = z.infer<typeof kbIdSchema>;
 export type DrId = z.infer<typeof drIdSchema>;
 export type QId = z.infer<typeof qIdSchema>;
 
-/** allocateId / validateRepo がパスから ID を取り出すための前方一致パターン。 */
-export const ID_PREFIX_RE = /^(kb|dr|q)-(\d{4})-(\d{4})/;
+/** 採番/validateRepo がパスから ID を取り出すための前方一致パターン(新旧両対応)。 */
+export const ID_PREFIX_RE = new RegExp(`^(kb|dr|q)-(\\d{4})-${ID_SUFFIX}`);
 
 // --- 日付 / 日時 ---
 
