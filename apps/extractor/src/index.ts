@@ -12,7 +12,7 @@ import {
 import { dirname } from "node:path";
 import { promisify } from "node:util";
 import { createGhClientFromEnv, type GhClient } from "@stratum/gh-client";
-import { createLocalIdCounterStore, validateRepo } from "@stratum/kb-core";
+import { newId, validateRepo } from "@stratum/kb-core";
 import { createFsPromptStore, nullUsageRecorder } from "@stratum/llm";
 import { createFsConfigReader, loadExtractorConfig } from "./config.js";
 import type { GitExec } from "./diff.js";
@@ -84,7 +84,7 @@ async function main(): Promise<void> {
     gh: realPr ? createGhClientFromEnv() : nullGhClient(),
     extractDeps: { promptStore, usage: nullUsageRecorder, timeoutMs: timeout.value },
     reconcileDeps: { promptStore, usage: nullUsageRecorder, timeoutMs: timeout.value },
-    makeIdStore: (kbRoot) => createLocalIdCounterStore(kbRoot),
+    makeId: (kind) => newId(kind),
     validate: (kbRoot) => validateRepo(kbRoot),
     readFile: (p) => fsReadFile(p, "utf8"),
     writeFile: async (p, content) => {

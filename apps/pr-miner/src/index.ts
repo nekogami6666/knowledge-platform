@@ -12,7 +12,7 @@ import {
 } from "node:fs/promises";
 import { dirname } from "node:path";
 import { createGhClientFromAuth, createGhClientFromEnv, type GhClient } from "@stratum/gh-client";
-import { createLocalIdCounterStore, validateRepo } from "@stratum/kb-core";
+import { newId, validateRepo } from "@stratum/kb-core";
 import { createFsPromptStore, nullUsageRecorder } from "@stratum/llm";
 import { createFsConfigReader, loadPrMinerConfig } from "./config.js";
 import { isRealPr, parseEnv, parsePositiveInt } from "./env.js";
@@ -79,7 +79,7 @@ async function main(): Promise<void> {
       timeoutMs: timeout.value,
       app: "pr-miner",
     },
-    makeIdStore: (kbRoot) => createLocalIdCounterStore(kbRoot),
+    makeId: (kind) => newId(kind),
     validate: (kbRoot) => validateRepo(kbRoot),
     readFile: (p) => fsReadFile(p, "utf8"),
     writeFile: async (p, content) => {

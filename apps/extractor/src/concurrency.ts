@@ -1,7 +1,7 @@
 /**
  * 上限付き並行 map(⑱・§2-E/§2-F)。items を最大 limit 件だけ同時に fn へ流し、**入力順**で結果を返す。
  * extractor の reconcile(read-only な agentic search)を並列化して wall-clock を縮めるための最小実装。
- * 書き込み(materialize/allocateId)は呼び出し側が逐次に保つ(安全性と速度の分離)。
+ * 書き込み(materialize)は呼び出し側が逐次に保つ(安全性と速度の分離)。
  *
  * NOTE(重複回避・§2-F): discord-bot の `SerialQueue` は limit=1 のキューで別プリミティブ。bounded 並行を
  * 要する2つ目の consumer が現れたら、本関数と SerialQueue を共有パッケージ(packages/shared 等)へ統合する

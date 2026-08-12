@@ -1,22 +1,11 @@
-import { type IdCounterFile, type IdCounterStore, parseEntry } from "@stratum/kb-core";
+import { type IdKind, parseEntry } from "@stratum/kb-core";
 import { describe, expect, it } from "vitest";
 import { type MaterializeInput, materializeOne } from "./materialize.js";
 
-const SEED: IdCounterFile = { kb: { "2026": 143 }, dr: { "2026": 31 }, q: { "2026": 88 } };
-
-function memStore(seed: IdCounterFile): IdCounterStore {
-  let counters = structuredClone(seed);
-  let version = "v0";
+/** 決定的な連番スタブ(実装は kb-core newId の乱数採番・ADR-0026)。suffix は base36 6文字。 */
+function stubMakeId(): (kind: IdKind) => string {
   let n = 0;
-  return {
-    load: async () => ({ counters: structuredClone(counters), version }),
-    save: async (c, expected) => {
-      if (expected !== version) throw new Error("conflict");
-      counters = structuredClone(c);
-      n += 1;
-      version = `v${n}`;
-    },
-  };
+  return (kind) => `${kind}-2026-t${String(++n).padStart(5, "0")}`;
 }
 
 // 既存 KB エントリ(reconcile の target)。readFile fake が返す。
@@ -47,7 +36,7 @@ owner: yamada
 const NOW = () => new Date("2026-07-01T00:00:00Z");
 
 describe("materializeOne — new", () => {
-  it("learning → knowledge/<domain>/kb-2026-0144-<slug>.md(meeting 出典・round-trip)", async () => {
+  it("learning → knowledge/<domain>/kb-2026-t00001-<slug>.md(meeting 出典・round-trip)", async () => {
     const input: MaterializeInput = {
       kbRoot: "/kb",
       source: {
@@ -70,14 +59,14 @@ describe("materializeOne — new", () => {
       },
       verdict: { classification: "new", reason: "新規" },
     };
-    const r = await materializeOne(input, { idStore: memStore(SEED), now: NOW });
+    const r = await materializeOne(input, { makeId: stubMakeId(), now: NOW });
     expect(r.action).toBe("new");
-    expect(r.id).toBe("kb-2026-0144");
+    expect(r.id).toBe("kb-2026-t00001");
     expect(r.files).toHaveLength(1);
     const f = r.files[0];
-    expect(f?.path).toBe("knowledge/hardware/kb-2026-0144-humidity-threshold.md");
+    expect(f?.path).toBe("knowledge/hardware/kb-2026-t00001-humidity-threshold.md");
     const parsed = parseEntry(f?.content ?? "", "knowledge");
-    expect(parsed.frontmatter.id).toBe("kb-2026-0144");
+    expect(parsed.frontmatter.id).toBe("kb-2026-t00001");
     expect(parsed.frontmatter.owner).toBe("suzuki");
     expect(parsed.frontmatter.sources).toHaveLength(1);
     const src = parsed.frontmatter.sources[0];
@@ -89,7 +78,7 @@ describe("materializeOne — new", () => {
     });
   });
 
-  it("decision → decisions/2026/dr-2026-0032-<slug>.md(却下理由を body に)", async () => {
+  it("decision → decisions/2026/dr-2026-t00001-<slug>.md(却下理由を body に)", async () => {
     const r = await materializeOne(
       {
         kbRoot: "/kb",
@@ -106,12 +95,12 @@ describe("materializeOne — new", () => {
         },
         verdict: { classification: "new", reason: "新規" },
       },
-      { idStore: memStore(SEED), now: NOW },
+      { makeId: stubMakeId(), now: NOW },
     );
     expect(r.action).toBe("new");
-    expect(r.id).toBe("dr-2026-0032");
+    expect(r.id).toBe("dr-2026-t00001");
     const f = r.files[0];
-    expect(f?.path).toBe("decisions/2026/dr-2026-0032-firmware-swd.md");
+    expect(f?.path).toBe("decisions/2026/dr-2026-t00001-firmware-swd.md");
     const parsed = parseEntry(f?.content ?? "", "decision");
     expect(parsed.frontmatter.deciders).toEqual(["yamada", "sato"]);
     expect(parsed.frontmatter.status).toBe("accepted");
@@ -127,7 +116,7 @@ describe("materializeOne — new", () => {
         candidate: { kind: "decision", title: "x", decision: "y", deciders: [], confidence: "low" },
         verdict: { classification: "new", reason: "新規" },
       },
-      { idStore: memStore(SEED), now: NOW },
+      { makeId: stubMakeId(), now: NOW },
     );
     expect(r.action).toBe("skip");
     expect(r.files).toHaveLength(0);
@@ -159,7 +148,7 @@ describe("materializeOne — duplicate", () => {
 
   it("新しい出典を既存に追記(採番なし)", async () => {
     const r = await materializeOne(dupInput("2026/06/2026-06-10-hw-weekly.md"), {
-      idStore: memStore(SEED),
+      makeId: stubMakeId(),
       now: NOW,
       readFile: async () => existing0142,
     });
@@ -174,7 +163,7 @@ describe("materializeOne — duplicate", () => {
 
   it("同一出典は重複追記しない", async () => {
     const r = await materializeOne(dupInput("2026/06/2026-06-03-hw-weekly.md"), {
-      idStore: memStore(SEED),
+      makeId: stubMakeId(),
       now: NOW,
       readFile: async () => existing0142,
     });
@@ -198,7 +187,7 @@ describe("materializeOne — duplicate", () => {
       source: { kind: "pr", repo: "org/dev-repo", number: 43 },
     };
     const rSame = await materializeOne(same, {
-      idStore: memStore(SEED),
+      makeId: stubMakeId(),
       now: NOW,
       readFile: async () => withPr,
     });
@@ -206,7 +195,7 @@ describe("materializeOne — duplicate", () => {
       1,
     );
     const rDiff = await materializeOne(diff, {
-      idStore: memStore(SEED),
+      makeId: stubMakeId(),
       now: NOW,
       readFile: async () => withPr,
     });
@@ -246,13 +235,13 @@ describe("materializeOne — contradiction", () => {
           reason: "しきい値が 45→40 に更新",
         },
       },
-      { idStore: memStore(SEED), now: NOW, readFile: async () => existing0142 },
+      { makeId: stubMakeId(), now: NOW, readFile: async () => existing0142 },
     );
     expect(r.action).toBe("supersede");
-    expect(r.id).toBe("kb-2026-0144");
+    expect(r.id).toBe("kb-2026-t00001");
     expect(r.files).toHaveLength(2);
     const oldF = r.files.find((f) => f.path.includes("kb-2026-0142"));
-    const newF = r.files.find((f) => f.path.includes("kb-2026-0144"));
+    const newF = r.files.find((f) => f.path.includes("kb-2026-t00001"));
     expect(parseEntry(oldF?.content ?? "", "knowledge").frontmatter.status).toBe("superseded");
     const newParsed = parseEntry(newF?.content ?? "", "knowledge");
     expect(newParsed.frontmatter.supersedes).toBe("kb-2026-0142");

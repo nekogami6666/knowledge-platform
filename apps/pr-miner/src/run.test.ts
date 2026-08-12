@@ -8,7 +8,7 @@ import type {
   PrFileSummary,
   PrSummary,
 } from "@stratum/gh-client";
-import type { IdCounterFile, IdCounterStore } from "@stratum/kb-core";
+import type { IdKind } from "@stratum/kb-core";
 import { describe, expect, it, vi } from "vitest";
 import type { PrMinerConfig } from "./config.js";
 import { createLogger } from "./logger.js";
@@ -23,19 +23,10 @@ const config: PrMinerConfig = {
 
 const NOW = new Date("2026-07-09T00:00:00Z"); // W28
 
-function memStore(seed: IdCounterFile): IdCounterStore {
-  let counters = structuredClone(seed);
-  let version = "v0";
+/** 決定的な連番スタブ(実装は kb-core newId の乱数採番・ADR-0026)。suffix は base36 6文字。 */
+function stubMakeId(): (kind: IdKind) => string {
   let n = 0;
-  return {
-    load: async () => ({ counters: structuredClone(counters), version }),
-    save: async (c, expected) => {
-      if (expected !== version) throw new Error("conflict");
-      counters = structuredClone(c);
-      n += 1;
-      version = `v${n}`;
-    },
-  };
+  return (kind) => `${kind}-2026-t${String(++n).padStart(5, "0")}`;
 }
 
 const oneLearning: ExtractionResult = {
@@ -108,9 +99,7 @@ function makeGh(over: Partial<GhClient> = {}): GhClient {
 
 function makeDeps(over: Partial<RunDeps> = {}): { deps: RunDeps; written: Record<string, string> } {
   const written: Record<string, string> = {};
-  const fsFiles: Record<string, string> = {
-    "/kb/_meta/id-counter.json": JSON.stringify({ kb: { "2026": 144 }, dr: { "2026": 30 } }),
-  };
+  const fsFiles: Record<string, string> = {};
   const prompt = { read: async () => "---\nrole: standard\n---\nRULES" };
   const deps: RunDeps = {
     config,
@@ -124,7 +113,7 @@ function makeDeps(over: Partial<RunDeps> = {}): { deps: RunDeps; written: Record
       promptStore: prompt,
       search: async () => ({ value: newVerdict, usage: { inputTokens: 1, outputTokens: 1 } }),
     },
-    makeIdStore: () => memStore({ kb: { "2026": 144 }, dr: { "2026": 30 } }),
+    makeId: stubMakeId(),
     validate: async () => ({ ok: true, problems: [] }),
     readFile: async (p) => {
       const v = fsFiles[p];
@@ -166,7 +155,7 @@ describe("runPrMiner", () => {
     expect(ghRead.createPullRequest).not.toHaveBeenCalled();
   });
 
-  it("happy path: 原本+カーソル+採番を 1 PR に載せ、head は週キー", async () => {
+  it("happy path: 原本+カーソルを 1 PR に載せ(id-counter は同梱しない)、head は週キー", async () => {
     const gh = makeGh();
     const { deps, written } = makeDeps({ gh });
     const summary = await runPrMiner(deps);
@@ -182,7 +171,7 @@ describe("runPrMiner", () => {
     expect(create.base).toBe("main");
     const paths = create.files.map((f) => f.path);
     expect(paths).toContain("_meta/pr-miner-state.json");
-    expect(paths).toContain("_meta/id-counter.json");
+    expect(paths).not.toContain("_meta/id-counter.json");
     expect(paths.some((p) => p.startsWith("knowledge/gh-client/kb-"))).toBe(true);
     // カーソルは処理した PR の merged_at に前進
     const state = JSON.parse(written["/kb/_meta/pr-miner-state.json"] ?? "{}") as {
@@ -328,7 +317,6 @@ describe("runPrMiner", () => {
       gh,
       readFile: async (p) => {
         if (p === "/kb/_meta/pr-miner-state.json") return stateRaw;
-        if (p === "/kb/_meta/id-counter.json") return JSON.stringify({ kb: { "2026": 144 } });
         throw new Error(`ENOENT ${p}`);
       },
     });

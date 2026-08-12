@@ -13,7 +13,6 @@ export {
 } from "./entry-io.js";
 // --- エラー ---
 export {
-  KbIdError,
   type KbIssue,
   KbParseError,
   type KbParseErrorCode,
@@ -25,15 +24,8 @@ export {
   sameExpertiseContent,
   serializeExpertiseMap,
 } from "./expertise-io.js";
-// --- ID 採番 ---
-export {
-  type AllocateIdOptions,
-  allocateId,
-  createLocalIdCounterStore,
-  type IdCounterFile,
-  type IdCounterStore,
-  type IdKind,
-} from "./id-allocator.js";
+// --- ID 採番(乱数・ADR-0026)---
+export { type IdKind, type NewIdOptions, newId } from "./id-allocator.js";
 // --- members 対応表(_meta/members.yaml・ADR-0017 D3)---
 export {
   discordForGithub,

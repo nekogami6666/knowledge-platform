@@ -17,7 +17,7 @@ import {
 } from "@stratum/extractor/materialize";
 import { type ReconcileDeps, reconcileCandidate } from "@stratum/extractor/reconcile";
 import type { GhClient, MergedPrSummary } from "@stratum/gh-client";
-import type { IdCounterStore, Source } from "@stratum/kb-core";
+import type { IdKind, Source } from "@stratum/kb-core";
 import type { PrMinerConfig } from "./config.js";
 import { type PrMinerState, readState, serializeState } from "./cursor.js";
 import { extractFromPr, type PrExtractDeps, type PrInput } from "./extract.js";
@@ -38,7 +38,7 @@ export interface RunDeps {
   ghRead?: GhClient;
   extractDeps: Omit<PrExtractDeps, "existingDomains" | "cwd">;
   reconcileDeps: ReconcileDeps;
-  makeIdStore: (kbRoot: string) => IdCounterStore;
+  makeId: (kind: IdKind) => string;
   validate: (kbRoot: string) => Promise<{ ok: boolean; problems: readonly unknown[] }>;
   readFile: (absPath: string) => Promise<string>;
   writeFile: (absPath: string, content: string) => Promise<void>;
@@ -136,8 +136,11 @@ export async function runPrMiner(deps: RunDeps): Promise<PrMinerSummary> {
   }
 
   const existingDomains = await listDomains(deps.kbRoot, deps.readdir);
-  const idStore = deps.makeIdStore(deps.kbRoot);
-  const materializeDeps: MaterializeDeps = { idStore, now: deps.now, readFile: deps.readFile };
+  const materializeDeps: MaterializeDeps = {
+    makeId: deps.makeId,
+    now: deps.now,
+    readFile: deps.readFile,
+  };
   const extractDeps: PrExtractDeps = { ...deps.extractDeps, existingDomains, cwd: deps.kbRoot };
 
   const files: { path: string; content: string }[] = [];
@@ -221,10 +224,7 @@ export async function runPrMiner(deps: RunDeps): Promise<PrMinerSummary> {
   const newState: PrMinerState = { repos: newRepoCursors, last_run_at: now.toISOString() };
   await deps.writeFile(statePath, serializeState(newState));
   files.push({ path: "_meta/pr-miner-state.json", content: serializeState(newState) });
-  const counter = await deps
-    .readFile(join(deps.kbRoot, "_meta", "id-counter.json"))
-    .catch(() => null);
-  if (counter !== null) files.push({ path: "_meta/id-counter.json", content: counter });
+  // id-counter.json は同梱しない(乱数採番・ADR-0026)。
 
   const report = await deps.validate(deps.kbRoot);
   if (!report.ok) {

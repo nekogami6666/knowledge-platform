@@ -81,7 +81,7 @@ interview-kit も同じ表を必要とするため一度払えば回収できる
 
 ### D4. なぜ人物マスタを KB `_meta/` に置くのか(射程の限定)
 
-`_meta/` の従来の中身はカーソル(state.json)と採番(id-counter.json)= **機械が生成 commit する
+`_meta/` の従来の中身はカーソル(state.json)と採番(id-counter.json・ADR-0026 で廃止)= **機械が生成 commit する
 内部状態**であり(§4.6 L337)、validateRepo も走査しない。そこに人間が編集する名簿を置くのは
 性格の混在なので、判断を明示する:
 

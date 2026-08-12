@@ -1,5 +1,6 @@
 import { createMemoryStore } from "@stratum/discord-bot/store";
 import type { GhClient } from "@stratum/gh-client";
+import type { IdKind } from "@stratum/kb-core";
 import { describe, expect, it, vi } from "vitest";
 import type { GapConfig } from "./config.js";
 import { createLogger } from "./logger.js";
@@ -14,6 +15,12 @@ const config: GapConfig = {
     { github: "suzuki", discord: "902" },
   ],
 };
+
+/** 決定的な連番スタブ(実装は kb-core newId の乱数採番・ADR-0026)。suffix は base36 6文字。 */
+function stubMakeId(): (kind: IdKind) => string {
+  let n = 0;
+  return (kind) => `${kind}-2026-t${String(++n).padStart(5, "0")}`;
+}
 
 function seedStore(n: number) {
   const store = createMemoryStore();
@@ -66,25 +73,10 @@ function makeDeps(over: Partial<RunDeps> = {}): RunDeps & { written: Map<string,
     store,
     syncKb: async () => ({ absDir: "/kb", resolvedCommit: "kbsha" }),
     gh,
-    // メモリ CAS ストア(kb-core のローカル実装はファイル前提なのでテストは自前 fake)。
-    makeIdStore: () => {
-      let counters: Record<string, Record<string, number>> = { q: { "2026": 89 } };
-      let version = "v0";
-      let n = 0;
-      return {
-        load: async () => ({ counters: structuredClone(counters), version }),
-        save: async (c, expected) => {
-          if (expected !== version) throw new Error("conflict");
-          counters = structuredClone(c) as typeof counters;
-          n += 1;
-          version = `v${n}`;
-        },
-      };
-    },
+    makeId: stubMakeId(),
     validate: async () => ({ ok: true, problems: [] }),
     listQuestionRaws: async () => [],
     readFile: async (p) => {
-      if (p.endsWith("id-counter.json")) return JSON.stringify({ q: { "2026": 91 } });
       throw new Error(`ENOENT ${p}`);
     },
     writeFile: async (p, c) => {
@@ -114,7 +106,7 @@ describe("runGapTracker", () => {
     expect(commit.branch).toBe("main");
     const paths = commit.files.map((f) => f.path);
     expect(paths.filter((p) => p.startsWith("questions/open/q-2026-")).length).toBe(2);
-    expect(paths).toContain("_meta/id-counter.json");
+    expect(paths).not.toContain("_meta/id-counter.json");
     expect(posts).toHaveLength(2);
     expect(posts[0]).toContain("<@901>"); // ラウンドロビン起点は日替わりだが予約可なら必ず誰かに付く
     // 消費済み: pending が残っていない

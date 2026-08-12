@@ -60,6 +60,7 @@ type enum には `decision` を残す(型の単一性)。一方 §4.2 注記「d
 - 日時はオフセット必須 ISO 8601(§7.5)。日付/日時は YAML タイムスタンプ暗黙変換を避けるため
   `js-yaml` の `JSON_SCHEMA` で文字列として読む。
 - `_meta/id-counter.json` は `{ kind: { 年: 連番 } }`。年は JST 基準、4 桁(9999)上限。
+  (2026-08-12 追記: ADR-0026 で counter は廃止・乱数採番へ。既存の連番 ID は恒久共存)
 - `validateRepo` は fail-closed: 不在パス・KB レイアウトに見えないディレクトリ・想定外配置の
   迷子ファイルをエラーとする。
 

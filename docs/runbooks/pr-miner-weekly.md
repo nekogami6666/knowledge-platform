@@ -70,9 +70,11 @@ GitHub → Settings → Developer settings → Fine-grained personal access toke
   週次でマージが回る運用なら、頻度を上げる(日次化)より cap を上げる方が低摩擦で効く(§6.4「週次」非逸脱・ADR-0024 D1)。
   初回 real 完走後に**実消化件数を #stratum-ops の通知で確認し、cap/window を予算(月¥2-3万・ADR-0024 D1)に合わせて
   var で調整**する。滞留が続くなら cap を上げ、コストが跳ねるなら下げる。
-- **id-counter.json のコンフリクト**: extractor(日次)と pr-miner(週次)は同じ `_meta/id-counter.json` を
-  提案 PR に含める。両方の PR が同時に open のまま片方がマージされると、もう片方は id-counter が
-  コンフリクトする。後着の PR を人間が rebase(または close して次回実行で作り直し)する。
+- **(解消済み・ADR-0026)id-counter.json のコンフリクト**: かつて extractor と pr-miner は同じ
+  `_meta/id-counter.json` を提案 PR に含めており、同時 open で必ず衝突した。乱数採番化(ADR-0026)で
+  counter の同梱自体が無くなり、この衝突クラスは消滅。同一の既存エントリを両者が編集した場合の
+  意味的な衝突のみ残る(その場合は後着を close して次回実行で作り直し)。
+
 - **冪等**: 先週の pr-miner PR が未マージのまま翌週の実行が走った場合、pr-miner は
   「open な `pr-miner/*` PR がある」ことを検出して新規提案を**保留**する(reason: already-exists)。
 - **1 run の PR 上限(`PR_MINER_MAX_PRS`・既定 5)**: 繁忙期に 1 run で大量の PR を LLM 抽出してコストが

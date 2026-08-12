@@ -476,7 +476,7 @@ export async function handleProxyMergeReaction(
  * 抽出は本文スキャン、妥当性は kb-core の qIdSchema(型の唯一の正・CLAUDE.md §12.2)で確定する。
  */
 export function extractQuestionId(text: string): string | null {
-  const m = /q-\d{4}-\d{4}/.exec(text);
+  const m = /q-\d{4}-(?:[0-9a-z]{6}|\d{4})/.exec(text); // 新旧 ID 両対応(ADR-0026)。6文字を先に試す
   if (m === null) return null;
   const parsed = qIdSchema.safeParse(m[0]);
   return parsed.success ? parsed.data : null;

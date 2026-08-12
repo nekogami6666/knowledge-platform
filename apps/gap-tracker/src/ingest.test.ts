@@ -1,6 +1,6 @@
 import { type BotStore, createMemoryStore } from "@stratum/discord-bot/store";
 import type { GhClient } from "@stratum/gh-client";
-import { type QuestionLog, serializeEntry } from "@stratum/kb-core";
+import { type IdKind, type QuestionLog, serializeEntry } from "@stratum/kb-core";
 import { describe, expect, it, vi } from "vitest";
 import type { AnswerEntryCandidate } from "./answer.js";
 import type { GapConfig } from "./config.js";
@@ -15,6 +15,12 @@ const config: GapConfig = {
 };
 
 const URL = "https://discord.com/channels/1/2/3";
+
+/** 決定的な連番スタブ(実装は kb-core newId の乱数採番・ADR-0026)。suffix は base36 6文字。 */
+function stubMakeId(): (kind: IdKind) => string {
+  let n = 0;
+  return (kind) => `${kind}-2026-t${String(++n).padStart(5, "0")}`;
+}
 
 function questionRaw(id: string, question: string): string {
   const fm: QuestionLog = {
@@ -74,26 +80,11 @@ function makeDeps(over: Partial<IngestDeps> = {}): IngestDeps & { written: Map<s
     store,
     syncKb: async () => ({ absDir: "/kb", resolvedCommit: "kbsha" }),
     gh,
-    // メモリ CAS(kb-core のローカル実装はファイル前提なのでテストは自前 fake)。
-    makeIdStore: () => {
-      let counters: Record<string, Record<string, number>> = { kb: { "2026": 142 } };
-      let version = "v0";
-      let n = 0;
-      return {
-        load: async () => ({ counters: structuredClone(counters), version }),
-        save: async (c, expected) => {
-          if (expected !== version) throw new Error("conflict");
-          counters = structuredClone(c) as typeof counters;
-          n += 1;
-          version = `v${n}`;
-        },
-      };
-    },
+    makeId: stubMakeId(),
     validate: async () => ({ ok: true, problems: [] }),
     readQuestionRaw: async (_root, qid) =>
       qid === "q-2026-0007" ? questionRaw(qid, "分注ロボットは高湿度で何が起きる?") : null,
     readFile: async (p) => {
-      if (p.endsWith("id-counter.json")) return JSON.stringify({ kb: { "2026": 143 } });
       throw new Error(`ENOENT ${p}`);
     },
     writeFile: async (p, c) => {
@@ -124,7 +115,7 @@ describe("answersBranch", () => {
 });
 
 describe("runAnswerIngestion", () => {
-  it("回答1件 → 1 PR(entry + id-counter)+ ops 通知 + gap_pr 台帳 + 消費", async () => {
+  it("回答1件 → 1 PR(entry のみ・id-counter は同梱しない)+ ops 通知 + gap_pr 台帳 + 消費", async () => {
     const { gh, prs } = makeGh();
     const posts: string[] = [];
     const deps = makeDeps({ gh, postOps: async (c) => void posts.push(c) });
@@ -136,8 +127,8 @@ describe("runAnswerIngestion", () => {
     expect(pr.base).toBe("main");
     expect(pr.head).toBe(answersBranch(["q-2026-0007"]));
     const paths = pr.files.map((f) => f.path);
-    expect(paths).toContain("knowledge/hardware/kb-2026-0143-entry.md");
-    expect(paths).toContain("_meta/id-counter.json");
+    expect(paths).toContain("knowledge/hardware/kb-2026-t00001-entry.md");
+    expect(paths).not.toContain("_meta/id-counter.json");
     expect(posts[0]).toContain("https://github.com/org/knowledge-base/pull/42");
 
     const ledger = deps.store.listPendingActions("gap_pr");
@@ -149,7 +140,7 @@ describe("runAnswerIngestion", () => {
       items: [
         {
           questionId: "q-2026-0007",
-          entryId: "kb-2026-0143",
+          entryId: "kb-2026-t00001",
           asked_at: "2026-07-06T10:00:00+09:00",
         },
       ],

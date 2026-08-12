@@ -15,7 +15,9 @@ import { GhClientError } from "@stratum/gh-client";
 import {
   buildVoiceMemoDoc,
   githubForDiscord,
+  type IdKind,
   nameForDiscord,
+  newId,
   type Source,
   serializeEntry,
   voiceMemoPath,
@@ -38,7 +40,6 @@ import {
 import type { Logger } from "pino";
 import { z } from "zod";
 import {
-  allocateCaptureId,
   buildCaptureEntry,
   type CaptureLlmDeps,
   type DraftSearchFn,
@@ -91,6 +92,8 @@ export interface VoicePipelineDeps {
   draftSearch?: DraftSearchFn;
   /** 訂正反映(fast)の seam(PR-V4)。 */
   correctionSearch?: CorrectionSearchFn;
+  /** ID 採番の seam(既定 = kb-core newId(乱数・ADR-0026)。テストは決定的スタブ)。 */
+  makeId?: (kind: IdKind) => string;
   now?: () => Date;
 }
 
@@ -279,7 +282,7 @@ async function processOne(
       dateJst,
       sttModel,
     });
-    const { id, counterJson } = await allocateCaptureId(deps.gh, kbRepo, now);
+    const id = (deps.makeId ?? newId)("kb");
     const built = buildCaptureEntry(id, candidate, linkUrl, owner, now);
     // 出典は原本(kind: voice-memo)+ 元メッセージの permalink(P2)。
     // VC 録音は message permalink が無い(discord source の URL 形式を満たせない)ため原本のみ。
@@ -315,7 +318,6 @@ async function processOne(
             body: built.body,
           }),
         },
-        { path: "_meta/id-counter.json", content: counterJson },
       ],
     });
 

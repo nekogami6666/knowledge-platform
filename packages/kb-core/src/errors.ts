@@ -44,21 +44,6 @@ export class KbParseError extends Error {
   }
 }
 
-/** allocateId の採番失敗(競合上限到達・4 桁溢れ・カウンタ破損)。 */
-export class KbIdError extends Error {
-  readonly name = "KbIdError";
-  readonly code: "OVERFLOW" | "CONFLICT" | "CORRUPT_COUNTER";
-
-  constructor(
-    code: "OVERFLOW" | "CONFLICT" | "CORRUPT_COUNTER",
-    message: string,
-    options?: { cause?: unknown },
-  ) {
-    super(message, options?.cause === undefined ? undefined : { cause: options.cause });
-    this.code = code;
-  }
-}
-
 /** provenance ヘルパが不正・許可外ドメインの URL/source を扱ったときに投げる。 */
 export class KbProvenanceError extends Error {
   readonly name = "KbProvenanceError";

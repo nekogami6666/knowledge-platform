@@ -5,7 +5,6 @@ import type { MessageReaction, User } from "discord.js";
 import type { Logger } from "pino";
 import { describe, expect, it, vi } from "vitest";
 import {
-  allocateCaptureId,
   buildCaptureEntry,
   buildCapturePrompt,
   type CaptureCandidate,
@@ -151,27 +150,6 @@ describe("buildCaptureEntry", () => {
   });
 });
 
-describe("allocateCaptureId (clone なしの in-memory 採番)", () => {
-  it("既存 counter をシードに次番号を採番し、更新後 JSON を返す", async () => {
-    const gh = {
-      getFileContents: vi.fn(async () => ({
-        content: JSON.stringify({ kb: { "2026": 142 } }),
-        sha: "S",
-      })),
-    } as unknown as GhClient;
-    const r = await allocateCaptureId(gh, "org/knowledge-base", new Date("2026-07-06T01:00:00Z"));
-    expect(r.id).toBe("kb-2026-0143");
-    expect(JSON.parse(r.counterJson)).toEqual({ kb: { "2026": 143 } });
-    expect(r.counterJson.endsWith("\n")).toBe(true); // ローカル実装と同じ整形
-  });
-
-  it("counter 未作成の repo では {} から開始(kb-<年>-0001)", async () => {
-    const gh = { getFileContents: vi.fn(async () => null) } as unknown as GhClient;
-    const r = await allocateCaptureId(gh, "org/knowledge-base", new Date("2026-07-06T01:00:00Z"));
-    expect(r.id).toBe("kb-2026-0001");
-  });
-});
-
 // --- LLM ステップ(seam)-------------------------------------------------------
 
 const fakePromptStore: PromptStore = {
@@ -273,10 +251,10 @@ function fakeGh(opts: { existingHead?: string; createThrows?: unknown } = {}): {
   );
   const gh = {
     listPullRequests: list,
-    getFileContents: vi.fn(async () => ({
-      content: JSON.stringify({ kb: { "2026": 142 } }),
-      sha: "S",
-    })),
+    // counter は読まなくなった(乱数採番・ADR-0026)。getFileContents 経由の呼び出しがあれば落とす。
+    getFileContents: vi.fn(async () => {
+      throw new Error("capture は id-counter を読まない(ADR-0026)");
+    }),
     createPullRequest: vi.fn(async (o: unknown) => {
       if (opts.createThrows !== undefined) throw opts.createThrows;
       created.push(o);
@@ -373,13 +351,15 @@ function mkDeps(
     promptStore: fakePromptStore,
     triageSearch: triageYes,
     draftSearch: draftFixed,
+    // 決定的スタブ(既定は kb-core newId の乱数採番・ADR-0026)。1テスト1採番なので固定値。
+    makeId: (kind) => `${kind}-2026-abc123`,
     now: () => new Date("2026-07-06T01:00:00Z"),
     ...over,
   };
 }
 
 describe("handleLightbulb (§6.4 ③-a)", () => {
-  it("💡 → triage 成立 → 単発 PR(entry + id-counter)+ DM(PR URL)", async () => {
+  it("💡 → triage 成立 → 単発 PR(entry のみ・id-counter は同梱しない)+ DM(PR URL)", async () => {
     const { logger } = fakeLogger();
     const { store } = fakeStore();
     const { gh, created } = fakeGh();
@@ -390,8 +370,8 @@ describe("handleLightbulb (§6.4 ③-a)", () => {
     expect(pr.repo).toBe("org/knowledge-base");
     expect(pr.head).toBe("capture/MSG1");
     const paths = pr.files.map((f) => f.path);
-    expect(paths).toContain("knowledge/hardware/kb-2026-0143-entry.md");
-    expect(paths).toContain("_meta/id-counter.json");
+    expect(paths).toContain("knowledge/hardware/kb-2026-abc123-entry.md");
+    expect(paths).not.toContain("_meta/id-counter.json");
     expect(dms).toHaveLength(1);
     expect(dms[0]).toContain("https://github.com/org/knowledge-base/pull/7");
     expect(dms[0]).toContain("👍");

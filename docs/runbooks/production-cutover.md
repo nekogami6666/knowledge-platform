@@ -112,12 +112,12 @@ FS ゲートを満たす。**最終 GO は人間**(本カットオーバーの�
 ## KB データの掃除ルール(issue #92・重要)
 テストデータや誤エントリを knowledge-base から消すときは、以下を厳守する(gap-tracker の台帳整合を壊さないため):
 
-- **前進 commit のみで消す**。履歴書き換え(force push / rebase)・過去への巻き戻し・`_meta/id-counter.json`
-  のリセットは**禁止**。ID は永久欠番でよい(欠番は無害。ID 再利用は有害)。
-- KB を巻き戻すと q-id / kb-id が**再発番**され、bot.db に残った pending な `gap_pr` 台帳が**別の質問を指す
-  stale 参照**になる → gap-tracker が無関係な質問を answered へ誤移動する(実際に 2026-07-24 に発生)。
-  コード側に整合ガード(台帳の `asked_at` と KB 質問の `asked_at` を照合し不一致は skip + warn)を入れたが、
-  巻き戻し自体を避けるのが本筋。
+- **前進 commit のみで消す**。履歴書き換え(force push / rebase)・過去への巻き戻しは**禁止**。
+  ID は永久欠番でよい(欠番は無害)。
+- (経緯)かつて連番採番(`_meta/id-counter.json`)時代は、KB 巻き戻しで ID が**再発番**され、bot.db の
+  pending な `gap_pr` 台帳が別質問を指して誤 answered 移動が起きた(2026-07-24 に実害・issue #92)。
+  現在は乱数採番(ADR-0026)で再発番自体が構造的に消滅し、台帳の `asked_at` 整合ガードも多層防御として
+  残っている。それでも履歴書き換えは参照(supersedes / resulting_kb / Discord 内リンク)を壊すので禁止のまま。
 - **質問/回答系を掃除したら bot.db の関連台帳も同時に掃除**する(同じ VM 上・`DB_PATH=~/stratum/data/bot.db`):
   ```sh
   # 例: 消した質問 q-2026-000X に紐づく gap_pr / gap_reminder / gap_wontfix 台帳を確認して掃除

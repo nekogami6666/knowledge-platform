@@ -15,9 +15,8 @@ import { join } from "node:path";
 import type { BotStore } from "@stratum/discord-bot/store";
 import type { FileChange, GhClient } from "@stratum/gh-client";
 import {
-  allocateId,
   type ExpertiseMap,
-  type IdCounterStore,
+  type IdKind,
   parseExpertiseMap,
   serializeEntry,
 } from "@stratum/kb-core";
@@ -33,7 +32,7 @@ export interface RunDeps {
   store: BotStore;
   syncKb: () => Promise<SyncedKb>;
   gh: GhClient;
-  makeIdStore: (kbRoot: string) => IdCounterStore;
+  makeId: (kind: IdKind) => string;
   validate: (kbRoot: string) => Promise<{ ok: boolean; problems: readonly unknown[] }>;
   /** questions/ 配下の既存エントリ raw 一覧(冪等スキャン用。無ければ [])。 */
   listQuestionRaws: (kbRoot: string) => Promise<string[]>;
@@ -84,7 +83,6 @@ export async function runGapTracker(deps: RunDeps): Promise<RunSummary> {
 
   const kb = await deps.syncKb();
   const raws = await deps.listQuestionRaws(kb.absDir);
-  const idStore = deps.makeIdStore(kb.absDir);
 
   // §4.4 L302: expertise.yaml があれば担当選定に使う(未生成・読取不可は従来ラウンドロビン)。
   // parse 失敗も warn に留めて続行する(担当選定は依頼の付加価値であり、質問 commit を止めない)。
@@ -135,7 +133,7 @@ export async function runGapTracker(deps: RunDeps): Promise<RunSummary> {
       preferred,
     );
     rr += 1;
-    const id = await allocateId("q", idStore, { now: deps.now() });
+    const id = deps.makeId("q");
     const built = buildQuestion(id, query, assignee, deps.githubForDiscord);
     files.push({
       path: built.path,
@@ -159,14 +157,10 @@ export async function runGapTracker(deps: RunDeps): Promise<RunSummary> {
     return summary;
   }
 
-  // clone に staging(validateRepo がディスクを読む)+ 採番ファイルを commit に含める(extractor と同じ)。
+  // clone に staging(validateRepo がディスクを読む)。id-counter.json は同梱しない(乱数採番・ADR-0026)。
   for (const f of files) {
     await deps.writeFile(join(kb.absDir, f.path), f.content);
   }
-  const counter = await deps
-    .readFile(join(kb.absDir, "_meta", "id-counter.json"))
-    .catch(() => null);
-  if (counter !== null) files.push({ path: "_meta/id-counter.json", content: counter });
 
   const report = await deps.validate(kb.absDir);
   if (!report.ok) {

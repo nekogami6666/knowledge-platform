@@ -146,7 +146,7 @@ flowchart LR
       QU["questions/ … 質問ログ(未回答/回答済)"]
       EXd["expertise/ … 専門性マップ"]
       IN["interviews/ … 面談・音声メモの原本"]
-      MT["_meta/ … 名簿・採番などの管理情報"]
+      MT["_meta/ … 名簿・カーソルなどの管理情報"]
     end
     CODE -. PR で読み書き .-> DATA
 ```

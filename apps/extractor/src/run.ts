@@ -8,7 +8,7 @@
 import { join } from "node:path";
 import { performance } from "node:perf_hooks";
 import type { FileChange, GhClient } from "@stratum/gh-client";
-import type { IdCounterStore, Source } from "@stratum/kb-core";
+import type { IdKind, Source } from "@stratum/kb-core";
 import type { DecisionCandidate, ExtractionResult, LearningCandidate } from "./candidate.js";
 import { mapWithLimit } from "./concurrency.js";
 import type { ExtractorConfig } from "./config.js";
@@ -29,8 +29,8 @@ export interface RunDeps {
   gh: GhClient;
   extractDeps: ExtractDeps;
   reconcileDeps: ReconcileDeps;
-  /** kbRoot から採番ストアを作る(実: createLocalIdCounterStore、テスト: in-memory)。 */
-  makeIdStore: (kbRoot: string) => IdCounterStore;
+  /** ID 採番(実: kb-core newId(乱数・ADR-0026)、テスト: 決定的スタブ)。 */
+  makeId: (kind: IdKind) => string;
   /** KB clone のスキーマ検証(実: validateRepo)。 */
   validate: (kbRoot: string) => Promise<{ ok: boolean; problems: readonly unknown[] }>;
   readFile: (absPath: string) => Promise<string>;
@@ -285,7 +285,7 @@ export async function runExtractor(deps: RunDeps): Promise<RunSummary> {
   }
 
   const materializeDeps: MaterializeDeps = {
-    idStore: deps.makeIdStore(kbRoot),
+    makeId: deps.makeId,
     now: deps.now,
     readFile: deps.readFile,
   };
@@ -369,7 +369,7 @@ export async function runExtractor(deps: RunDeps): Promise<RunSummary> {
       });
       timings.reconcileMs += clock() - tReconcile;
 
-      // materialize は逐次(allocateId の順序性を保つ)。verdict は入力=候補順に集約済み。
+      // materialize は逐次(乱数採番で順序制約は消えたが、counts/files の集約を単純に保つため維持)。
       const tMaterialize = clock();
       for (let i = 0; i < candidates.length; i += 1) {
         const c = candidates[i];
@@ -463,8 +463,7 @@ export async function runExtractor(deps: RunDeps): Promise<RunSummary> {
   };
   await deps.writeFile(join(kbRoot, "_meta", "state.json"), serializeState(newState));
   files.push({ path: "_meta/state.json", content: serializeState(newState) });
-  const counter = await deps.readFile(join(kbRoot, "_meta", "id-counter.json")).catch(() => null);
-  if (counter !== null) files.push({ path: "_meta/id-counter.json", content: counter });
+  // id-counter.json は同梱しない(乱数採番・ADR-0026。counter が同時 open PR のコンフリクト源だった)。
 
   const report = await deps.validate(kbRoot);
   if (!report.ok) {

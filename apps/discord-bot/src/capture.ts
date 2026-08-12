@@ -4,21 +4,20 @@
  * 成立時のみ standard で草案(draft)→ knowledge-base へ単発 PR → 起票者へ DM(PR リンク +
  * 「👍 でマージ」)。DM 内 👍 の代理マージは PR-E1b(discord.ts の proxyMergeDecision 拡張)。
  *
- * - bot は KB を clone しない: 採番は gh.getFileContents で読んだ counter を in-memory 採番し
- *   更新後 counter を PR に同梱(IdCounterStore は GitHub 結合前提の CAS 抽象・id-allocator.ts)。
- *   並行 capture の競合は 2 本目の PR が id-counter.json で conflict → mergeableState!=clean →
- *   既存の代理マージガード(ADR-0004 D2)が自然に拒否する。
+ * - 採番は乱数(kb-core newId・ADR-0026)。counter 読み書きが不要になり GitHub API 往復も消えた。
+ *   並行 capture は両方そのままマージ可能(かつての counter 衝突による直列化は意図的に廃止。
+ *   重複 ID は KB validate CI の duplicate_id が防ぎ、重複内容は人間レビューの責務)。
  * - スキーマ検証は KB リポの validate CI に委ねる(validateRepo しない。⑳ 決定)。
  * - 乱用対策: channels.yaml allowlist(§9.3・DM/未許可チャンネル対象外)+ fast 門番 + user 日3件。
  * - 冪等: ブランチ `capture/<messageId>`(既存 PR があれば再作成せず DM 案内)。
  */
 import { type GhClient, GhClientError } from "@stratum/gh-client";
 import {
-  allocateId,
   githubForDiscord,
-  type IdCounterStore,
+  type IdKind,
   type KnowledgeEntry,
   nameForDiscord,
+  newId,
   serializeEntry,
 } from "@stratum/kb-core";
 import {
@@ -165,29 +164,6 @@ export function buildCaptureEntry(
   return { frontmatter, body, path };
 }
 
-/**
- * clone なしの kb- 採番: counter を GitHub から読み、in-memory 採番して更新後 JSON を返す
- * (PR に同梱する。ローカル書き込みはしない)。counter 未作成の repo では {} から開始。
- */
-export async function allocateCaptureId(
-  gh: GhClient,
-  repo: string,
-  now: Date,
-): Promise<{ id: string; counterJson: string }> {
-  const file = await gh.getFileContents({ repo, path: "_meta/id-counter.json" });
-  type Counters = Awaited<ReturnType<IdCounterStore["load"]>>["counters"];
-  let counters: Counters = file === null ? {} : (JSON.parse(file.content) as Counters);
-  const store: IdCounterStore = {
-    load: async () => ({ counters, version: "pr" }),
-    save: async (c) => {
-      counters = c;
-    },
-  };
-  const id = await allocateId("kb", store, { now });
-  // createLocalIdCounterStore と同じ整形(2 スペース + 末尾改行)で KB 内の diff を安定させる。
-  return { id, counterJson: `${JSON.stringify(counters, null, 2)}\n` };
-}
-
 // --- LLM ステップ(triage / draft。runAgentSearch は seam)---
 
 export type TriageSearchFn = (
@@ -328,6 +304,8 @@ export interface CaptureDeps {
   /** テスト用 seam(既定=実 runAgentSearch)。 */
   triageSearch?: TriageSearchFn;
   draftSearch?: DraftSearchFn;
+  /** ID 採番の seam(既定 = kb-core newId(乱数・ADR-0026)。テストは決定的スタブ)。 */
+  makeId?: (kind: IdKind) => string;
   now?: () => Date;
 }
 
@@ -405,7 +383,7 @@ export async function handleLightbulb(
       { context, cwd: deps.cwd },
       { promptStore, ...(deps.draftSearch ? { search: deps.draftSearch } : {}) },
     );
-    const { id, counterJson } = await allocateCaptureId(gh, ops.kb_repo, now);
+    const id = (deps.makeId ?? newId)("kb");
     const members = await deps.getMembers();
     const owner = githubForDiscord(members, reactor.id) ?? "unassigned";
     const built = buildCaptureEntry(id, candidate, message.url, owner, now);
@@ -426,7 +404,6 @@ export async function handleLightbulb(
           path: built.path,
           content: serializeEntry({ frontmatter: built.frontmatter, body: built.body }),
         },
-        { path: "_meta/id-counter.json", content: counterJson },
       ],
     });
     await tryDm(

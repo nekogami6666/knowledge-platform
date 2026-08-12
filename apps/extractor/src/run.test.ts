@@ -6,7 +6,7 @@ import type {
   PrFileSummary,
   PrSummary,
 } from "@stratum/gh-client";
-import type { IdCounterFile, IdCounterStore } from "@stratum/kb-core";
+import type { IdKind } from "@stratum/kb-core";
 import { describe, expect, it, vi } from "vitest";
 import type { ExtractionResult } from "./candidate.js";
 import type { ExtractorConfig } from "./config.js";
@@ -25,19 +25,10 @@ const config: ExtractorConfig = {
   base_branch: "main",
 };
 
-function memStore(seed: IdCounterFile): IdCounterStore {
-  let counters = structuredClone(seed);
-  let version = "v0";
+/** 決定的な連番スタブ(実装は kb-core newId の乱数採番・ADR-0026)。suffix は base36 6文字。 */
+function stubMakeId(): (kind: IdKind) => string {
   let n = 0;
-  return {
-    load: async () => ({ counters: structuredClone(counters), version }),
-    save: async (c, expected) => {
-      if (expected !== version) throw new Error("conflict");
-      counters = structuredClone(c);
-      n += 1;
-      version = `v${n}`;
-    },
-  };
+  return (kind) => `${kind}-2026-t${String(++n).padStart(5, "0")}`;
 }
 
 const oneLearning: ExtractionResult = {
@@ -104,7 +95,6 @@ function makeNotifier() {
 
 function makeDeps(over: Partial<RunDeps> = {}): RunDeps {
   const files: Record<string, string> = {
-    "/kb/_meta/id-counter.json": JSON.stringify({ kb: { "2026": 144 } }),
     "/m/2026/06/x.md": "# 会議\n参加者: yamada\n湿度しきい値を 40%RH 以下に更新。",
   };
   const prompt = { read: async () => "---\nrole: standard\n---\nRULES" };
@@ -128,7 +118,7 @@ function makeDeps(over: Partial<RunDeps> = {}): RunDeps {
         usage: { inputTokens: 1, outputTokens: 1 },
       }),
     },
-    makeIdStore: () => memStore({ kb: { "2026": 143 }, dr: { "2026": 31 }, q: { "2026": 88 } }),
+    makeId: stubMakeId(),
     validate: async () => ({ ok: true, problems: [] }),
     readFile: async (p) => {
       const v = files[p];
@@ -150,7 +140,7 @@ function makeDeps(over: Partial<RunDeps> = {}): RunDeps {
 }
 
 describe("runExtractor", () => {
-  it("happy path: 1 PR を作成(state.json + entry + id-counter を含む)", async () => {
+  it("happy path: 1 PR を作成(state.json + entry を含む・id-counter は同梱しない)", async () => {
     const gh = makeGh();
     const notifier = makeNotifier();
     const r = await runExtractor(makeDeps({ gh, notifier }));
@@ -160,8 +150,8 @@ describe("runExtractor", () => {
     const arg = vi.mocked(gh.createPullRequest).mock.calls[0]?.[0];
     const paths = arg?.files.map((f) => f.path) ?? [];
     expect(paths).toContain("_meta/state.json");
-    expect(paths).toContain("_meta/id-counter.json");
-    expect(paths.some((p) => p.startsWith("knowledge/hardware/kb-2026-0144"))).toBe(true);
+    expect(paths).not.toContain("_meta/id-counter.json");
+    expect(paths.some((p) => p.startsWith("knowledge/hardware/kb-2026-t00001"))).toBe(true);
     expect(arg?.title).toContain("abcdef1+0123456");
     // カーソルは両ソースとも同期時 head へ前進(PR-I1)。
     const state = JSON.parse(arg?.files.find((f) => f.path === "_meta/state.json")?.content ?? "");
@@ -350,7 +340,6 @@ describe("runExtractor", () => {
           if (p === "/kb/interviews/2026-07-01-yamada.md") {
             return "# 面談\n参加者: yamada\n初期化は電源→センサの順。";
           }
-          if (p === "/kb/_meta/id-counter.json") return JSON.stringify({ kb: { "2026": 144 } });
           throw new Error(`ENOENT ${p}`);
         },
         extractDeps: {
@@ -396,7 +385,6 @@ describe("runExtractor", () => {
         readFile: async (p) => {
           if (p === "/m/a.md") return "# 会議\n参加者: x\nPOISON 抽出でタイムアウトする議事録。";
           if (p === "/m/b.md") return "# 会議\n参加者: y\n湿度しきい値を 40%RH に更新。";
-          if (p === "/kb/_meta/id-counter.json") return JSON.stringify({ kb: { "2026": 144 } });
           throw new Error(`ENOENT ${p}`);
         },
         extractDeps: {
@@ -432,7 +420,6 @@ describe("runExtractor", () => {
           if (p === "/m/a.md") return "# 会議\nAAA";
           if (p === "/m/b.md") return "# 会議\nBBB";
           if (p === "/m/c.md") return "# 会議\nCCC";
-          if (p === "/kb/_meta/id-counter.json") return JSON.stringify({ kb: { "2026": 144 } });
           throw new Error(`ENOENT ${p}`);
         },
         extractDeps: {
@@ -472,7 +459,6 @@ describe("runExtractor", () => {
             });
           }
           if (p === "/m/p.md") return "# 会議\n参加者: z\n湿度しきい値を 40%RH に更新。";
-          if (p === "/kb/_meta/id-counter.json") return JSON.stringify({ kb: { "2026": 144 } });
           throw new Error(`ENOENT ${p}`);
         },
       }),
@@ -502,7 +488,6 @@ describe("runExtractor", () => {
             });
           }
           if (p === "/m/ok.md") return "# 会議\n参加者: z\n湿度しきい値を 40%RH に更新。";
-          if (p === "/kb/_meta/id-counter.json") return JSON.stringify({ kb: { "2026": 144 } });
           throw new Error(`ENOENT ${p}`); // gone.md を含む
         },
       }),

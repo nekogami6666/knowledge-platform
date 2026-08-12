@@ -1,6 +1,6 @@
 /**
  * GitHub クライアント(design.md §6 のバッチ群が knowledge-base に PR を書くための薄いラッパ)。
- * Octokit は {@link OctokitLike} 注入 seam の背後に置き(kb-core IdCounterStore / llm queryFn と同趣旨)、
+ * Octokit は {@link OctokitLike} 注入 seam の背後に置き(llm queryFn と同趣旨)、
  * ユニットテストは fake Octokit で鍵・ネットワーク不要にする。
  * リポジトリ名はすべて引数で受け取る(ハードコード禁止・CLAUDE.md §12.2)。
  */

@@ -15,12 +15,7 @@ import { dirname, join } from "node:path";
 import { promisify } from "node:util";
 import { createSqliteStore } from "@stratum/discord-bot/sqlite-store";
 import { createGhClientFromEnv, type GhClient } from "@stratum/gh-client";
-import {
-  createLocalIdCounterStore,
-  parseEntry,
-  type QuestionLog,
-  validateRepo,
-} from "@stratum/kb-core";
+import { newId, parseEntry, type QuestionLog, validateRepo } from "@stratum/kb-core";
 import { createFsPromptStore, nullUsageRecorder } from "@stratum/llm";
 import { runFlywheelClose } from "./close.js";
 import { createFsConfigReader, loadGapConfig } from "./config.js";
@@ -194,7 +189,7 @@ async function main(): Promise<void> {
       store,
       syncKb: syncKbThunk,
       gh,
-      makeIdStore: (kbRoot) => createLocalIdCounterStore(kbRoot),
+      makeId: (kind) => newId(kind),
       validate: (kbRoot) => validateRepo(kbRoot),
       listQuestionRaws,
       readFile,
@@ -215,7 +210,7 @@ async function main(): Promise<void> {
       store,
       syncKb: syncKbThunk,
       gh,
-      makeIdStore: (kbRoot) => createLocalIdCounterStore(kbRoot),
+      makeId: (kind) => newId(kind),
       validate: (kbRoot) => validateRepo(kbRoot),
       readQuestionRaw,
       readFile,

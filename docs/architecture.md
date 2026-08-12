@@ -156,29 +156,12 @@ flowchart TB
 - **provenance は github.com / discord.com の permalink のみ**許可([provenance.ts](../packages/kb-core/src/provenance.ts) `sourceToUrl`/`urlToSource`)。file 系 3 種は逆変換で `meeting` に正規化される(非対称・要注意)。
 - **決定的シリアライズ(P5)**: 固定キー順・`forceQuotes`・`lineWidth:-1`、YAML は `JSON_SCHEMA` ロードで日付を文字列のまま保持 → diff 安定。
 
-**ID 採番は楽観ロック(CAS)**([id-allocator.ts](../packages/kb-core/src/id-allocator.ts))。`kind-YYYY-NNNN`(年は JST、seq 上限 9999):
-
-```mermaid
-sequenceDiagram
-    participant C as caller
-    participant A as allocateId(kind, store)
-    participant S as IdCounterStore
-    loop 最大 maxRetries 回(既定5)
-        A->>S: load() → {counters, version}
-        A->>A: next = seq+1(overflow>9999 は KbIdError)
-        A->>S: save(updated, expectedVersion=version)
-        alt version 一致
-            S-->>A: OK
-            A-->>C: "kb-2026-0143"
-        else 競合(他プロセスが先に書込)
-            S-->>A: IdCounterConflictError
-            Note over A: 先頭から再 load してリトライ
-        end
-    end
-```
-
-`version` トークンは、ローカルでは `_meta/id-counter.json` のファイル内容そのもの、
-本番設計では GitHub Contents API の blob SHA を想定(compare-and-swap)。**conflict のみリトライ**、実 I/O エラーは即伝播。
+**ID 採番は乱数(ADR-0026)**([id-allocator.ts](../packages/kb-core/src/id-allocator.ts) `newId`)。
+`kind-YYYY-<base36 6文字>`(年は JST・粗い名前空間として保持)。旧形式 `kind-YYYY-NNNN`(4桁連番)の
+既存エントリは恒久共存(スキーマは両形式を受理・suffix の長さで機械判別)。かつての
+`_meta/id-counter.json` + CAS 方式は、全書き手が counter を PR に同梱するため**同時に open な KB PR が
+必ずコンフリクトする構造**だったので廃止した。乱数採番は書き手間の調整が不要で、万一の衝突
+(年内 36⁶ ≒ 22億通り)は `validateRepo` の `duplicate_id` 検査が PR を赤にして止める。
 
 `validateRepo`(CI と pre-merge で実行)は **fail-closed**: リポ不在や KB らしくないディレクトリは「問題あり」を返す。
 レイアウト深さ・`domain` = 親ディレクトリ名・`questions/` の status↔フォルダ一致・ファイル名 = frontmatter `id`・**リポ横断の id 重複** を全件収集(最初のエラーで止めない)。
@@ -328,12 +311,12 @@ flowchart TB
     ID -->|無| TRI["triage(fast, allowedTools:[])"]
     TRI -->|capture:false| STOP["静かに終了(ノイズ PR/DM を出さない)"]
     TRI -->|true| DRA["draft(standard)"]
-    DRA --> AL["allocateCaptureId<br/>(gh.getFileContents で _meta/id-counter を読む)"]
-    AL --> PR["単発 PR(記事 + id-counter.json 同梱)"]
+    DRA --> AL["newId(乱数採番・ADR-0026)"]
+    AL --> PR["単発 PR(記事のみ・counter 同梱なし)"]
     PR --> DM3["本人に DM『この DM に 👍 で merge』"]
 ```
 
-冪等キーはブランチ名 `capture/<messageId>`。ローカル clone を持たず、id 採番は `gh.getFileContents` + メモリ内 `allocateId` で PR に counter を同梱。
+冪等キーはブランチ名 `capture/<messageId>`。ローカル clone を持たず、id 採番は乱数(`newId`・ADR-0026)で GitHub API 往復なし。並行 capture は両方マージ可能(重複 ID は KB validate CI が防ぐ)。
 
 ### 4.4 voice-memo(C4)+ VC 録音
 

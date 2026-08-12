@@ -96,10 +96,10 @@ function fakeGh(opts: { existingHead?: string; createThrows?: unknown } = {}): {
           ]
         : [],
     ),
-    getFileContents: vi.fn(async () => ({
-      content: JSON.stringify({ kb: { "2026": 142 } }),
-      sha: "S",
-    })),
+    // counter は読まなくなった(乱数採番・ADR-0026)。getFileContents 経由の呼び出しがあれば落とす。
+    getFileContents: vi.fn(async () => {
+      throw new Error("voice-memo PR は id-counter を読まない(ADR-0026)");
+    }),
     createPullRequest: vi.fn(async (o: { head: string; files: never }) => {
       if (opts.createThrows !== undefined) throw opts.createThrows;
       created.push(o as never);
@@ -169,6 +169,8 @@ function mkDeps(over: Partial<VoicePipelineDeps> = {}): VoicePipelineDeps {
     messenger,
     fetchFn: okFetch,
     draftSearch: draftFixed,
+    // 決定的スタブ(既定は kb-core newId の乱数採番・ADR-0026)。1テスト1採番なので固定値。
+    makeId: (kind) => `${kind}-2026-abc123`,
     now: () => new Date("2026-07-08T01:00:00Z"), // JST 10:00
     ...over,
   };
@@ -181,7 +183,7 @@ describe("voiceMemoBranch", () => {
 });
 
 describe("processVoiceMemoQueue", () => {
-  it("原本 + 記事 + 採番を 1 PR に同梱し、スレッド返信 + DM して done にする", async () => {
+  it("原本 + 記事を 1 PR に同梱し(id-counter は同梱しない)、スレッド返信 + DM して done にする", async () => {
     const { store, done } = fakeStore([pendingAction()]);
     const { gh, created } = fakeGh();
     const { messenger, replies, dms } = fakeMessenger();
@@ -193,9 +195,9 @@ describe("processVoiceMemoQueue", () => {
     const paths = pr.files.map((f) => f.path);
     expect(paths).toEqual([
       `interviews/voice-memos/2026/2026-07-08-${MSG_ID}.md`,
-      expect.stringMatching(/^knowledge\/hardware\/kb-.+\.md$/),
-      "_meta/id-counter.json",
+      expect.stringMatching(/^knowledge\/hardware\/kb-2026-abc123.*\.md$/),
     ]);
+    expect(paths).not.toContain("_meta/id-counter.json");
     // 原本は無加工(P1)+ 来歴
     const doc = (pr.files[0] as { content: string }).content;
     expect(doc).toContain("分注ユニットの X 軸は月イチで給脂が必要。");

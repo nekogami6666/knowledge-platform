@@ -5,8 +5,8 @@
  * webhook 通知(§6.3 の 👍 代理マージが拾う)→ D3b 用の gap_pr 台帳を記録 → gap_answer を消費(markActionDone)。
  * 全副作用は注入 seam(store/gh/git/fs/draft/webhook/clock)。ユニットは fake のみ。
  *
- * なぜ 1 run 1 PR か: 各エントリは `_meta/id-counter.json` を進めるため、回答ごとに別 PR にすると
- * カウンタが同一 base から競合して 3-way マージ衝突する。extractor(§6.3)と同じくまとめて 1 PR にする。
+ * 1 run 1 PR: 回答ごとに PR を分けるとレビュー粒度が細かくなりすぎるため、run 単位でまとめる
+ * (かつては id-counter の競合回避が主目的だったが、乱数採番・ADR-0026 で競合自体は消滅)。
  * 冪等性: markActionDone(消費)が主。ブランチ名は回答集合のハッシュで決定的にし、途中失敗した run の
  * 再実行では createPullRequest が CONFLICT(ブランチ既存)→ 消費せず警告(重複 PR を作らない)。
  */
@@ -14,7 +14,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { join } from "node:path";
 import type { BotStore } from "@stratum/discord-bot/store";
 import type { FileChange, GhClient } from "@stratum/gh-client";
-import { allocateId, type IdCounterStore, parseEntry, serializeEntry } from "@stratum/kb-core";
+import { type IdKind, parseEntry, serializeEntry } from "@stratum/kb-core";
 import { type AnswerEntryCandidate, buildAnswerEntry, gapAnswerPayloadSchema } from "./answer.js";
 import type { GapConfig } from "./config.js";
 import type { DraftInput } from "./draft.js";
@@ -26,7 +26,7 @@ export interface IngestDeps {
   store: BotStore;
   syncKb: () => Promise<SyncedKb>;
   gh: GhClient;
-  makeIdStore: (kbRoot: string) => IdCounterStore;
+  makeId: (kind: IdKind) => string;
   validate: (kbRoot: string) => Promise<{ ok: boolean; problems: readonly unknown[] }>;
   /** questions/open/<id>.md の生テキスト(無ければ null)。 */
   readQuestionRaw: (kbRoot: string, questionId: string) => Promise<string | null>;
@@ -52,8 +52,8 @@ export interface IngestItem {
   entryId: string;
   /**
    * 起票時刻(同一性トークン・issue #92)。close が answered へ移す前に KB 質問の asked_at と照合し、
-   * ID 再利用(KB 巻き戻し等)で別質問に化けた questionId への誤移動を防ぐ。id は _meta/id-counter 由来で
-   * 再発番されうるが asked_at は不変・必須・TZ 付き高精度。
+   * ID 再利用で別質問に化けた questionId への誤移動を防ぐ(乱数採番・ADR-0026 で再発番は構造的に
+   * 消滅したが、多層防御として維持)。asked_at は不変・必須・TZ 付き高精度。
    */
   asked_at: string;
 }
@@ -99,7 +99,6 @@ export async function runAnswerIngestion(deps: IngestDeps): Promise<IngestSummar
   }
 
   const kb = await deps.syncKb();
-  const idStore = deps.makeIdStore(kb.absDir);
   const existingDomains = await deps.listDomains(kb.absDir);
 
   const files: FileChange[] = [];
@@ -132,7 +131,7 @@ export async function runAnswerIngestion(deps: IngestDeps): Promise<IngestSummar
       existingDomains,
     });
     const owner = deps.githubForDiscord(payload.authorId) ?? "unassigned";
-    const id = await allocateId("kb", idStore, { now: deps.now() });
+    const id = deps.makeId("kb");
     const built = buildAnswerEntry(id, candidate, payload.messageUrl, owner, deps.now());
     const content = serializeEntry({ frontmatter: built.frontmatter, body: built.body });
     await deps.writeFile(join(kb.absDir, built.path), content); // validateRepo がディスクを読む
@@ -151,11 +150,7 @@ export async function runAnswerIngestion(deps: IngestDeps): Promise<IngestSummar
     return summary;
   }
 
-  // 採番ファイルを PR に含める(id が主リポで一意になるように・extractor と同じ)。
-  const counter = await deps
-    .readFile(join(kb.absDir, "_meta", "id-counter.json"))
-    .catch(() => null);
-  if (counter !== null) files.push({ path: "_meta/id-counter.json", content: counter });
+  // id-counter.json は同梱しない(乱数採番・ADR-0026。counter が同時 open PR のコンフリクト源だった)。
 
   const report = await deps.validate(kb.absDir);
   if (!report.ok) {
