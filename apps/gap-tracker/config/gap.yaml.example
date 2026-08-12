@@ -11,3 +11,8 @@ assignees:
     discord: "123456789012345678"
   - github: suzuki
     discord: "234567890123456789"
+# 担当を解決できない質問の宛先(open スイープ・ADR-0027 D3)。日替わりローテーション。
+# assignees 全員が週上限のとき等に使う(fallback 宛でも週3件/人の上限は尊重)。
+fallback_assignees:
+  - github: yamada
+    discord: "123456789012345678"

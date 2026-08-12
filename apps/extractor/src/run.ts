@@ -20,6 +20,7 @@ import { applyCandidateGuards } from "./guards.js";
 import type { Logger } from "./logger.js";
 import { type MaterializeAction, type MaterializeDeps, materializeOne } from "./materialize.js";
 import type { Notifier, NotifyCounts } from "./notify.js";
+import { materializeOpenQuestion } from "./open-question.js";
 import { buildNameResolver, parseParticipants } from "./participants.js";
 import { buildBranch, buildPrTitle, buildRunKey, findOpenExtractPr } from "./pr-title.js";
 import { type ReconcileDeps, reconcileCandidate } from "./reconcile.js";
@@ -191,7 +192,7 @@ function buildPrBody(
     `- 出典追記: ${counts.append}`,
     `- 矛盾更新: ${counts.supersede}`,
     `- skip: ${counts.skip}`,
-    `- 未解決の問い(未 materialize): ${counts.openQuestions}`,
+    `- 未解決の問い(questions/open に起票): ${counts.openQuestions}`,
     guards.demotedDecisions > 0
       ? `- ⚠️ 未確定表現のため決定→問いへ降格: ${guards.demotedDecisions} 件(ADR-0027 D2)`
       : "",
@@ -355,6 +356,8 @@ export async function runExtractor(deps: RunDeps): Promise<RunSummary> {
   const maxFiles = deps.maxFilesPerRun ?? Number.POSITIVE_INFINITY;
   let attempted = 0;
   const skippedFiles: string[] = []; // 抽出失敗で今回 skip(次回持ち越し)。
+  // 同一 run 内で同じ title の問いを二重起票しない(ADR-0027 D3。既存 KB との突合はしない)。
+  const seenQuestionTitles = new Set<string>();
   let deferredCount = 0; // 上限超過で今回処理しなかった件数。
   // source ごとの次回持ち越し(deferred + 失敗)。work list の順序を保つ。
   const carryover = new Map<SourceBatch["key"], string[]>();
@@ -420,7 +423,33 @@ export async function runExtractor(deps: RunDeps): Promise<RunSummary> {
         });
       }
 
-      counts.openQuestions += extraction.openQuestions.length;
+      // 源泉日 = 議事録パスの日付(ADR-0026 D3)。パース不能は now() にフォールバック。
+      const sourceDate = minutesDateFromPath(path);
+
+      // open question の materialize(ADR-0027 D3・旧⑰D7 の反転): 件数カウントで捨てず
+      // QuestionLog として questions/open へ起票し抽出 PR に同梱する(ガードで降格された
+      // decision 由来の問いも含む)。既存 KB との突合(reconcile)はしない — コストと決定論のため、
+      // 重複抑制は同一 run 内の同 title 除去のみ。counts.openQuestions は「起票した件数」。
+      for (const q of extraction.openQuestions) {
+        if (seenQuestionTitles.has(q.title)) continue;
+        seenQuestionTitles.add(q.title);
+        const questionMoment = sourceDate ?? deps.now();
+        files.push(
+          materializeOpenQuestion({
+            id: deps.makeId("q", questionMoment),
+            candidate: q,
+            source: {
+              kind: batch.sourceKind,
+              repo: batch.repo,
+              path,
+              ref: batch.headSha,
+              ...(q.lines !== undefined ? { lines: q.lines } : {}),
+            },
+            askedAt: questionMoment,
+          }),
+        );
+        counts.openQuestions += 1;
+      }
 
       const candidates = [...extraction.decisions, ...extraction.learnings];
       domains.candidateCount += candidates.length;
@@ -461,8 +490,8 @@ export async function runExtractor(deps: RunDeps): Promise<RunSummary> {
           ref: batch.headSha,
           ...(c.lines !== undefined ? { lines: c.lines } : {}),
         };
-        // 源泉日 = 議事録パスの日付(ADR-0026 D3)。パース不能は materialize が now() にフォールバック。
-        const sourceDate = minutesDateFromPath(path);
+        // 源泉日(sourceDate)はファイル単位で確定済み。パース不能(null)は materialize が
+        // now() にフォールバックする。
         const change = await materializeOne(
           {
             kbRoot,

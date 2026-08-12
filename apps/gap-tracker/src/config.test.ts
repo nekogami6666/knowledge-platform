@@ -25,4 +25,11 @@ describe("loadGapConfig", () => {
   it("不明キーは strict で拒否", async () => {
     await expect(loadGapConfig(reader({ "gap.yaml": `${valid}extra: 1\n` }))).rejects.toThrow();
   });
+  it("fallback_assignees は省略時 []・指定時は assignee 形式で読む(ADR-0027 D3)", async () => {
+    const c = await loadGapConfig(reader({ "gap.yaml": valid }));
+    expect(c.fallback_assignees).toEqual([]);
+    const withFallback = `${valid}fallback_assignees:\n  - github: suzuki\n    discord: "902"\n`;
+    const c2 = await loadGapConfig(reader({ "gap.yaml": withFallback }));
+    expect(c2.fallback_assignees).toEqual([{ github: "suzuki", discord: "902" }]);
+  });
 });

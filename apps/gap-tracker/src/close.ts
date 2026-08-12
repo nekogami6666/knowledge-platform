@@ -64,18 +64,22 @@ export interface AnsweredMove {
   askedAt: string;
 }
 
-/** open の質問 raw → answered への移動(status:answered + resulting_kb を付す)。純関数。 */
+/**
+ * open の質問 raw → answered への移動(status:answered + resulting_kb を付す)。純関数。
+ * openPath は発見済みの実パス(<id>.md / <id>-<slug>.md 両形式・ADR-0027 D3)。
+ * answered 側は basename を保持して移す(slug を落とすと出典リンクの追跡が壊れる)。
+ */
 export function buildAnsweredMove(
   questionRaw: string,
   entryId: string,
-  questionId: string,
+  openPath: string,
 ): AnsweredMove {
-  const openPath = `questions/open/${questionId}.md`;
   const parsed = parseEntry(questionRaw, "question", openPath);
   const fm = parsed.frontmatter as unknown as QuestionLog;
   const moved = { ...fm, status: "answered", resulting_kb: entryId } as Record<string, unknown>;
+  const basename = openPath.slice(openPath.lastIndexOf("/") + 1);
   return {
-    answeredPath: `questions/answered/${questionId}.md`,
+    answeredPath: `questions/answered/${basename}`,
     openPath,
     content: serializeEntry({ frontmatter: moved, body: parsed.body }),
     askedBy: fm.asked_by,
@@ -143,8 +147,11 @@ export interface CloseDeps {
   syncKb: () => Promise<SyncedKb>;
   gh: GhClient;
   validate: (kbRoot: string) => Promise<{ ok: boolean; problems: readonly unknown[] }>;
-  /** questions/open/<id>.md の生テキスト(無ければ null)。 */
-  readQuestionRaw: (kbRoot: string, questionId: string) => Promise<string | null>;
+  /** ID から open 質問の実体を発見する(<id>.md / <id>-<slug>.md 両対応・ADR-0027 D3)。 */
+  findOpenQuestion: (
+    kbRoot: string,
+    questionId: string,
+  ) => Promise<{ raw: string; openPath: string } | null>;
   /** questions/open の全 QuestionLog(リマインド走査用)。 */
   listOpenQuestions: (kbRoot: string) => Promise<QuestionLog[]>;
   writeFile: (absPath: string, content: string) => Promise<void>;
@@ -235,9 +242,9 @@ export async function runFlywheelClose(deps: CloseDeps): Promise<CloseSummary> {
       }
       let anyMismatch = false;
       for (const item of items) {
-        const raw = await deps.readQuestionRaw(kb.absDir, item.questionId);
-        if (raw === null) continue; // 既に移動済み(次回のためこの item は無害にスキップ)
-        const move = buildAnsweredMove(raw, item.entryId, item.questionId);
+        const found = await deps.findOpenQuestion(kb.absDir, item.questionId);
+        if (found === null) continue; // 既に移動済み(次回のためこの item は無害にスキップ)
+        const move = buildAnsweredMove(found.raw, item.entryId, found.openPath);
         // 整合ガード(issue #92 Bug A): 台帳の asked_at と KB 質問の asked_at が食い違えば、その
         // questionId は ID 再利用(KB 巻き戻し等)で別質問に化けている。誤移動を防ぐため skip + warn。
         // 旧台帳(asked_at 無し)は照合スキップ=従来挙動(現状 pending な旧台帳は無い)。

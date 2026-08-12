@@ -28,8 +28,11 @@ export interface IngestDeps {
   gh: GhClient;
   makeId: (kind: IdKind) => string;
   validate: (kbRoot: string) => Promise<{ ok: boolean; problems: readonly unknown[] }>;
-  /** questions/open/<id>.md の生テキスト(無ければ null)。 */
-  readQuestionRaw: (kbRoot: string, questionId: string) => Promise<string | null>;
+  /** ID から open 質問の実体を発見する(<id>.md / <id>-<slug>.md 両対応・ADR-0027 D3)。 */
+  findOpenQuestion: (
+    kbRoot: string,
+    questionId: string,
+  ) => Promise<{ raw: string; openPath: string } | null>;
   readFile: (absPath: string) => Promise<string>;
   writeFile: (absPath: string, content: string) => Promise<void>;
   /** knowledge/ 直下の既存 domain 一覧(乱立抑制のヒント)。 */
@@ -115,15 +118,15 @@ export async function runAnswerIngestion(deps: IngestDeps): Promise<IngestSummar
       continue;
     }
     const payload = parsed.data;
-    const raw = await deps.readQuestionRaw(kb.absDir, payload.questionId);
-    if (raw === null) {
+    const found = await deps.findOpenQuestion(kb.absDir, payload.questionId);
+    if (found === null) {
       // 既に answered/wontfix へ移動済み or 存在しない → 再処理しても直らない。消費する。
       logger.warn("questions/open に対象が無いためスキップ", { questionId: payload.questionId });
       store.markActionDone(action.id);
       summary.skipped += 1;
       continue;
     }
-    const question = parseEntry(raw, "question", `questions/open/${payload.questionId}.md`);
+    const question = parseEntry(found.raw, "question", found.openPath);
     const candidate = await deps.draft({
       question: question.frontmatter.question,
       answer: payload.content,

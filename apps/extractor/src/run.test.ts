@@ -6,7 +6,7 @@ import type {
   PrFileSummary,
   PrSummary,
 } from "@stratum/gh-client";
-import type { IdKind } from "@stratum/kb-core";
+import { type IdKind, parseEntry } from "@stratum/kb-core";
 import { describe, expect, it, vi } from "vitest";
 import type { ExtractionResult } from "./candidate.js";
 import type { ExtractorConfig } from "./config.js";
@@ -599,6 +599,146 @@ describe("runExtractor", () => {
     expect(notifier2.notifyPrCreated).toHaveBeenCalledWith(
       expect.objectContaining({ reviewer: "bbb" }),
     );
+  });
+
+  it("openQuestions は QuestionLog として questions/open へ起票され PR に同梱される(ADR-0027 D3・検証テスト8)", async () => {
+    const gh = makeGh();
+    const withQuestions: ExtractionResult = {
+      ...oneLearning,
+      openQuestions: [
+        {
+          kind: "open_question",
+          title: "分注ロボットの耐湿仕様は?",
+          body: "両説が出て確定しなかった。",
+          lines: "L3",
+        },
+      ],
+    };
+    const r = await runExtractor(
+      makeDeps({
+        gh,
+        extractDeps: {
+          promptStore: { read: async () => "---\nrole: standard\n---\nR" },
+          search: async () => ({
+            value: withQuestions,
+            usage: { inputTokens: 1, outputTokens: 1 },
+          }),
+        },
+      }),
+    );
+    expect(r.created).toBe(true);
+    expect(r.counts.openQuestions).toBe(1); // 「起票した件数」
+    const arg = vi.mocked(gh.createPullRequest).mock.calls[0]?.[0];
+    const qFile = arg?.files.find((f) => f.path.startsWith("questions/open/q-2026-"));
+    expect(qFile).toBeDefined();
+    // frontmatter は kb-core questionLogSchema に完全準拠(parseEntry round-trip)。
+    const back = parseEntry(qFile?.content ?? "", "question", qFile?.path);
+    expect(back.frontmatter.asked_by).toBe("extractor"); // 機械起票の規約値
+    expect(back.frontmatter.status).toBe("open");
+    expect(back.frontmatter.question).toBe("分注ロボットの耐湿仕様は?");
+    // 本文に元議事録(repo/path/ref/lines)への言及がある。
+    expect(back.body).toContain("org/minutes");
+    expect(back.body).toContain("2026/06/x.md");
+    expect(back.body).toContain(HEAD);
+    expect(back.body).toContain("L3");
+    expect(arg?.body).toContain("未解決の問い(questions/open に起票): 1");
+  });
+
+  it("源泉日(議事録パスの日付)が asked_at と ID 採番の年に反映される(ADR-0027 D3 / ADR-0026 D3)", async () => {
+    const gh = makeGh();
+    const idMoments: (Date | undefined)[] = [];
+    let n = 0;
+    const makeId = (kind: IdKind, now?: Date): string => {
+      if (kind === "q") idMoments.push(now);
+      return `${kind}-2026-t${String(++n).padStart(5, "0")}`;
+    };
+    const withQuestion: ExtractionResult = {
+      decisions: [],
+      learnings: [],
+      openQuestions: [{ kind: "open_question", title: "湿度上限は?", body: "未確定。" }],
+    };
+    const r = await runExtractor(
+      makeDeps({
+        gh,
+        makeId,
+        exec: async (args: readonly string[]) =>
+          args.includes("interviews/*.md")
+            ? { stdout: "" }
+            : { stdout: "2026-06-03-hw-weekly.md\n" },
+        readFile: async (p) => {
+          if (p === "/m/2026-06-03-hw-weekly.md") return "# 会議\n参加者: yamada\n湿度は未確定。";
+          throw new Error(`ENOENT ${p}`);
+        },
+        extractDeps: {
+          promptStore: { read: async () => "---\nrole: standard\n---\nR" },
+          search: async () => ({ value: withQuestion, usage: { inputTokens: 1, outputTokens: 1 } }),
+        },
+      }),
+    );
+    expect(r.created).toBe(true); // 問いのみでも PR になる(件数カウント破棄の反転)
+    // makeId("q", 源泉日): ID の年は源泉日基準(kb-core newId の now 引数)。
+    expect(idMoments).toEqual([new Date("2026-06-03T00:00:00+09:00")]);
+    const arg = vi.mocked(gh.createPullRequest).mock.calls[0]?.[0];
+    const qFile = arg?.files.find((f) => f.path.startsWith("questions/open/"));
+    const back = parseEntry(qFile?.content ?? "", "question", qFile?.path);
+    expect(back.frontmatter.asked_at).toBe("2026-06-03T00:00:00+09:00"); // 源泉日(JST)
+  });
+
+  it("ガードで降格された decision 由来の問いも questions/open へ起票される(ADR-0027 D2→D3)", async () => {
+    const gh = makeGh();
+    const uncertain: ExtractionResult = {
+      decisions: [
+        {
+          kind: "decision",
+          title: "X 方式の採用",
+          decision: "X 方式を検討する。",
+          deciders: ["yamada"],
+          confidence: "high",
+        },
+      ],
+      learnings: [],
+      openQuestions: [],
+    };
+    const r = await runExtractor(
+      makeDeps({
+        gh,
+        extractDeps: {
+          promptStore: { read: async () => "---\nrole: standard\n---\nR" },
+          search: async () => ({ value: uncertain, usage: { inputTokens: 1, outputTokens: 1 } }),
+        },
+      }),
+    );
+    expect(r.guards.demotedDecisions).toBe(1);
+    expect(r.counts.openQuestions).toBe(1);
+    const arg = vi.mocked(gh.createPullRequest).mock.calls[0]?.[0];
+    const qFile = arg?.files.find((f) => f.path.startsWith("questions/open/"));
+    const back = parseEntry(qFile?.content ?? "", "question", qFile?.path);
+    expect(back.frontmatter.question).toBe("X 方式の採用");
+    expect(back.body).toContain("機械ガードで decision から降格");
+  });
+
+  it("同一 run 内の同 title の問いは重複起票しない(既存 KB との突合はしない)", async () => {
+    const gh = makeGh();
+    const duplicated: ExtractionResult = {
+      ...oneLearning,
+      openQuestions: [
+        { kind: "open_question", title: "湿度上限は?", body: "a" },
+        { kind: "open_question", title: "湿度上限は?", body: "b" },
+      ],
+    };
+    const r = await runExtractor(
+      makeDeps({
+        gh,
+        extractDeps: {
+          promptStore: { read: async () => "---\nrole: standard\n---\nR" },
+          search: async () => ({ value: duplicated, usage: { inputTokens: 1, outputTokens: 1 } }),
+        },
+      }),
+    );
+    expect(r.counts.openQuestions).toBe(1);
+    const arg = vi.mocked(gh.createPullRequest).mock.calls[0]?.[0];
+    const qFiles = arg?.files.filter((f) => f.path.startsWith("questions/open/")) ?? [];
+    expect(qFiles).toHaveLength(1);
   });
 
   it("読めない pending は破棄して pending から外す(無限再キュー防止・ADR-0023 D1)", async () => {

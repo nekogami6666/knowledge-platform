@@ -12,6 +12,7 @@ const config: GapConfig = {
   kb_dir: "knowledge-base",
   base_branch: "main",
   assignees: [{ github: "yamada", discord: "901" }],
+  fallback_assignees: [],
 };
 
 const URL = "https://discord.com/channels/1/2/3";
@@ -82,8 +83,13 @@ function makeDeps(over: Partial<IngestDeps> = {}): IngestDeps & { written: Map<s
     gh,
     makeId: stubMakeId(),
     validate: async () => ({ ok: true, problems: [] }),
-    readQuestionRaw: async (_root, qid) =>
-      qid === "q-2026-0007" ? questionRaw(qid, "分注ロボットは高湿度で何が起きる?") : null,
+    findOpenQuestion: async (_root: string, qid: string) =>
+      qid === "q-2026-0007"
+        ? {
+            raw: questionRaw(qid, "分注ロボットは高湿度で何が起きる?"),
+            openPath: `questions/open/${qid}.md`,
+          }
+        : null,
     readFile: async (p) => {
       throw new Error(`ENOENT ${p}`);
     },
@@ -163,7 +169,7 @@ describe("runAnswerIngestion", () => {
 
   it("questions/open に無い回答はスキップして消費(PR 対象にしない)", async () => {
     const { gh, prs } = makeGh();
-    const deps = makeDeps({ gh, readQuestionRaw: async () => null });
+    const deps = makeDeps({ gh, findOpenQuestion: async () => null });
     const r = await runAnswerIngestion(deps);
     expect(r).toMatchObject({ drafted: 0, skipped: 1 });
     expect(prs).toHaveLength(0);

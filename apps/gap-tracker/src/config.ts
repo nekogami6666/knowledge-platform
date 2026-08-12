@@ -31,6 +31,9 @@ export const gapConfigSchema = z
     /** 回答者候補(ラウンドロビン。週3件/人の上限は §6.5 L501)。**空にすると members.yaml 全員が
      * プールになる**(ADR-0022・「皆で OK」)。 */
     assignees: z.array(assigneeSchema).default([]),
+    /** 担当を解決できない質問(open スイープ)の宛先(ADR-0027 D3)。日替わりローテーションで
+     * 選ぶ(週次上限は通常どおり尊重)。特定個人名はコードに書かず、ここから読む。 */
+    fallback_assignees: z.array(assigneeSchema).default([]),
   })
   .strict();
 export type GapConfig = z.infer<typeof gapConfigSchema>;

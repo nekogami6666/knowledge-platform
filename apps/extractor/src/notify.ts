@@ -69,7 +69,7 @@ export function createWebhookNotifier(
       await post(
         [
           `📥 抽出 PR を作成しました: ${msg.prUrl}`,
-          `新規 ${c.new} / 追記 ${c.append} / 矛盾 ${c.supersede} / skip ${c.skip} / 未解決の問い ${c.openQuestions}`,
+          `新規 ${c.new} / 追記 ${c.append} / 矛盾 ${c.supersede} / skip ${c.skip} / 未解決の問い(questions/open に起票) ${c.openQuestions}`,
           msg.people.length > 0 ? `関係者: ${msg.people.join(", ")}` : "",
           msg.reviewer !== undefined
             ? `👀 今回のレビュー担当: <@${msg.reviewer}> さん、内容の確認をお願いします。`

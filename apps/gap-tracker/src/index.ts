@@ -31,7 +31,9 @@ import {
   resolveDiscordForGithub,
   resolveGithubForDiscord,
 } from "./question.js";
+import { matchOpenQuestionBasename } from "./question-path.js";
 import { runGapTracker } from "./run.js";
+import { runOpenSweep } from "./sweep.js";
 
 const execFileAsync = promisify(execFile);
 const gitExec: GitExec = async (args, cwd) => {
@@ -70,6 +72,26 @@ async function listQuestionRaws(kbRoot: string): Promise<string[]> {
       continue;
     }
     for (const n of names) out.push(await fsReadFile(join(dir, n), "utf8"));
+  }
+  return out;
+}
+
+/**
+ * questions/open/*.md の相対パスと raw(open スイープ用・ADR-0027 D3)。ディレクトリ不在は []。
+ * ファイル名は <id>.md(gap-tracker 起票)と <id>-<slug>.md(extractor 起票)の両形式があるため、
+ * パスを列挙結果のまま返す(スイープは実パスを保って更新する)。
+ */
+async function listOpenQuestionFiles(kbRoot: string): Promise<{ path: string; raw: string }[]> {
+  const dir = join(kbRoot, "questions", "open");
+  let names: string[];
+  try {
+    names = (await readdir(dir)).filter((n) => n.endsWith(".md"));
+  } catch {
+    return [];
+  }
+  const out: { path: string; raw: string }[] = [];
+  for (const n of names) {
+    out.push({ path: `questions/open/${n}`, raw: await fsReadFile(join(dir, n), "utf8") });
   }
   return out;
 }
@@ -126,9 +148,16 @@ async function main(): Promise<void> {
     await mkdir(dirname(p), { recursive: true });
     await fsWriteFile(p, content, "utf8");
   };
-  const readQuestionRaw = async (kbRoot: string, questionId: string): Promise<string | null> => {
+  // ID → 実ファイル発見(ADR-0027 D3)。gap 起票 <id>.md / extractor 起票 <id>-<slug>.md の両対応。
+  const findOpenQuestion = async (
+    kbRoot: string,
+    questionId: string,
+  ): Promise<{ raw: string; openPath: string } | null> => {
+    const dir = join(kbRoot, "questions", "open");
     try {
-      return await fsReadFile(join(kbRoot, "questions", "open", `${questionId}.md`), "utf8");
+      const hit = matchOpenQuestionBasename(await readdir(dir), questionId);
+      if (hit === undefined) return null;
+      return { raw: await fsReadFile(join(dir, hit), "utf8"), openPath: `questions/open/${hit}` };
     } catch {
       return null;
     }
@@ -212,7 +241,7 @@ async function main(): Promise<void> {
       gh,
       makeId: (kind) => newId(kind),
       validate: (kbRoot) => validateRepo(kbRoot),
-      readQuestionRaw,
+      findOpenQuestion,
       readFile,
       writeFile,
       listDomains: async (kbRoot) => {
@@ -235,6 +264,26 @@ async function main(): Promise<void> {
     });
     logger.info("gap-tracker(回答取り込み)完了", { ...ingestSummary });
 
+    // open スイープ(ADR-0027 D3): status:open + assignee 無しの滞留質問へ依頼を送り asked 化する。
+    // 1 run = ingest → sweep → close の順(close のリマインド走査より前に依頼を出す)。
+    const sweepSummary = await runOpenSweep({
+      config: { ...config, assignees },
+      syncKb: syncKbThunk,
+      gh,
+      validate: (kbRoot) => validateRepo(kbRoot),
+      listOpenQuestionFiles,
+      readFile,
+      writeFile,
+      postRequest: (content) =>
+        postWebhook(env.DISCORD_GAP_WEBHOOK, content, "依頼(open スイープ)"),
+      reserveAssignee,
+      discordForGithub,
+      now: () => new Date(),
+      logger,
+      real,
+    });
+    logger.info("gap-tracker(open スイープ)完了", { ...sweepSummary });
+
     // step5 後半: マージ済み → answered 移動 + 質問者通知、7 日リマインド / 14 日 wontfix(PR-D3b)。
     const closeSummary = await runFlywheelClose({
       config,
@@ -242,7 +291,7 @@ async function main(): Promise<void> {
       syncKb: syncKbThunk,
       gh,
       validate: (kbRoot) => validateRepo(kbRoot),
-      readQuestionRaw,
+      findOpenQuestion,
       listOpenQuestions,
       writeFile,
       removeFile: (p) => rm(p, { force: true }),

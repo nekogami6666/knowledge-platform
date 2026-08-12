@@ -71,8 +71,8 @@
   repo/path/ref/lines・関連 domain・質問理由)。
 - gap-tracker に **open スイープ**を追加: `status: open` かつ assignee 未設定の質問へ回答依頼を送る
   (これで KP issue #92 の「open 停留が永遠に放置される」問題も解消)。担当は members / 内容から
-  解決し、不能なら `gap.yaml` の **`fallback_assignee`**(設定。特定個人名をコードへハードコード
-  しない)へ送る。
+  解決し、不能なら `gap.yaml` の **`fallback_assignees`**(複数・日替わりローテーション。
+  特定個人名をコードへハードコードしない)へ送る。
 
 ### D4. 検証状態の明示(kb-core スキーマ v5)
 

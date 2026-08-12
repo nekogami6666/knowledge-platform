@@ -21,6 +21,7 @@ const config: GapConfig = {
   kb_dir: "knowledge-base",
   base_branch: "main",
   assignees: [{ github: "yamada", discord: "901" }],
+  fallback_assignees: [],
 };
 
 function question(id: string, over: Partial<QuestionLog> = {}): QuestionLog {
@@ -62,13 +63,27 @@ describe("resolveAskerMention(ADR-0017 D3: github 名の asked_by も逆引き�
 
 describe("buildAnsweredMove", () => {
   it("status:answered + resulting_kb を付けて answered パスに移す", () => {
-    const move = buildAnsweredMove(openRaw("q-2026-0007"), "kb-2026-0143", "q-2026-0007");
+    const move = buildAnsweredMove(
+      openRaw("q-2026-0007"),
+      "kb-2026-0143",
+      "questions/open/q-2026-0007.md",
+    );
     expect(move.answeredPath).toBe("questions/answered/q-2026-0007.md");
     expect(move.openPath).toBe("questions/open/q-2026-0007.md");
     expect(move.askedBy).toBe("discord:111");
     const back = parseEntry(move.content, "question", move.answeredPath);
     expect(back.frontmatter.status).toBe("answered");
     expect(back.frontmatter.resulting_kb).toBe("kb-2026-0143");
+  });
+
+  it("extractor 起票の <id>-<slug>.md は basename を保って answered へ移す(ADR-0027 D3)", () => {
+    const move = buildAnsweredMove(
+      openRaw("q-2026-abc123"),
+      "kb-2026-0143",
+      "questions/open/q-2026-abc123-humidity.md",
+    );
+    expect(move.answeredPath).toBe("questions/answered/q-2026-abc123-humidity.md");
+    expect(move.openPath).toBe("questions/open/q-2026-abc123-humidity.md");
   });
 });
 
@@ -176,7 +191,10 @@ function makeDeps(
     gh,
     syncKb: async () => ({ absDir: "/kb", resolvedCommit: "s" }),
     validate: async () => ({ ok: true, problems: [] }),
-    readQuestionRaw: async (_r, qid) => (qid === "q-2026-0007" ? openRaw("q-2026-0007") : null),
+    findOpenQuestion: async (_r: string, qid: string) =>
+      qid === "q-2026-0007"
+        ? { raw: openRaw("q-2026-0007"), openPath: "questions/open/q-2026-0007.md" }
+        : null,
     listOpenQuestions: async () => [],
     writeFile: async () => {},
     removeFile: async (p) => void removed.push(p),
@@ -215,8 +233,13 @@ describe("runFlywheelclose (A: merged → answered 移動)", () => {
     const deps = makeDeps({
       gh,
       // members.yaml で解決された結果、asked_by が GitHub 名 "yamada" になったケース。
-      readQuestionRaw: async (_r, qid) =>
-        qid === "q-2026-0007" ? openRaw("q-2026-0007", { asked_by: "yamada" }) : null,
+      findOpenQuestion: async (_r: string, qid: string) =>
+        qid === "q-2026-0007"
+          ? {
+              raw: openRaw("q-2026-0007", { asked_by: "yamada" }),
+              openPath: "questions/open/q-2026-0007.md",
+            }
+          : null,
     });
     const r = await runFlywheelClose(deps);
     expect(r.moved).toBe(1);

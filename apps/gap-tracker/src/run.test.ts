@@ -14,6 +14,7 @@ const config: GapConfig = {
     { github: "yamada", discord: "901" },
     { github: "suzuki", discord: "902" },
   ],
+  fallback_assignees: [],
 };
 
 /** 決定的な連番スタブ(実装は kb-core newId の乱数採番・ADR-0026)。suffix は base36 6文字。 */

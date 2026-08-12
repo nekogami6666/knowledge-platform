@@ -55,7 +55,7 @@ export const learningCandidateSchema = z
   .strict();
 export type LearningCandidate = z.infer<typeof learningCandidateSchema>;
 
-/** 未解決の問い候補。F1 では materialize せず件数のみ計上(D7・gap-tracker の領域)。 */
+/** 未解決の問い候補。extractor は QuestionLog として questions/open へ起票する(ADR-0027 D3)。 */
 export const openQuestionCandidateSchema = z
   .object({
     kind: z.literal("open_question"),
