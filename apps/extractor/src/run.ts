@@ -22,6 +22,7 @@ import type { Notifier, NotifyCounts } from "./notify.js";
 import { buildBranch, buildPrTitle, buildRunKey, findOpenExtractPr } from "./pr-title.js";
 import { type ReconcileDeps, reconcileCandidate } from "./reconcile.js";
 import type { RepoSyncer } from "./repos.js";
+import { minutesDateFromPath } from "./source-date.js";
 
 export interface RunDeps {
   config: ExtractorConfig;
@@ -29,8 +30,8 @@ export interface RunDeps {
   gh: GhClient;
   extractDeps: ExtractDeps;
   reconcileDeps: ReconcileDeps;
-  /** ID 採番(実: kb-core newId(乱数・ADR-0026)、テスト: 決定的スタブ)。 */
-  makeId: (kind: IdKind) => string;
+  /** ID 採番(実: kb-core newId(乱数・ADR-0026)、テスト: 決定的スタブ)。now = 源泉日(ID の年)。 */
+  makeId: (kind: IdKind, now?: Date) => string;
   /** KB clone のスキーマ検証(実: validateRepo)。 */
   validate: (kbRoot: string) => Promise<{ ok: boolean; problems: readonly unknown[] }>;
   readFile: (absPath: string) => Promise<string>;
@@ -391,6 +392,8 @@ export async function runExtractor(deps: RunDeps): Promise<RunSummary> {
           ref: batch.headSha,
           ...(c.lines !== undefined ? { lines: c.lines } : {}),
         };
+        // 源泉日 = 議事録パスの日付(ADR-0026 D3)。パース不能は materialize が now() にフォールバック。
+        const sourceDate = minutesDateFromPath(path);
         const change = await materializeOne(
           {
             kbRoot,
@@ -398,6 +401,7 @@ export async function runExtractor(deps: RunDeps): Promise<RunSummary> {
             fallbackPeople: participants,
             candidate: c,
             verdict: r.verdict,
+            ...(sourceDate !== null ? { sourceDate } : {}),
           },
           materializeDeps,
         );

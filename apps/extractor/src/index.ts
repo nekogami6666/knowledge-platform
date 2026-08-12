@@ -84,7 +84,7 @@ async function main(): Promise<void> {
     gh: realPr ? createGhClientFromEnv() : nullGhClient(),
     extractDeps: { promptStore, usage: nullUsageRecorder, timeoutMs: timeout.value },
     reconcileDeps: { promptStore, usage: nullUsageRecorder, timeoutMs: timeout.value },
-    makeId: (kind) => newId(kind),
+    makeId: (kind, now) => newId(kind, { ...(now !== undefined ? { now } : {}) }),
     validate: (kbRoot) => validateRepo(kbRoot),
     readFile: (p) => fsReadFile(p, "utf8"),
     writeFile: async (p, content) => {

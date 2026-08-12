@@ -79,7 +79,7 @@ async function main(): Promise<void> {
       timeoutMs: timeout.value,
       app: "pr-miner",
     },
-    makeId: (kind) => newId(kind),
+    makeId: (kind, now) => newId(kind, { ...(now !== undefined ? { now } : {}) }),
     validate: (kbRoot) => validateRepo(kbRoot),
     readFile: (p) => fsReadFile(p, "utf8"),
     writeFile: async (p, content) => {

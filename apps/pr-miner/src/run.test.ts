@@ -182,6 +182,8 @@ describe("runPrMiner", () => {
     const entry = create.files.find((f) => f.path.startsWith("knowledge/")) as { content: string };
     expect(entry.content).toContain('kind: "pr"');
     expect(entry.content).toContain("number: 10");
+    // 源泉日(ADR-0026 D3): created = 対象 PR の mergedAt(2026-07-05)であり run 実行日ではない
+    expect(entry.content).toContain('created: "2026-07-05"');
   });
 
   it("targets 空は disabled(gh を呼ばない)", async () => {

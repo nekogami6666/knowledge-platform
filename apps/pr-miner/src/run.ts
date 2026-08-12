@@ -38,7 +38,7 @@ export interface RunDeps {
   ghRead?: GhClient;
   extractDeps: Omit<PrExtractDeps, "existingDomains" | "cwd">;
   reconcileDeps: ReconcileDeps;
-  makeId: (kind: IdKind) => string;
+  makeId: (kind: IdKind, now?: Date) => string;
   validate: (kbRoot: string) => Promise<{ ok: boolean; problems: readonly unknown[] }>;
   readFile: (absPath: string) => Promise<string>;
   writeFile: (absPath: string, content: string) => Promise<void>;
@@ -333,7 +333,15 @@ async function minePr(
       continue;
     }
     const change = await materializeOne(
-      { kbRoot: deps.kbRoot, source, fallbackPeople, candidate: c, verdict: r.verdict },
+      {
+        kbRoot: deps.kbRoot,
+        source,
+        fallbackPeople,
+        candidate: c,
+        verdict: r.verdict,
+        // 源泉日 = 対象 PR のマージ日(ADR-0026 D3)。
+        sourceDate: new Date(pr.mergedAt),
+      },
       deps.materializeDeps,
     );
     bump(counts, change.action);

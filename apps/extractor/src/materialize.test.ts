@@ -36,6 +36,63 @@ owner: yamada
 const NOW = () => new Date("2026-07-01T00:00:00Z");
 
 describe("materializeOne — new", () => {
+  it("sourceDate(源泉日・ADR-0026 D3)が created/last_verified/date と makeId の年に伝わる", async () => {
+    const sourceDate = new Date("2026-06-11T00:00:00+09:00");
+    const calls: (Date | undefined)[] = [];
+    const makeId = (kind: string, now?: Date): string => {
+      calls.push(now);
+      return `${kind}-2026-src001`;
+    };
+    // learning: created / last_verified = 源泉日
+    const learning = await materializeOne(
+      {
+        kbRoot: "/kb",
+        source: { kind: "meeting", repo: "org/minutes", path: "m.md", ref: "abc" },
+        fallbackPeople: ["yamada"],
+        candidate: {
+          kind: "learning",
+          title: "t",
+          body: "b",
+          entryType: "fact",
+          domain: "hardware",
+          people: [],
+          tags: [],
+          confidence: "high",
+          slug: "s",
+        },
+        verdict: { classification: "new", reason: "新規" },
+        sourceDate,
+      },
+      { makeId, now: NOW },
+    );
+    const lf = parseEntry(learning.files[0]?.content ?? "", "knowledge");
+    expect(lf.frontmatter.created).toBe("2026-06-11");
+    expect(lf.frontmatter.last_verified).toBe("2026-06-11");
+    expect(calls[0]?.toISOString()).toBe(sourceDate.toISOString()); // makeId に源泉日が渡る(ID の年)
+
+    // decision: date = 源泉日(会議で決めた日)
+    const decision = await materializeOne(
+      {
+        kbRoot: "/kb",
+        source: { kind: "meeting", repo: "org/minutes", path: "m.md", ref: "abc" },
+        fallbackPeople: ["yamada"],
+        candidate: {
+          kind: "decision",
+          title: "t",
+          decision: "d",
+          deciders: ["yamada"],
+          confidence: "high",
+          slug: "s",
+        },
+        verdict: { classification: "new", reason: "新規" },
+        sourceDate,
+      },
+      { makeId, now: NOW },
+    );
+    const df = parseEntry(decision.files[0]?.content ?? "", "decision");
+    expect(df.frontmatter.date).toBe("2026-06-11");
+  });
+
   it("learning → knowledge/<domain>/kb-2026-t00001-<slug>.md(meeting 出典・round-trip)", async () => {
     const input: MaterializeInput = {
       kbRoot: "/kb",
