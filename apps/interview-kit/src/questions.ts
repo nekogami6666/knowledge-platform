@@ -95,23 +95,11 @@ export async function generateQuestions(
 }
 
 /**
- * ファイル名/ブランチ名用スラグ(extractor/src/slug.ts と同じ規則の複製。共有パッケージ化は
- * logger と同様に別 PR)。日本語は ASCII 化で空になりうるため "x" にフォールバック。
+ * スラグ・キットパスの規約は kb-core に一元化した(ADR-0028。discord-bot の /interview が
+ * 同じ規約でキットを発見するため)。既存の呼び出し・テスト互換のため再 export する。
  */
-export function slugify(text: string): string {
-  const s = text
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+/, "")
-    .slice(0, 40)
-    .replace(/-+$/, "");
-  return s.length > 0 ? s : "x";
-}
-
 /** キットの置き場所(KB リポ相対)。extractor の interviews ソースからは kits/ ごと除外される(PR-I1)。 */
-export function kitPath(person: string, topic: string): string {
-  return `interviews/kits/${slugify(person)}-${slugify(topic)}.md`;
-}
+export { interviewKitPath as kitPath, interviewSlug as slugify } from "@stratum/kb-core";
 
 /** 質問キットの Markdown(interviews/kits/ に置く原本。ナレッジエントリではないので frontmatter 不要)。 */
 export function buildKitMarkdown(

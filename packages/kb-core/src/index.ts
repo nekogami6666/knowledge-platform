@@ -26,6 +26,16 @@ export {
 } from "./expertise-io.js";
 // --- ID 採番(乱数・ADR-0026)---
 export { type IdKind, type NewIdOptions, newId } from "./id-allocator.js";
+// --- interviews のパス規約とセッション原本(§6.6 ⑤-b / ADR-0028)---
+export {
+  buildInterviewSessionDoc,
+  INTERVIEW_KITS_DIR,
+  INTERVIEW_SESSIONS_DIR,
+  type InterviewSessionDocInput,
+  interviewKitPath,
+  interviewSessionPath,
+  interviewSlug,
+} from "./interview.js";
 // --- members 対応表(_meta/members.yaml・ADR-0017 D3)---
 export {
   discordForGithub,

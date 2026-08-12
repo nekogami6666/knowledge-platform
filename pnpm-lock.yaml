@@ -151,6 +151,9 @@ importers:
       '@stratum/gh-client':
         specifier: workspace:*
         version: link:../../packages/gh-client
+      '@stratum/kb-core':
+        specifier: workspace:*
+        version: link:../../packages/kb-core
       '@stratum/llm':
         specifier: workspace:*
         version: link:../../packages/llm
