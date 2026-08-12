@@ -463,7 +463,9 @@ export function createGhClient(octokit: OctokitLike): GhClient {
           owner,
           repo: name,
           state: opts?.state ?? "open",
-          per_page: opts?.perPage ?? 30,
+          // ページングしないため既定を大きめに取る。冪等ガード(未マージ PR の検出)が
+          // 取りこぼすと二重 PR が出るため、1 ページで収まる範囲を広げておく。
+          per_page: opts?.perPage ?? 100,
         });
         return res.data.map((p) => ({
           number: p.number,

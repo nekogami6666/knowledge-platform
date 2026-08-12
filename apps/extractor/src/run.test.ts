@@ -98,6 +98,10 @@ function makeGh(over: Partial<GhClient> = {}): GhClient {
   };
 }
 
+function makeNotifier() {
+  return { notifyPrCreated: vi.fn(async () => {}), notifySkipped: vi.fn(async () => {}) };
+}
+
 function makeDeps(over: Partial<RunDeps> = {}): RunDeps {
   const files: Record<string, string> = {
     "/kb/_meta/id-counter.json": JSON.stringify({ kb: { "2026": 144 } }),
@@ -136,7 +140,7 @@ function makeDeps(over: Partial<RunDeps> = {}): RunDeps {
     exec: async (args: readonly string[]) =>
       args.includes("interviews/*.md") ? { stdout: "" } : { stdout: "2026/06/x.md\n" },
     readdir: async () => [],
-    notifier: { notifyPrCreated: vi.fn(async () => {}) },
+    notifier: makeNotifier(),
     now: () => new Date("2026-07-01T00:00:00Z"),
     logger: createLogger([], () => {}),
     realPr: true,
@@ -148,7 +152,7 @@ function makeDeps(over: Partial<RunDeps> = {}): RunDeps {
 describe("runExtractor", () => {
   it("happy path: 1 PR を作成(state.json + entry + id-counter を含む)", async () => {
     const gh = makeGh();
-    const notifier = { notifyPrCreated: vi.fn(async () => {}) };
+    const notifier = makeNotifier();
     const r = await runExtractor(makeDeps({ gh, notifier }));
     expect(r.created).toBe(true);
     expect(r.prUrl).toBe("https://github.com/o/kb/pull/99");
@@ -208,7 +212,7 @@ describe("runExtractor", () => {
     expect(gh.createPullRequest).not.toHaveBeenCalled();
   });
 
-  it("同一範囲(ランキー)の PR が既存 → 冪等 skip", async () => {
+  it("未マージの抽出 PR が既存 → 冪等 skip", async () => {
     const existing: PrSummary = {
       number: 7,
       title: buildPrTitle(buildRunKey(HEAD, KB_HEAD)),
@@ -221,6 +225,38 @@ describe("runExtractor", () => {
     expect(r.reason).toBe("already-exists");
     expect(r.prUrl).toBe("https://existing");
     expect(gh.createPullRequest).not.toHaveBeenCalled();
+  });
+
+  it("範囲(ランキー)が違う抽出 PR でも skip し、見送りを通知する", async () => {
+    // 上流に新コミットが入るとランキーが変わる。範囲一致で判定していた頃はここでガードが外れ、
+    // 未マージ PR が毎晩積み上がった(2026-07-29)。
+    const existing: PrSummary = {
+      number: 8,
+      title: "extract: sources 0000000+1111111 ナレッジ抽出",
+      headRef: "extract/0000000+1111111",
+      url: "https://stale-pr",
+    };
+    const gh = makeGh({ listPullRequests: vi.fn(async () => [existing]) });
+    const notifier = makeNotifier();
+    const r = await runExtractor(makeDeps({ gh, notifier }));
+    expect(r.created).toBe(false);
+    expect(r.reason).toBe("already-exists");
+    expect(r.prUrl).toBe("https://stale-pr");
+    expect(gh.createPullRequest).not.toHaveBeenCalled();
+    expect(notifier.notifySkipped).toHaveBeenCalledWith({ prUrl: "https://stale-pr" });
+  });
+
+  it("抽出 PR 以外の open PR は skip の理由にならない", async () => {
+    const unrelated: PrSummary = {
+      number: 9,
+      title: "docs: 無関係な PR",
+      headRef: "docs/whatever",
+      url: "https://unrelated",
+    };
+    const gh = makeGh({ listPullRequests: vi.fn(async () => [unrelated]) });
+    const r = await runExtractor(makeDeps({ gh }));
+    expect(r.reason).not.toBe("already-exists");
+    expect(gh.createPullRequest).toHaveBeenCalled();
   });
 
   it("validateRepo 失敗 → PR を作成しない", async () => {

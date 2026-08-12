@@ -1,9 +1,14 @@
 /**
  * 日次 PR のタイトル/ブランチと冪等性判定(design.md §7.1)。
- * タイトルに処理範囲のランキー(minutes head + kb head の短縮 SHA・PR-I1)を埋め込み、再実行時に
- * 既存 open PR を検出して二重作成を防ぐ。カーソルは merge 時にしか main へ反映されないため、
- * merge 前の再実行は同じ範囲=同じランキー=同タイトルとなり、既存 PR にマッチして skip される
- * (create↔merge ギャップの吸収)。
+ * タイトルには処理範囲のランキー(minutes head + kb head の短縮 SHA・PR-I1)を残し、どの範囲を
+ * 処理した PR かを人が読めるようにする。
+ *
+ * 冪等性の判定は**ブランチ名の prefix**(`extract/`)で行う(pr-miner の `pr-miner/` と同型)。
+ * カーソル(_meta/state.json)は merge 時にしか main へ反映されないため、未マージの PR がある間は
+ * 何度実行しても同じ範囲を再抽出することになる。当初はランキー一致で判定していたが、上流
+ * (議事録リポ)に新コミットが入るとランキーが変わってガードが外れ、未マージ PR が毎晩積み上がった
+ * (2026-07-29: KB に 3 本が同時 open・id-counter が衝突して同時マージ不可)。ブランチ prefix なら
+ * 範囲に関係なく「未マージの抽出 PR が 1 本でもあれば見送る」が成立し、PR タイトルを人が編集しても効く。
  */
 import type { PrSummary } from "@stratum/gh-client";
 
@@ -23,13 +28,17 @@ export function buildPrTitle(runKey: string): string {
   return `extract: sources ${runKey} ナレッジ抽出`;
 }
 
-/** タイトルからランキーを取り出す(無ければ null)。 */
-export function extractRunKey(title: string): string | null {
-  const m = /extract: sources ([0-9a-f]{7,40}\+[0-9a-f]{7,40})\b/.exec(title);
-  return m?.[1] ?? null;
+/** 抽出 PR のブランチ prefix(`buildBranch` と冪等ガードで共有)。 */
+export const EXTRACT_BRANCH_PREFIX = "extract/";
+
+export function buildBranch(runKey: string): string {
+  return `${EXTRACT_BRANCH_PREFIX}${runKey}`;
 }
 
-/** 同じランキーを対象とする既存 PR を返す(冪等性判定)。 */
-export function findExistingPr(prs: readonly PrSummary[], runKey: string): PrSummary | undefined {
-  return prs.find((p) => extractRunKey(p.title) === runKey);
+/**
+ * 未マージの抽出 PR を返す(冪等性判定)。範囲(ランキー)は問わない — 1 本でも open なら
+ * 今回の run は見送る。カーソルが進むのは merge 時なので、先に人がさばくのが正しい順序。
+ */
+export function findOpenExtractPr(prs: readonly PrSummary[]): PrSummary | undefined {
+  return prs.find((p) => p.headRef.startsWith(EXTRACT_BRANCH_PREFIX));
 }

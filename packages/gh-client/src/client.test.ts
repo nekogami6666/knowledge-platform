@@ -196,7 +196,8 @@ describe("listPullRequests", () => {
       owner: "o",
       repo: "r",
       state: "open",
-      per_page: 30,
+      // ページングしないため既定は 1 ページで収まる上限(冪等ガードの取りこぼし防止)。
+      per_page: 100,
     });
   });
 });

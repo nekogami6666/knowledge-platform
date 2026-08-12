@@ -22,6 +22,11 @@ export interface NotifyMessage {
 
 export interface Notifier {
   notifyPrCreated(msg: NotifyMessage): Promise<void>;
+  /**
+   * 未マージの抽出 PR があるため今回の run を見送ったことを知らせる(冪等ガード)。
+   * 通知しないと「毎晩静かに skip」が続き、レビュー滞留に誰も気づけない。
+   */
+  notifySkipped(msg: { prUrl: string }): Promise<void>;
 }
 
 /** 使用する fetch の最小契約(実 fetch を構造的に満たす)。 */
@@ -35,35 +40,49 @@ export function createWebhookNotifier(
   fetchFn?: FetchFn,
   logger?: Logger,
 ): Notifier {
+  async function post(content: string): Promise<void> {
+    if (webhookUrl === undefined || webhookUrl.length === 0) return; // 未設定 → no-op
+    const f = fetchFn ?? (globalThis.fetch as unknown as FetchFn);
+    let res: { ok: boolean; status: number };
+    try {
+      res = await f(webhookUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ content }),
+      });
+    } catch (err) {
+      logger?.warn("通知の投稿に失敗", {
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return;
+    }
+    if (!res.ok) {
+      logger?.warn("通知の投稿に失敗", { status: res.status });
+    }
+  }
+
   return {
     async notifyPrCreated(msg) {
-      if (webhookUrl === undefined || webhookUrl.length === 0) return; // 未設定 → no-op
-      const f = fetchFn ?? (globalThis.fetch as unknown as FetchFn);
       const c = msg.counts;
-      const content = [
-        `📥 抽出 PR を作成しました: ${msg.prUrl}`,
-        `新規 ${c.new} / 追記 ${c.append} / 矛盾 ${c.supersede} / skip ${c.skip} / 未解決の問い ${c.openQuestions}`,
-        msg.people.length > 0 ? `関係者: ${msg.people.join(", ")}` : "",
-        "問題なければ 👍(bot が代理マージ)、修正は PR で直接編集してください。",
-      ]
-        .filter((l) => l.length > 0)
-        .join("\n");
-      let res: { ok: boolean; status: number };
-      try {
-        res = await f(webhookUrl, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ content }),
-        });
-      } catch (err) {
-        logger?.warn("通知の投稿に失敗", {
-          error: err instanceof Error ? err.message : String(err),
-        });
-        return;
-      }
-      if (!res.ok) {
-        logger?.warn("通知の投稿に失敗", { status: res.status });
-      }
+      await post(
+        [
+          `📥 抽出 PR を作成しました: ${msg.prUrl}`,
+          `新規 ${c.new} / 追記 ${c.append} / 矛盾 ${c.supersede} / skip ${c.skip} / 未解決の問い ${c.openQuestions}`,
+          msg.people.length > 0 ? `関係者: ${msg.people.join(", ")}` : "",
+          "問題なければ 👍(bot が代理マージ)、修正は PR で直接編集してください。",
+        ]
+          .filter((l) => l.length > 0)
+          .join("\n"),
+      );
+    },
+    async notifySkipped(msg) {
+      await post(
+        [
+          "⏸ 未マージの抽出 PR があるため、今回の抽出を見送りました。",
+          msg.prUrl,
+          "この PR をマージ(またはクローズ)すると次回から再開します。",
+        ].join("\n"),
+      );
     },
   };
 }

@@ -29,7 +29,7 @@ llm `queryFn` と同趣旨)。`createGhClient(octokit)` に fake を渡してユ
 実生成は `createGhClientFromAuth` / `createGhClientFromEnv`(seam の外で `createOctokit` が App/token に応じ Octokit を作る)。
 
 ### D3. 公開操作は consumer が必要とする最小集合に絞る
-`createPullRequest`(Git Data API で**複数ファイル1コミットの PR**)/ `listPullRequests`(冪等性=タイトル走査)/
+`createPullRequest`(Git Data API で**複数ファイル1コミットの PR**)/ `listPullRequests`(冪等性=ブランチ名 prefix 走査)/
 `mergePullRequest`(将来の 👍 自動マージ)/ `getFileContents`(id-allocator CAS)。`putFileContents` 等は consumer が
 必要になるまで足さない(extractor は createPullRequest に多ファイルを束ねるため不要)。
 

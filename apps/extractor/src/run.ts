@@ -19,7 +19,7 @@ import { type ExtractDeps, extractFromMinutes } from "./extract.js";
 import type { Logger } from "./logger.js";
 import { type MaterializeAction, type MaterializeDeps, materializeOne } from "./materialize.js";
 import type { Notifier, NotifyCounts } from "./notify.js";
-import { buildPrTitle, buildRunKey, findExistingPr } from "./pr-title.js";
+import { buildBranch, buildPrTitle, buildRunKey, findOpenExtractPr } from "./pr-title.js";
 import { type ReconcileDeps, reconcileCandidate } from "./reconcile.js";
 import type { RepoSyncer } from "./repos.js";
 
@@ -260,15 +260,17 @@ export async function runExtractor(deps: RunDeps): Promise<RunSummary> {
     };
   }
 
-  // 冪等性: 同一ランキー(minutes+kb head)の open PR が既にあれば skip(実 PR 時のみ gh に触れる)。
+  // 冪等性: 未マージの抽出 PR が 1 本でもあれば skip(実 PR 時のみ gh に触れる)。
+  // カーソルは merge 時にしか main へ反映されないため、先にレビューをさばくのが正しい順序。
+  // 範囲(ランキー)では判定しない — 上流に新コミットが入るとキーが変わり、PR が積み上がるため。
   const runKey = buildRunKey(minutesHead, kbHead);
   if (deps.realPr) {
-    const existing = findExistingPr(
+    const existing = findOpenExtractPr(
       await deps.gh.listPullRequests(config.kb.repo, { state: "open" }),
-      runKey,
     );
     if (existing) {
-      logger.info("同一範囲の PR が既存のため skip(冪等)", { prUrl: existing.url });
+      logger.info("未マージの抽出 PR があるため skip(冪等)", { prUrl: existing.url });
+      await deps.notifier.notifySkipped({ prUrl: existing.url });
       return {
         created: false,
         reason: "already-exists",
@@ -501,7 +503,7 @@ export async function runExtractor(deps: RunDeps): Promise<RunSummary> {
 
   const pr = await deps.gh.createPullRequest({
     repo: config.kb.repo,
-    head: `extract/${runKey}`,
+    head: buildBranch(runKey),
     base: config.base_branch,
     title,
     body: buildPrBody(counts, domains, [...people], skippedFiles, deferredCount),
