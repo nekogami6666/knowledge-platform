@@ -8,7 +8,7 @@
 import { join } from "node:path";
 import { performance } from "node:perf_hooks";
 import type { FileChange, GhClient } from "@stratum/gh-client";
-import type { IdKind, Source } from "@stratum/kb-core";
+import { type IdKind, parseMembers, type Source } from "@stratum/kb-core";
 import type { DecisionCandidate, ExtractionResult, LearningCandidate } from "./candidate.js";
 import { mapWithLimit } from "./concurrency.js";
 import type { ExtractorConfig } from "./config.js";
@@ -16,9 +16,11 @@ import { type ExtractorState, readState, serializeState } from "./cursor.js";
 import { changedSourceFiles, type GitExec } from "./diff.js";
 import { checkDomainProximity, listDomains, type ReaddirFn } from "./domains.js";
 import { type ExtractDeps, extractFromMinutes } from "./extract.js";
+import { applyCandidateGuards } from "./guards.js";
 import type { Logger } from "./logger.js";
 import { type MaterializeAction, type MaterializeDeps, materializeOne } from "./materialize.js";
 import type { Notifier, NotifyCounts } from "./notify.js";
+import { buildNameResolver, parseParticipants } from "./participants.js";
 import { buildBranch, buildPrTitle, buildRunKey, findOpenExtractPr } from "./pr-title.js";
 import { type ReconcileDeps, reconcileCandidate } from "./reconcile.js";
 import type { RepoSyncer } from "./repos.js";
@@ -71,11 +73,20 @@ export interface StageTimings {
   materializeMs: number;
 }
 
+/** 機械ガードの適用件数(ADR-0027 D2)。PR body とログで人間が降格を追えるようにする。 */
+export interface GuardTotals {
+  /** 未確定表現・曖昧レンジで open question に降格した decision の件数。 */
+  demotedDecisions: number;
+  /** 安全語彙で confidence low 強制 + 要確認タグを付けた learning の件数。 */
+  safetyFlagged: number;
+}
+
 export interface RunSummary {
   created: boolean;
   reason?: string;
   prUrl?: string;
   counts: NotifyCounts;
+  guards: GuardTotals;
   domains: DomainMetrics;
   timings?: StageTimings;
   fileCount: number;
@@ -91,6 +102,10 @@ function emptyCounts(): NotifyCounts {
 
 function emptyDomains(): DomainMetrics {
   return { candidateCount: 0, newDomains: [], reusedDomainCount: 0, nearDuplicates: [] };
+}
+
+function emptyGuards(): GuardTotals {
+  return { demotedDecisions: 0, safetyFlagged: 0 };
 }
 
 /** 順序を保った重複除去(前回 pending ⧺ 今回 diff の合流用・ADR-0023 D2)。 */
@@ -139,18 +154,31 @@ function candidateLabel(c: DecisionCandidate | LearningCandidate): string {
   return `${c.kind}:${c.title}`;
 }
 
-/** 議事録の「参加者: a, b」行から参加者を抽出(owner/deciders フォールバック)。 */
-export function parseParticipants(content: string): string[] {
-  const m = /(?:参加者|participants?)\s*[:：]\s*(.+)/i.exec(content);
-  if (m?.[1] === undefined) return [];
-  return m[1]
-    .split(/[,、\s]+/)
-    .map((s) => s.trim())
-    .filter((s) => s.length > 0);
+/**
+ * KB clone の `_meta/members.yaml` から参加者名の正規化リゾルバを作る(ADR-0027 D1)。
+ * ファイル欠落・パース失敗は warn して正規化なし(undefined)で続行する(抽出自体は止めない)。
+ */
+async function loadNameResolver(
+  kbRoot: string,
+  readFile: (absPath: string) => Promise<string>,
+  logger: Logger,
+): Promise<((raw: string) => string | null) | undefined> {
+  const path = join(kbRoot, "_meta", "members.yaml");
+  try {
+    const members = parseMembers(await readFile(path), path);
+    return buildNameResolver(members.members);
+  } catch (e) {
+    logger.warn("members.yaml を読めないため参加者名の正規化なしで続行します", {
+      path,
+      error: e instanceof Error ? e.message : String(e),
+    });
+    return undefined;
+  }
 }
 
 function buildPrBody(
   counts: NotifyCounts,
+  guards: GuardTotals,
   domains: DomainMetrics,
   people: readonly string[],
   skippedFiles: readonly string[],
@@ -164,6 +192,12 @@ function buildPrBody(
     `- 矛盾更新: ${counts.supersede}`,
     `- skip: ${counts.skip}`,
     `- 未解決の問い(未 materialize): ${counts.openQuestions}`,
+    guards.demotedDecisions > 0
+      ? `- ⚠️ 未確定表現のため決定→問いへ降格: ${guards.demotedDecisions} 件(ADR-0027 D2)`
+      : "",
+    guards.safetyFlagged > 0
+      ? `- ⚠️ 安全情報のため要確認(confidence low 強制): ${guards.safetyFlagged} 件(ADR-0027 D2)`
+      : "",
     `- 新設 domain: ${newDomains}(既存再利用 ${domains.reusedDomainCount} 件)`,
     domains.nearDuplicates.length > 0
       ? `- ⚠️ 近接 domain(集約候補): ${domains.nearDuplicates
@@ -254,12 +288,22 @@ export async function runExtractor(deps: RunDeps): Promise<RunSummary> {
       created: false,
       reason: "no-changes",
       counts: emptyCounts(),
+      guards: emptyGuards(),
       domains: emptyDomains(),
       fileCount: 0,
       skippedFiles: [],
       deferredCount: 0,
     };
   }
+
+  // レビュー担当の日替わりローテーション(試用運用・㉘)。gap-tracker run.ts の rr と同じ日数基準。
+  // 実 ID は config(extractor.yaml / Actions vars)から来る — コードに人名・ID を持たない。
+  const reviewer =
+    config.review_mentions.length > 0
+      ? config.review_mentions[
+          Math.floor(deps.now().getTime() / 86_400_000) % config.review_mentions.length
+        ]
+      : undefined;
 
   // 冪等性: 未マージの抽出 PR が 1 本でもあれば skip(実 PR 時のみ gh に触れる)。
   // カーソルは merge 時にしか main へ反映されないため、先にレビューをさばくのが正しい順序。
@@ -271,12 +315,16 @@ export async function runExtractor(deps: RunDeps): Promise<RunSummary> {
     );
     if (existing) {
       logger.info("未マージの抽出 PR があるため skip(冪等)", { prUrl: existing.url });
-      await deps.notifier.notifySkipped({ prUrl: existing.url });
+      await deps.notifier.notifySkipped({
+        prUrl: existing.url,
+        ...(reviewer !== undefined ? { reviewer } : {}),
+      });
       return {
         created: false,
         reason: "already-exists",
         prUrl: existing.url,
         counts: emptyCounts(),
+        guards: emptyGuards(),
         domains: emptyDomains(),
         fileCount: 0,
         skippedFiles: [],
@@ -285,12 +333,16 @@ export async function runExtractor(deps: RunDeps): Promise<RunSummary> {
     }
   }
 
+  // 参加者名の正規化(members.yaml 照合・ADR-0027 D1)。欠落は warn 済みで undefined。
+  const resolveName = await loadNameResolver(kbRoot, deps.readFile, logger);
+
   const materializeDeps: MaterializeDeps = {
     makeId: deps.makeId,
     now: deps.now,
     readFile: deps.readFile,
   };
   const counts = emptyCounts();
+  const guardTotals = emptyGuards();
   const people = new Set<string>();
   const files: FileChange[] = [];
   // domain 再利用(§2-C): run 開始時の既存 domain を起点に、materialize した新設 domain を逐次
@@ -329,7 +381,10 @@ export async function runExtractor(deps: RunDeps): Promise<RunSummary> {
         });
         continue;
       }
-      const participants = parseParticipants(content);
+      const participants = parseParticipants(content, {
+        exclude: config.participants_exclude,
+        ...(resolveName !== undefined ? { resolve: resolveName } : {}),
+      });
 
       // 抽出はファイル単位で耐障害化(タイムアウト等の失敗は skip+持ち越し・ADR-0023 D1)。
       // reconcile の候補単位 skip と同型だが、こちらはファイル 1 本を丸ごと次回へ回す。
@@ -351,6 +406,20 @@ export async function runExtractor(deps: RunDeps): Promise<RunSummary> {
         pendingOut.push(path);
         continue;
       }
+      // 機械ガード(ADR-0027 D2): 未確定 decision の降格・安全 learning の low 強制。
+      // reconcile の前に適用する(降格済み decision は agentic search のコストを使わない)。
+      const guarded = applyCandidateGuards(extraction);
+      extraction = guarded.extraction;
+      guardTotals.demotedDecisions += guarded.demotedDecisions;
+      guardTotals.safetyFlagged += guarded.safetyFlagged;
+      if (guarded.demotedDecisions > 0 || guarded.safetyFlagged > 0) {
+        logger.info("機械ガードを適用(ADR-0027 D2)", {
+          path,
+          demotedDecisions: guarded.demotedDecisions,
+          safetyFlagged: guarded.safetyFlagged,
+        });
+      }
+
       counts.openQuestions += extraction.openQuestions.length;
 
       const candidates = [...extraction.decisions, ...extraction.learnings];
@@ -437,6 +506,7 @@ export async function runExtractor(deps: RunDeps): Promise<RunSummary> {
       created: false,
       reason: "no-entries",
       counts,
+      guards: guardTotals,
       domains,
       timings,
       fileCount: 0,
@@ -478,6 +548,7 @@ export async function runExtractor(deps: RunDeps): Promise<RunSummary> {
       created: false,
       reason: "validation-failed",
       counts,
+      guards: guardTotals,
       domains,
       timings,
       fileCount: files.length,
@@ -496,6 +567,7 @@ export async function runExtractor(deps: RunDeps): Promise<RunSummary> {
       created: false,
       reason: "dry-run",
       counts,
+      guards: guardTotals,
       domains,
       timings,
       fileCount: files.length,
@@ -509,15 +581,21 @@ export async function runExtractor(deps: RunDeps): Promise<RunSummary> {
     head: buildBranch(runKey),
     base: config.base_branch,
     title,
-    body: buildPrBody(counts, domains, [...people], skippedFiles, deferredCount),
+    body: buildPrBody(counts, guardTotals, domains, [...people], skippedFiles, deferredCount),
     files,
   });
-  await deps.notifier.notifyPrCreated({ prUrl: pr.url, counts, people: [...people] });
+  await deps.notifier.notifyPrCreated({
+    prUrl: pr.url,
+    counts,
+    people: [...people],
+    ...(reviewer !== undefined ? { reviewer } : {}),
+  });
   logger.info("抽出 PR を作成しました。", { prUrl: pr.url, files: files.length });
   return {
     created: true,
     prUrl: pr.url,
     counts,
+    guards: guardTotals,
     domains,
     timings,
     fileCount: files.length,

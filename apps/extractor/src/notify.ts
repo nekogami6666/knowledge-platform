@@ -18,6 +18,8 @@ export interface NotifyMessage {
   prUrl: string;
   counts: NotifyCounts;
   people: readonly string[];
+  /** レビュー担当の Discord ユーザ ID(config review_mentions の日替わりローテーション)。 */
+  reviewer?: string;
 }
 
 export interface Notifier {
@@ -26,7 +28,7 @@ export interface Notifier {
    * 未マージの抽出 PR があるため今回の run を見送ったことを知らせる(冪等ガード)。
    * 通知しないと「毎晩静かに skip」が続き、レビュー滞留に誰も気づけない。
    */
-  notifySkipped(msg: { prUrl: string }): Promise<void>;
+  notifySkipped(msg: { prUrl: string; reviewer?: string }): Promise<void>;
 }
 
 /** 使用する fetch の最小契約(実 fetch を構造的に満たす)。 */
@@ -69,6 +71,9 @@ export function createWebhookNotifier(
           `📥 抽出 PR を作成しました: ${msg.prUrl}`,
           `新規 ${c.new} / 追記 ${c.append} / 矛盾 ${c.supersede} / skip ${c.skip} / 未解決の問い ${c.openQuestions}`,
           msg.people.length > 0 ? `関係者: ${msg.people.join(", ")}` : "",
+          msg.reviewer !== undefined
+            ? `👀 今回のレビュー担当: <@${msg.reviewer}> さん、内容の確認をお願いします。`
+            : "",
           "問題なければ 👍(bot が代理マージ)、修正は PR で直接編集してください。",
         ]
           .filter((l) => l.length > 0)
@@ -80,8 +85,12 @@ export function createWebhookNotifier(
         [
           "⏸ 未マージの抽出 PR があるため、今回の抽出を見送りました。",
           msg.prUrl,
-          "この PR をマージ(またはクローズ)すると次回から再開します。",
-        ].join("\n"),
+          msg.reviewer !== undefined
+            ? `<@${msg.reviewer}> さん、上記 PR のレビューをお願いします(マージ/クローズで次回から再開します)。`
+            : "この PR をマージ(またはクローズ)すると次回から再開します。",
+        ]
+          .filter((l) => l.length > 0)
+          .join("\n"),
       );
     },
   };

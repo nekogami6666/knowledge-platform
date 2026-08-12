@@ -66,4 +66,47 @@ describe("createWebhookNotifier", () => {
     ).resolves.toBeUndefined();
     expect(warns).toEqual([["通知の投稿に失敗", { error: "ECONNREFUSED" }]]);
   });
+
+  it("reviewer 付きの PR 作成通知はレビュー担当をメンションする(㉘)", async () => {
+    let body = "";
+    const fetchFn: FetchFn = async (_url, init) => {
+      body = init.body;
+      return { ok: true, status: 204 };
+    };
+    await createWebhookNotifier("https://hook", fetchFn).notifyPrCreated({
+      prUrl: "https://pr",
+      counts,
+      people: [],
+      reviewer: "12345",
+    });
+    expect(body).toContain("<@12345>");
+    expect(body).toContain("レビュー担当");
+  });
+
+  it("reviewer 無しの通知はメンションを含まない(従来挙動)", async () => {
+    let body = "";
+    const fetchFn: FetchFn = async (_url, init) => {
+      body = init.body;
+      return { ok: true, status: 204 };
+    };
+    const n = createWebhookNotifier("https://hook", fetchFn);
+    await n.notifyPrCreated({ prUrl: "https://pr", counts, people: [] });
+    expect(body).not.toContain("<@");
+    await n.notifySkipped({ prUrl: "https://pr" });
+    expect(body).not.toContain("<@");
+  });
+
+  it("reviewer 付きの skip 通知は滞留 PR のレビューを依頼する(㉘)", async () => {
+    let body = "";
+    const fetchFn: FetchFn = async (_url, init) => {
+      body = init.body;
+      return { ok: true, status: 204 };
+    };
+    await createWebhookNotifier("https://hook", fetchFn).notifySkipped({
+      prUrl: "https://pr",
+      reviewer: "67890",
+    });
+    expect(body).toContain("<@67890>");
+    expect(body).toContain("レビューをお願いします");
+  });
 });

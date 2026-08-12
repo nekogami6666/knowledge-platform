@@ -39,6 +39,14 @@ export const extractorConfigSchema = z
     kb: repoSpecSchema,
     interviews: interviewsSpecSchema.default({}),
     base_branch: z.string().default("main"),
+    /** 参加者行から除外する非人物名(録音 bot 等・ADR-0027 D1。人名をコードにハードコードしない)。 */
+    participants_exclude: z.array(z.string()).default(["QB", "Recorder"]),
+    /**
+     * 抽出 PR 通知でレビュー担当としてメンションする Discord ユーザ ID(日替わりローテーション)。
+     * 試用運用のための設定。実 ID は extractor.yaml(gitignore)/ Actions vars に置き、
+     * コードに人名・ID をハードコードしない。空ならメンション無し(従来どおり)。
+     */
+    review_mentions: z.array(z.string()).default([]),
   })
   .strict();
 export type ExtractorConfig = z.infer<typeof extractorConfigSchema>;

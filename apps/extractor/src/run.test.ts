@@ -23,6 +23,8 @@ const config: ExtractorConfig = {
   kb: { repo: "org/knowledge-base", dir: "knowledge-base" },
   interviews: { dir: "interviews", exclude_dirs: ["kits", "voice-memos"] },
   base_branch: "main",
+  participants_exclude: ["QB", "Recorder"],
+  review_mentions: [],
 };
 
 /** 決定的な連番スタブ(実装は kb-core newId の乱数採番・ADR-0026)。suffix は base36 6文字。 */
@@ -469,6 +471,134 @@ describe("runExtractor", () => {
     const state = JSON.parse(arg?.files.find((f) => f.path === "_meta/state.json")?.content ?? "");
     // p.md 処理済み → pending は消え、カーソルは head。
     expect(state.sources.minutes).toEqual({ last_processed_sha: HEAD });
+  });
+
+  it("people 空の learning は参加者を owner にせず unassigned(ADR-0027 D1・extractor 経路)", async () => {
+    const gh = makeGh();
+    const logs: string[] = [];
+    const noPeople: ExtractionResult = {
+      decisions: [],
+      learnings: [
+        {
+          kind: "learning",
+          title: "t",
+          body: "b",
+          entryType: "fact",
+          domain: "hardware",
+          people: [],
+          tags: [],
+          confidence: "high",
+          slug: "t",
+        },
+      ],
+      openQuestions: [],
+    };
+    const r = await runExtractor(
+      makeDeps({
+        gh,
+        logger: createLogger([], (l) => logs.push(l)),
+        extractDeps: {
+          promptStore: { read: async () => "---\nrole: standard\n---\nR" },
+          search: async () => ({ value: noPeople, usage: { inputTokens: 1, outputTokens: 1 } }),
+        },
+      }),
+    );
+    expect(r.created).toBe(true);
+    const arg = vi.mocked(gh.createPullRequest).mock.calls[0]?.[0];
+    const entry = arg?.files.find((f) => f.path.startsWith("knowledge/"));
+    expect(entry?.content).toContain('owner: "unassigned"'); // 参加者 yamada を owner にしない
+    // members.yaml が無い環境では warn して正規化なしで続行する。
+    expect(logs.some((l) => l.includes("members.yaml"))).toBe(true);
+  });
+
+  it("機械ガードが配線される: 未確定 decision は降格・安全 learning は low 強制(ADR-0027 D2)", async () => {
+    const gh = makeGh();
+    const guarded: ExtractionResult = {
+      decisions: [
+        {
+          kind: "decision",
+          title: "X 方式の採用",
+          decision: "X 方式を検討する。",
+          deciders: ["yamada"],
+          confidence: "high",
+        },
+      ],
+      learnings: [
+        {
+          kind: "learning",
+          title: "分電盤の配線手順",
+          body: "AC100V 系統の配線は主幹を落としてから行う。",
+          entryType: "procedure",
+          domain: "hardware",
+          people: ["yamada"],
+          tags: [],
+          confidence: "high",
+          slug: "wiring",
+        },
+      ],
+      openQuestions: [],
+    };
+    const r = await runExtractor(
+      makeDeps({
+        gh,
+        extractDeps: {
+          promptStore: { read: async () => "---\nrole: standard\n---\nR" },
+          search: async () => ({ value: guarded, usage: { inputTokens: 1, outputTokens: 1 } }),
+        },
+      }),
+    );
+    expect(r.guards).toEqual({ demotedDecisions: 1, safetyFlagged: 1 });
+    expect(r.counts.new).toBe(1); // 降格された decision は materialize されない
+    expect(r.counts.openQuestions).toBe(2); // 降格 1 + 安全の確認質問 1
+    const arg = vi.mocked(gh.createPullRequest).mock.calls[0]?.[0];
+    const entry = arg?.files.find((f) => f.path.startsWith("knowledge/"));
+    expect(entry?.content).toContain('confidence: "low"');
+    expect(entry?.content).toContain("要確認");
+    expect(arg?.body).toContain("決定→問いへ降格: 1 件");
+    expect(arg?.body).toContain("安全情報のため要確認");
+  });
+
+  it("review_mentions 設定時は PR 作成・冪等 skip の両通知にレビュー担当が渡る(㉘)", async () => {
+    const withReviewer: ExtractorConfig = { ...config, review_mentions: ["999"] };
+    const notifier = makeNotifier();
+    const r = await runExtractor(makeDeps({ config: withReviewer, notifier }));
+    expect(r.created).toBe(true);
+    expect(notifier.notifyPrCreated).toHaveBeenCalledWith(
+      expect.objectContaining({ reviewer: "999" }),
+    );
+
+    const existing: PrSummary = {
+      number: 7,
+      title: buildPrTitle(buildRunKey(HEAD, KB_HEAD)),
+      headRef: `extract/${buildRunKey(HEAD, KB_HEAD)}`,
+      url: "https://existing",
+    };
+    const notifier2 = makeNotifier();
+    const gh = makeGh({ listPullRequests: vi.fn(async () => [existing]) });
+    await runExtractor(makeDeps({ config: withReviewer, notifier: notifier2, gh }));
+    expect(notifier2.notifySkipped).toHaveBeenCalledWith(
+      expect.objectContaining({ reviewer: "999" }),
+    );
+  });
+
+  it("review_mentions 複数名は日数で交代する(日替わりローテーション・㉘)", async () => {
+    const withReviewers: ExtractorConfig = { ...config, review_mentions: ["aaa", "bbb"] };
+    const day = 86_400_000;
+    // 偶数日 → index 0、翌日 → index 1(gap-tracker の rr と同じ日数基準)
+    const notifier = makeNotifier();
+    await runExtractor(
+      makeDeps({ config: withReviewers, notifier, now: () => new Date(day * 20000) }),
+    );
+    expect(notifier.notifyPrCreated).toHaveBeenCalledWith(
+      expect.objectContaining({ reviewer: "aaa" }),
+    );
+    const notifier2 = makeNotifier();
+    await runExtractor(
+      makeDeps({ config: withReviewers, notifier: notifier2, now: () => new Date(day * 20001) }),
+    );
+    expect(notifier2.notifyPrCreated).toHaveBeenCalledWith(
+      expect.objectContaining({ reviewer: "bbb" }),
+    );
   });
 
   it("読めない pending は破棄して pending から外す(無限再キュー防止・ADR-0023 D1)", async () => {

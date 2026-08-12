@@ -34,6 +34,20 @@ kb:
     const cfg = await loadExtractorConfig(reader({ "extractor.yaml": overridden }));
     expect(cfg.minutes.exclude).toEqual(["transcript.md", "notes.md"]);
   });
+  it("participants_exclude は既定 [QB, Recorder]、明示指定で上書きできる(ADR-0027 D1)", async () => {
+    const def = await loadExtractorConfig(reader({ "extractor.yaml": validYaml }));
+    expect(def.participants_exclude).toEqual(["QB", "Recorder"]);
+    const overridden = `${validYaml}participants_exclude: [OtterBot]\n`;
+    const cfg = await loadExtractorConfig(reader({ "extractor.yaml": overridden }));
+    expect(cfg.participants_exclude).toEqual(["OtterBot"]);
+  });
+  it("review_mentions は既定 []、明示指定で Discord ID リストを持てる(㉘)", async () => {
+    const def = await loadExtractorConfig(reader({ "extractor.yaml": validYaml }));
+    expect(def.review_mentions).toEqual([]);
+    const overridden = `${validYaml}review_mentions: ["111", "222"]\n`;
+    const cfg = await loadExtractorConfig(reader({ "extractor.yaml": overridden }));
+    expect(cfg.review_mentions).toEqual(["111", "222"]);
+  });
   it("extractor.yaml が無ければ throw", async () => {
     await expect(loadExtractorConfig(reader({}))).rejects.toThrow();
   });

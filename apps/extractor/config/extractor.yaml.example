@@ -14,3 +14,8 @@ kb:
 #   dir: interviews
 #   exclude_dirs: [kits, voice-memos]   # 質問リストと voice-memo 原本は抽出対象外
 base_branch: main
+# 参加者行から除外する非人物名(録音 bot 等・ADR-0027 D1)。省略時は下記の既定。
+# participants_exclude: [QB, Recorder]
+# 抽出 PR 通知でレビュー担当としてメンションする Discord ユーザ ID(日替わり交代)。
+# 試用運用: レビューをお願いする 2 名の ID を入れる。空(既定)ならメンション無し。
+# review_mentions: ["111111111111111111", "222222222222222222"]

@@ -337,6 +337,8 @@ async function minePr(
         kbRoot: deps.kbRoot,
         source,
         fallbackPeople,
+        // PR author は変更の当事者 1 名 = 根拠のある帰属なのでフォールバックを維持(ADR-0027 D1)。
+        allowPeopleFallback: true,
         candidate: c,
         verdict: r.verdict,
         // 源泉日 = 対象 PR のマージ日(ADR-0026 D3)。

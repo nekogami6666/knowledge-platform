@@ -59,6 +59,7 @@ jobs:
             dir: knowledge-base
             url: https://x-access-token:${EXTRACTOR_PAT}@github.com/${{ vars.EXTRACTOR_KB_REPO }}.git
           base_branch: main
+          review_mentions: [$(printf '%s' "${{ vars.EXTRACTOR_REVIEW_MENTIONS }}" | sed 's/ //g; s/[^,][^,]*/"&"/g')]
           EOF
           echo "extractor.yaml generated (repos: ${{ vars.EXTRACTOR_MINUTES_REPO }}, ${{ vars.EXTRACTOR_KB_REPO }})"
 

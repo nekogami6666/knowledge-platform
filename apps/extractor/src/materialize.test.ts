@@ -180,6 +180,86 @@ describe("materializeOne — new", () => {
   });
 });
 
+describe("materializeOne — 人物帰属の厳格化(ADR-0027 D1)", () => {
+  const decisionInput = (
+    deciders: string[],
+    over: Partial<MaterializeInput> = {},
+  ): MaterializeInput => ({
+    kbRoot: "/kb",
+    source: { kind: "meeting", repo: "org/minutes", path: "m.md", ref: "sha" },
+    fallbackPeople: ["yamada", "suzuki"],
+    candidate: { kind: "decision", title: "x", decision: "y", deciders, confidence: "high" },
+    verdict: { classification: "new", reason: "新規" },
+    ...over,
+  });
+
+  it("deciders 空でも参加者全員を補完しない(extractor 経路は skip・ADR 検証2)", async () => {
+    const r = await materializeOne(decisionInput([]), { makeId: stubMakeId(), now: NOW });
+    expect(r.action).toBe("skip");
+    expect(r.files).toHaveLength(0);
+    expect(r.reason).toContain("決定者");
+  });
+
+  it("allowPeopleFallback(pr-miner 経路)は deciders 空を fallbackPeople で補完する", async () => {
+    const r = await materializeOne(decisionInput([], { allowPeopleFallback: true }), {
+      makeId: stubMakeId(),
+      now: NOW,
+    });
+    expect(r.action).toBe("new");
+    const parsed = parseEntry(r.files[0]?.content ?? "", "decision");
+    expect(parsed.frontmatter.deciders).toEqual(["yamada", "suzuki"]);
+  });
+
+  it("「会議参加者」等の集合名 decider は機械拒否する(ADR 検証3)", async () => {
+    const r = await materializeOne(decisionInput(["会議参加者"]), {
+      makeId: stubMakeId(),
+      now: NOW,
+    });
+    expect(r.action).toBe("skip");
+  });
+
+  it("集合名・記号/数字のみを除いても残る decider だけで materialize する", async () => {
+    const r = await materializeOne(decisionInput(["全員", "02", "/", "yamada"]), {
+      makeId: stubMakeId(),
+      now: NOW,
+    });
+    expect(r.action).toBe("new");
+    const parsed = parseEntry(r.files[0]?.content ?? "", "decision");
+    expect(parsed.frontmatter.deciders).toEqual(["yamada"]);
+  });
+
+  it("people 空の learning は参加者を owner にせず unassigned(ADR 検証4)", async () => {
+    const learningInput = (allowPeopleFallback: boolean): MaterializeInput => ({
+      kbRoot: "/kb",
+      source: { kind: "meeting", repo: "org/minutes", path: "m.md", ref: "sha" },
+      fallbackPeople: ["yamada"],
+      allowPeopleFallback,
+      candidate: {
+        kind: "learning",
+        title: "t",
+        body: "b",
+        entryType: "fact",
+        domain: "hardware",
+        people: [],
+        tags: [],
+        confidence: "high",
+        slug: "s",
+      },
+      verdict: { classification: "new", reason: "新規" },
+    });
+    const extractor = await materializeOne(learningInput(false), {
+      makeId: stubMakeId(),
+      now: NOW,
+    });
+    expect(parseEntry(extractor.files[0]?.content ?? "", "knowledge").frontmatter.owner).toBe(
+      "unassigned",
+    );
+    // pr-miner 経路(author = 当事者)だけはフォールバックを維持する。
+    const miner = await materializeOne(learningInput(true), { makeId: stubMakeId(), now: NOW });
+    expect(parseEntry(miner.files[0]?.content ?? "", "knowledge").frontmatter.owner).toBe("yamada");
+  });
+});
+
 describe("materializeOne — duplicate", () => {
   const dupInput = (minutesPath: string): MaterializeInput => ({
     kbRoot: "/kb",
