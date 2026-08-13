@@ -16,6 +16,7 @@ import {
   askCommand,
   BOT_INTENTS,
   type BotDeps,
+  commandsToRegister,
   DENY_MESSAGE,
   denyReason,
   extractQuestionId,
@@ -25,6 +26,7 @@ import {
   handleGapAnswer,
   handleProxyMergeReaction,
   handleStats,
+  interviewCommand,
   parseFeedbackCustomId,
   parseGithubPrUrl,
   proxyMergeDecision,
@@ -192,6 +194,30 @@ describe("askCommand (/ask の登録定義)", () => {
     const question = json.options?.find((o) => o.name === "question");
     expect(question).toBeDefined();
     expect(question && "required" in question && question.required).toBe(true);
+  });
+});
+
+describe("interviewCommand / commandsToRegister (/interview の登録定義・ADR-0028 D5)", () => {
+  it("name=interview・subcommands start(person/topic 必須・kit 任意)/ status / cancel", () => {
+    const json = interviewCommand.toJSON();
+    expect(json.name).toBe("interview");
+    const subs = (json.options ?? []).map((o) => o.name);
+    expect(subs).toEqual(["start", "status", "cancel"]);
+    const start = json.options?.find((o) => o.name === "start");
+    const opts =
+      start !== undefined && "options" in start
+        ? (start.options as { name: string; required?: boolean }[])
+        : [];
+    expect(opts.map((o) => [o.name, o.required ?? false])).toEqual([
+      ["person", true],
+      ["topic", true],
+      ["kit", false],
+    ]);
+  });
+
+  it("VC 録音が無効な環境(interview deps 未注入)では /interview を登録しない", () => {
+    expect(commandsToRegister(false).map((c) => c.name)).toEqual(["ask", "stats"]);
+    expect(commandsToRegister(true).map((c) => c.name)).toEqual(["ask", "stats", "interview"]);
   });
 });
 

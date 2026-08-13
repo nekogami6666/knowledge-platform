@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { planRecordingsCleanup, type RecordingDirInfo } from "./recordings-cleanup.js";
+import {
+  interviewProtectedMeetingIds,
+  planRecordingsCleanup,
+  type RecordingDirInfo,
+} from "./recordings-cleanup.js";
 
 const NOW = new Date("2026-07-27T00:00:00.000Z");
 const DAY = 24 * 60 * 60 * 1000;
@@ -90,5 +94,60 @@ describe("planRecordingsCleanup", () => {
     });
     expect(plan.removeDirs).toEqual([]);
     expect(plan.removeTmpOnly).toEqual([]);
+  });
+});
+
+describe("interviewProtectedMeetingIds(ADR-0028 D2 の保護集合)", () => {
+  const payload = (over: Record<string, unknown> = {}): string =>
+    JSON.stringify({
+      sessionId: "s",
+      chunks: [
+        { seq: 1, meetingId: "vm-c1" },
+        { seq: 2, meetingId: "vm-c2" },
+      ],
+      currentChunk: { seq: 3, meetingId: "vm-cur" },
+      ...over,
+    });
+
+  it("done / cancelled 以外(armed / recording / pending)の chunks + currentChunk を集める", () => {
+    for (const state of ["armed", "recording", "pending"]) {
+      const ids = interviewProtectedMeetingIds([{ state, payloadJson: payload() }]);
+      expect([...ids].sort()).toEqual(["vm-c1", "vm-c2", "vm-cur"]);
+    }
+  });
+
+  it("done / cancelled は保護しない(retention に任せて消せる)", () => {
+    expect(
+      interviewProtectedMeetingIds([
+        { state: "done", payloadJson: payload() },
+        { state: "cancelled", payloadJson: payload() },
+      ]).size,
+    ).toBe(0);
+  });
+
+  it("currentChunk 無し(null)・壊れた JSON・null payload は無視する", () => {
+    const ids = interviewProtectedMeetingIds([
+      { state: "recording", payloadJson: payload({ currentChunk: null }) },
+      { state: "recording", payloadJson: "{broken" },
+      { state: "recording", payloadJson: null },
+    ]);
+    expect([...ids].sort()).toEqual(["vm-c1", "vm-c2"]);
+  });
+
+  it("planRecordingsCleanup と組み合わせて年齢超過でも残す", () => {
+    const old = vmName(90);
+    const ids = interviewProtectedMeetingIds([
+      {
+        state: "recording",
+        payloadJson: JSON.stringify({ chunks: [{ seq: 1, meetingId: old }], currentChunk: null }),
+      },
+    ]);
+    const plan = planRecordingsCleanup({
+      ...base,
+      dirs: [dir(old, 90)],
+      pendingMeetingIds: ids,
+    });
+    expect(plan.removeDirs).toEqual([]);
+    expect(plan.keptPending).toEqual([old]);
   });
 });

@@ -15,8 +15,13 @@ import type { Dirent } from "node:fs";
 import { readdir, rm, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { z } from "zod";
+import { INTERVIEW_SESSION_ACTION_TYPE } from "./interview-session.js";
 import { createLogger } from "./logger.js";
-import { planRecordingsCleanup, type RecordingDirInfo } from "./recordings-cleanup.js";
+import {
+  interviewProtectedMeetingIds,
+  planRecordingsCleanup,
+  type RecordingDirInfo,
+} from "./recordings-cleanup.js";
 import { createSqliteStore } from "./sqlite-store.js";
 import { VOICE_MEMO_ACTION_TYPE } from "./voice.js";
 
@@ -117,6 +122,13 @@ async function main(): Promise<void> {
       .listPendingActions(VOICE_MEMO_ACTION_TYPE)
       .filter((a) => a.state === "pending");
     pending = pendingMeetingIds(actions.map((a) => a.payloadJson));
+    // ADR-0028 D2: interview セッション(done / cancelled 以外)のチャンク meetingId も保護する
+    // (armed / recording / pending の音声を retention で失わない)。
+    for (const id of interviewProtectedMeetingIds(
+      store.listPendingActions(INTERVIEW_SESSION_ACTION_TYPE),
+    )) {
+      pending.add(id);
+    }
   } finally {
     store.close();
   }

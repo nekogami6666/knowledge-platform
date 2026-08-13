@@ -57,7 +57,10 @@ curl -s http://127.0.0.1:9488/health 2>/dev/null || docker compose exec bot sh -
 3. PR に原本(`interviews/voice-memos/…`)+ 記事 + 採番が同梱されている(validate CI 緑)
 4. DM に 👍 → 代理マージ(§6.3)
 5. 2 人で入り直して数十秒喋る → 退室 → 記事の `people` に両者(members.yaml 登載者)が載る
-6. 15 分放置 → 自動 finalize されることを一度だけ確認(任意)
+6. 15 分放置 → **自動でチャンク分割され録音が継続**することを一度だけ確認(任意)。
+   上限到達で切れる旧挙動は ADR-0028 D3 で廃止(退室すれば従来どおり終了。チャンクごとに
+   1 本の voice-memo PR になる)。/interview セッション中は分割チャンクが 1 つの原本に結合される
+   → [interview-session.md](interview-session.md)
 
 ## 運用ノート
 

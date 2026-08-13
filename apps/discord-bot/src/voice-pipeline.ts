@@ -97,8 +97,8 @@ export interface VoicePipelineDeps {
   now?: () => Date;
 }
 
-/** 一時的(リトライ可能)な失敗か。pending を残す判定(D5)。 */
-function isTransient(err: unknown): boolean {
+/** 一時的(リトライ可能)な失敗か。pending を残す判定(D5。interview-pipeline も同じ分類を使う)。 */
+export function isTransient(err: unknown): boolean {
   return err instanceof LlmError && RETRYABLE_LLM_CODES.includes(err.code);
 }
 

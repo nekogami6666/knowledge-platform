@@ -25,6 +25,7 @@ import {
 } from "./discord.js";
 import { parseEnv } from "./env.js";
 import { createFreshnessDmWorker, type FreshnessApplyDeps } from "./freshness-flow.js";
+import { createInterviewSessionWorker } from "./interview-pipeline.js";
 import { createInterviewChunkBinding } from "./interview-session.js";
 import { createLogger, withCorrelation } from "./logger.js";
 import { createCloneMembersLoader, DEFAULT_KB_DIR } from "./members.js";
@@ -206,9 +207,29 @@ async function main(): Promise<void> {
           },
         }
       : {}),
+    // ADR-0028 D5: /interview は VC 録音が有効な環境でのみ配線(未注入ならコマンド登録もしない)。
+    ...(vcEnabled && voice.vc_channel_id !== null
+      ? {
+          interview: {
+            store,
+            voiceVcChannelId: voice.vc_channel_id,
+            ...(gh !== undefined ? { gh } : {}),
+            ...(ops.kb_repo !== null ? { kbRepo: ops.kb_repo } : {}),
+            armTtlMinutes: voice.interview_arm_ttl_minutes,
+            maxRecordingMinutes: voice.max_recording_minutes,
+            // watcher は createBot 後に生成されるため遅延参照(vcRecorder と同じ流儀)。
+            hasActiveRecording: () => vcWatcher?.hasActive() ?? false,
+            abortActiveRecording: (reason: string) =>
+              vcWatcher?.abortActive(reason) ?? Promise.resolve(),
+            makeId: () => randomUUID(),
+            now: () => new Date(),
+            logger,
+          },
+        }
+      : {}),
   });
   const messenger = createClientMessenger(bot);
-  voiceWorker = createVoiceMemoWorker({
+  const memoWorker = createVoiceMemoWorker({
     logger,
     store,
     getMembers,
@@ -219,6 +240,23 @@ async function main(): Promise<void> {
     ...(transcriber !== undefined ? { transcriber } : {}),
     messenger,
   });
+  // ADR-0028 D4: interview セッションの STT 結合 → 原本 PR。voice worker と同じ kick で起きる
+  // (受付 hook・起動時レジューム・completeSession の onQueued を共有)。
+  const interviewWorker = createInterviewSessionWorker({
+    logger,
+    store,
+    getMembers,
+    ops,
+    ...(gh !== undefined ? { gh } : {}),
+    ...(transcriber !== undefined ? { transcriber } : {}),
+    messenger,
+  });
+  voiceWorker = {
+    kick: () => {
+      memoWorker.kick();
+      interviewWorker.kick();
+    },
+  };
   if (vcEnabled && voice.vc_channel_id !== null && env.RECORDER_URL !== undefined) {
     const vcChannelId = voice.vc_channel_id;
     vcWatcher = createVcRecorderWatcher({

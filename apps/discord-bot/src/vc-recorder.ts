@@ -139,6 +139,8 @@ export interface VcRecorderWatcher {
   resume(): Promise<void>;
   /** 進行中の録音を破棄する(/interview cancel 用。interview チャンクは欠番)。 */
   abortActive(reason: string): Promise<void>;
+  /** 録音が進行中か(/interview start の「通常録音進行中は拒否」ガード・ADR-0028 D5)。 */
+  hasActive(): boolean;
 }
 
 export function createVcRecorderWatcher(deps: VcRecorderDeps): VcRecorderWatcher {
@@ -395,6 +397,9 @@ export function createVcRecorderWatcher(deps: VcRecorderDeps): VcRecorderWatcher
         log.info({ meetingId: s.record.meeting_id, reason }, "vc recording aborted");
       });
       return chain;
+    },
+    hasActive() {
+      return active !== null;
     },
   };
 }

@@ -1,6 +1,6 @@
 # ADR-0028: interview セッション UI と VC 録音の自動チャンク分割
 
-- ステータス: proposed
+- ステータス: accepted(2026-08-13)
 - 日付: 2026-08-13
 - 関連: ADR-0015(voice-memo)/ ADR-0020(VC 録音)/ ADR-0027(抽出品質)/ design.md §6.4・§6.6 ⑤-b
 

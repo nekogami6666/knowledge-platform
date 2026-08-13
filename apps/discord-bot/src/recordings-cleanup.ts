@@ -9,6 +9,8 @@
  * 安全条件(消してはいけないもの):
  * - ディレクトリ名が `vm-<epochMillis>-<channelId>` 以外(想定外は触らない = ホワイトリスト方式)
  * - まだパイプライン処理待ち(pending_actions の voice_memo)の meetingId — 年齢に関わらず残す
+ * - interview セッション(armed / recording / pending)のチャンク meetingId(ADR-0028 D2。
+ *   STT 前の音声を retention で失わない)
  * - 年齢が閾値未満のもの。録音中のセッションは DB・recorder API から特定できないため、
  *   閾値は max_recording_minutes(既定 15 分)+ finalize ポーリング上限を大きく上回る「日」単位にする
  */
@@ -45,6 +47,40 @@ export interface CleanupPlan {
   keptPending: string[];
   /** 名前が想定形でないため触らなかったエントリ。 */
   ignored: string[];
+}
+
+/**
+ * interview セッション行(pending_actions の interview_session)から保護すべき meetingId を集める
+ * (ADR-0028 D2: state が done / cancelled 以外 = まだ STT・PR 化されうる音声は消さない)。
+ * payload はスキーマ検証せず lenient に読む — 契約が育っても保護が外れない方に倒す
+ * (CLI の pendingMeetingIds と同方針)。壊れた JSON は無視(保護に入れないだけ)。
+ */
+export function interviewProtectedMeetingIds(
+  rows: readonly { state: string; payloadJson: string | null }[],
+): Set<string> {
+  const ids = new Set<string>();
+  for (const row of rows) {
+    if (row.state === "done" || row.state === "cancelled") continue;
+    if (row.payloadJson === null) continue;
+    try {
+      const parsed = JSON.parse(row.payloadJson) as {
+        chunks?: unknown;
+        currentChunk?: unknown;
+      };
+      if (Array.isArray(parsed.chunks)) {
+        for (const chunk of parsed.chunks) {
+          const meetingId = (chunk as { meetingId?: unknown }).meetingId;
+          if (typeof meetingId === "string" && meetingId.length > 0) ids.add(meetingId);
+        }
+      }
+      const current = (parsed.currentChunk as { meetingId?: unknown } | null | undefined)
+        ?.meetingId;
+      if (typeof current === "string" && current.length > 0) ids.add(current);
+    } catch {
+      // 壊れた payload は無視(保護集合に入れないだけ。削除側の判定は年齢が守る)。
+    }
+  }
+  return ids;
 }
 
 /** `vm-<epochMillis>-<channelId>`。この形以外は掃除対象にしない。 */

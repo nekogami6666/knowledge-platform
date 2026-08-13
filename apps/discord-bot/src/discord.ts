@@ -41,6 +41,7 @@ import {
 } from "./config.js";
 import type { BotStore } from "./db.js";
 import { type FreshnessApplyDeps, handleFreshnessReaction } from "./freshness-flow.js";
+import { handleInterviewCommand, type InterviewCommandDeps } from "./interview-commands.js";
 import { withCorrelation } from "./logger.js";
 import { EMPTY_MEMBERS, type MembersLoader } from "./members.js";
 import { aggregateStats, formatStatsMessage } from "./stats.js";
@@ -59,6 +60,46 @@ export const askCommand = new SlashCommandBuilder()
 export const statsCommand = new SlashCommandBuilder()
   .setName("stats")
   .setDescription("Q&A の利用状況と 👍👎 評価の集計を表示する(自分だけに表示)");
+
+/** /interview コマンド定義(ADR-0028 D5)。VC 録音が無効な環境では登録しない(commandsToRegister)。 */
+export const interviewCommand = new SlashCommandBuilder()
+  .setName("interview")
+  .setDescription("インタビューセッション(VC 録音 → 文字起こし PR)を管理する")
+  .addSubcommand((s) =>
+    s
+      .setName("start")
+      .setDescription("インタビューセッションを開始する(専用 VC に入ると録音開始)")
+      .addStringOption((o) =>
+        o.setName("person").setDescription("対象者(誰に聞くか)").setRequired(true),
+      )
+      .addStringOption((o) =>
+        o.setName("topic").setDescription("テーマ(何を聞くか)").setRequired(true),
+      )
+      .addStringOption((o) =>
+        o
+          .setName("kit")
+          .setDescription("質問キットのパス(interviews/kits/ 配下・省略時は自動発見)"),
+      ),
+  )
+  .addSubcommand((s) =>
+    s.setName("status").setDescription("進行中のセッション状態を表示する(自分だけに表示)"),
+  )
+  .addSubcommand((s) => s.setName("cancel").setDescription("進行中のセッションを中止する"));
+
+/**
+ * 起動時に登録するコマンド一覧(純関数)。/interview は VC 録音機能
+ * (voice.vc_channel_id + RECORDER_URL)が有効な環境 = interview deps が注入された環境でのみ登録する
+ * (ADR-0028 D5: 無効環境でコマンドだけ見えて失敗する UI を作らない)。
+ */
+export function commandsToRegister(
+  hasInterview: boolean,
+): ReturnType<SlashCommandBuilder["toJSON"]>[] {
+  return [
+    askCommand.toJSON(),
+    statsCommand.toJSON(),
+    ...(hasInterview ? [interviewCommand.toJSON()] : []),
+  ];
+}
 
 /** /ask の処理本体(PR-4a の handleAskRequest を index.ts で包んで注入する)。 */
 export type AskHandler = (
@@ -97,6 +138,8 @@ export interface BotDeps {
   freshness?: FreshnessApplyDeps;
   /** VC 録音の制御(§6.4 ③-b / ADR-0020)。voice.vc_channel_id + RECORDER_URL が無ければ OFF。 */
   vcRecorder?: Pick<VcRecorderWatcher, "handleSnapshot">;
+  /** /interview(ADR-0028 D5)。VC 録音が無効な環境では未注入 = コマンド登録もしない。 */
+  interview?: InterviewCommandDeps;
 }
 
 /**
@@ -201,7 +244,7 @@ export function createBot(deps: BotDeps): Client {
   // 起動時に /ask を Discord へ登録する。guildId 指定ならそのギルドへ即時、未指定はグローバル
   // (反映に最大 1 時間)。登録失敗は致命ではないのでログのみで起動を続ける。
   client.once(Events.ClientReady, async (ready) => {
-    const commands = [askCommand.toJSON(), statsCommand.toJSON()];
+    const commands = commandsToRegister(deps.interview !== undefined);
     try {
       // guildId 指定はそのギルドへ即時、未指定はグローバル登録(set の guildId 引数は string 必須)。
       if (deps.guildId !== undefined) {
@@ -239,6 +282,9 @@ export function createBot(deps: BotDeps): Client {
       await handleAsk(interaction, onAsk, deps, queue);
     } else if (interaction.isChatInputCommand() && interaction.commandName === "stats") {
       await handleStats(interaction, deps);
+    } else if (interaction.isChatInputCommand() && interaction.commandName === "interview") {
+      // deps.interview 未注入ならコマンド自体を登録しない(commandsToRegister)ため通常ここには来ない。
+      if (deps.interview !== undefined) await handleInterviewCommand(interaction, deps.interview);
     } else if (interaction.isButton()) {
       await handleButton(interaction, deps);
     }

@@ -30,6 +30,8 @@ export const interviewChunkSchema = z
     recordedAtJst: z.string().min(1),
     /** STT 結果のキャッシュ(ADR-0028 D4。null = 未実施。再試行で再 STT しない)。 */
     transcript: z.string().nullable().default(null),
+    /** transcript キャッシュと対の STT モデル(原本メタ用・ADR-0028 D4)。未 STT は省略。 */
+    sttModel: z.string().optional(),
   })
   .strict();
 export type InterviewChunk = z.infer<typeof interviewChunkSchema>;

@@ -177,6 +177,16 @@ describe("createVcRecorderWatcher", () => {
     expect(h.dms).toHaveLength(0);
   });
 
+  it("hasActive は録音中のみ true(/interview start の重複ガード・ADR-0028 D5)", async () => {
+    const { client } = fakeClient({});
+    const h = mkWatcher({ client });
+    expect(h.watcher.hasActive()).toBe(false);
+    await h.watcher.handleSnapshot(snap(["U1"]));
+    expect(h.watcher.hasActive()).toBe(true);
+    await h.watcher.handleSnapshot(snap([]));
+    expect(h.watcher.hasActive()).toBe(false);
+  });
+
   it("対象外チャンネルのスナップショットは無視する", async () => {
     const { client, startCalls } = fakeClient({});
     const h = mkWatcher({ client });
