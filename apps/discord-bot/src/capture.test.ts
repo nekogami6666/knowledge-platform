@@ -378,14 +378,16 @@ describe("handleLightbulb (§6.4 ③-a)", () => {
     expect(dms[0]).toContain("👍");
   });
 
-  it("triage 不成立なら PR も DM も無し(静かに終了)", async () => {
+  it("triage 不成立なら PR は作らず、理由を DM で返す(ADR-0029 D4)", async () => {
     const { logger } = fakeLogger();
     const { store } = fakeStore();
     const { gh, created } = fakeGh();
     const { reaction, user, dms } = fakeContext();
     await handleLightbulb(reaction, user, mkDeps(logger, store, gh, { triageSearch: triageNo }));
     expect(created).toHaveLength(0);
-    expect(dms).toHaveLength(0);
+    expect(dms).toHaveLength(1);
+    expect(dms[0]).toContain("見送りました");
+    expect(dms[0]).toContain("付け直す"); // どう直せば通るかの案内
   });
 
   it("💡 以外・bot・DM・未許可チャンネルは gh に触れない", async () => {

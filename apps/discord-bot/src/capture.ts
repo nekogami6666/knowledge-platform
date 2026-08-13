@@ -8,7 +8,9 @@
  *   並行 capture は両方そのままマージ可能(かつての counter 衝突による直列化は意図的に廃止。
  *   重複 ID は KB validate CI の duplicate_id が防ぎ、重複内容は人間レビューの責務)。
  * - スキーマ検証は KB リポの validate CI に委ねる(validateRepo しない。⑳ 決定)。
- * - 乱用対策: channels.yaml allowlist(§9.3・DM/未許可チャンネル対象外)+ fast 門番 + user 日3件。
+ * - 乱用対策: 可視性ゲート(ADR-0018。bot が見えるチャンネルのみ・DM 対象外・permanent_exclude)
+ *   + fast 門番 + user 日3件。門番の秘匿判定は生の認証情報のみ(ADR-0029 D1: 秘匿の境界は
+ *   チャンネル権限であってプロンプトではない)。
  * - 冪等: ブランチ `capture/<messageId>`(既存 PR があれば再作成せず DM 案内)。
  */
 import { type GhClient, GhClientError } from "@stratum/gh-client";
@@ -376,8 +378,14 @@ export async function handleLightbulb(
       { promptStore, ...(deps.triageSearch ? { search: deps.triageSearch } : {}) },
     );
     if (!triage.capture) {
-      // 誤検知でノイズ PR を作るより静かに終える(§6.4。DM も送らない)。
+      // 見送りは本人に理由を返す(ADR-0029 D4)。無音だと「壊れている」と区別できず、
+      // どう直せば通るかも分からない(レート超過・既存 PR は既に DM している)。
       log.info({ reason: triage.reason }, "capture triaged out");
+      await tryDm(
+        reactor,
+        `💡 ナレッジ化を見送りました: ${triage.reason}\n要点をまとめ直したメッセージに 💡 を付け直すと通ることがあります。`,
+        log,
+      );
       return;
     }
 
