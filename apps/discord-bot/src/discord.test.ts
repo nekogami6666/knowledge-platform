@@ -2,11 +2,12 @@ import type { GhClient, PrDetail } from "@stratum/gh-client";
 import type {
   ButtonInteraction,
   ChatInputCommandInteraction,
+  Interaction,
   Message,
   MessageReaction,
   User,
 } from "discord.js";
-import { GatewayIntentBits } from "discord.js";
+import { Events, GatewayIntentBits } from "discord.js";
 import type { Logger } from "pino";
 import { describe, expect, it, vi } from "vitest";
 import type { ChannelGateInput, ChannelsConfig, OpsConfig } from "./config.js";
@@ -17,6 +18,7 @@ import {
   BOT_INTENTS,
   type BotDeps,
   commandsToRegister,
+  createBot,
   DENY_MESSAGE,
   denyReason,
   extractQuestionId,
@@ -789,5 +791,72 @@ describe("handleStats / statsCommand (§1.4 KPI)", () => {
     await expect(handleStats(interaction, statsDeps(logger, store))).resolves.toBeUndefined();
     expect(errors.length).toBeGreaterThan(0);
     expect(replies).toHaveLength(1); // ガード付き通知
+  });
+});
+
+describe("InteractionCreate の面談パネル分岐(ADR-0028 UI の配線)", () => {
+  function fakePanelInteraction(customId: string): {
+    interaction: Interaction;
+    replies: { content?: string; ephemeral?: boolean }[];
+  } {
+    const replies: { content?: string; ephemeral?: boolean }[] = [];
+    const interaction = {
+      isChatInputCommand: () => false,
+      isButton: () => true,
+      isUserSelectMenu: () => false,
+      isStringSelectMenu: () => false,
+      isModalSubmit: () => false,
+      customId,
+      replied: false,
+      deferred: false,
+      reply: async (o: { content?: string; ephemeral?: boolean }) => {
+        replies.push(o);
+        (interaction as { replied: boolean }).replied = true;
+      },
+    };
+    return { interaction: interaction as unknown as Interaction, replies };
+  }
+
+  it("interviewPanel 未注入(パネル無効)なら interview: ボタンに無反応", async () => {
+    const { logger } = fakeLogger();
+    const client = createBot({ logger, channels: channels(), store: createMemoryStore() });
+    const { interaction, replies } = fakePanelInteraction("interview:status");
+    client.emit(Events.InteractionCreate, interaction);
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(replies).toHaveLength(0);
+    await client.destroy();
+  });
+
+  it("interviewPanel 注入時は interview: ボタンがパネルハンドラへ配線される", async () => {
+    const { logger } = fakeLogger();
+    const store = createMemoryStore();
+    const client = createBot({
+      logger,
+      channels: channels(),
+      store,
+      interviewPanel: {
+        commands: {
+          store,
+          voiceVcChannelId: "VC1",
+          armTtlMinutes: 120,
+          maxRecordingMinutes: 15,
+          hasActiveRecording: () => false,
+          abortActiveRecording: async () => {},
+          makeId: () => "id-1",
+          now: () => new Date(),
+          logger,
+        },
+        panelChannelId: "PANEL",
+        fetchChannel: async () => null,
+        getMembers: async () => ({ members: [] }),
+        loadTopics: async () => [],
+      },
+    });
+    const { interaction, replies } = fakePanelInteraction("interview:status");
+    client.emit(Events.InteractionCreate, interaction);
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(replies[0]?.content).toBe("進行中のセッションはありません。");
+    expect(replies[0]?.ephemeral).toBe(true);
+    await client.destroy();
   });
 });

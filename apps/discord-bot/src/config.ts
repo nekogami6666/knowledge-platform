@@ -80,6 +80,8 @@ export const voiceConfigSchema = z
     max_recording_minutes: z.number().int().positive().default(15),
     /** interview セッション "armed" の失効(分・ADR-0028 D5。誰も VC に入らないまま超過で cancelled)。 */
     interview_arm_ttl_minutes: z.number().int().positive().default(120),
+    /** 面談パネル(常設 embed)の設置チャンネル(ADR-0028 UI。null = パネル OFF。VC 内蔵テキストチャット可)。 */
+    interview_panel_channel_id: z.string().nullable().default(null),
   })
   .default({
     channel_id: null,
@@ -88,6 +90,7 @@ export const voiceConfigSchema = z
     vc_channel_id: null,
     max_recording_minutes: 15,
     interview_arm_ttl_minutes: 120,
+    interview_panel_channel_id: null,
   });
 export type VoiceConfig = z.infer<typeof voiceConfigSchema>;
 

@@ -4,11 +4,15 @@ import type { Logger } from "pino";
 import { describe, expect, it, vi } from "vitest";
 import { createMemoryStore } from "./db.js";
 import {
+  cancelInterviewCore,
   handleInterviewCommand,
   type InterviewCommandDeps,
   interviewStartDecision,
   normalizeKitOption,
   resolveKitPath,
+  resolvePersonDisplay,
+  startInterviewCore,
+  statusInterviewCore,
 } from "./interview-commands.js";
 import {
   INTERVIEW_SESSION_ACTION_TYPE,
@@ -235,6 +239,82 @@ describe("resolveKitPath(キット解決)", () => {
         { gh, kbRepo: "org/kb", logger },
       ),
     ).toBe("interviews/kits/foo.md");
+  });
+});
+
+describe("resolvePersonDisplay(Discord ID → person 表記)", () => {
+  const members = {
+    members: [
+      { name: "山田 太郎", github: "yamada", discord: "U-1", discord_alts: ["U-1b"] as [string] },
+      { name: "佐藤", discord: "U-2" },
+      { discord: "U-3" },
+    ],
+  };
+
+  it("github を最優先で使う(別名 Discord でも一致)", () => {
+    expect(resolvePersonDisplay(members, "U-1")).toBe("yamada");
+    expect(resolvePersonDisplay(members, "U-1b")).toBe("yamada");
+  });
+
+  it("github 未所持は name へフォールバックする", () => {
+    expect(resolvePersonDisplay(members, "U-2")).toBe("佐藤");
+  });
+
+  it("name も無ければ生の Discord ID を返す(未登載も同様)", () => {
+    expect(resolvePersonDisplay(members, "U-3")).toBe("U-3");
+    expect(resolvePersonDisplay(members, "U-unknown")).toBe("U-unknown");
+  });
+});
+
+describe("startInterviewCore / statusInterviewCore / cancelInterviewCore(interaction 非依存コア)", () => {
+  const startInput = {
+    person: "山田",
+    topic: "リリース手順",
+    kitOption: null,
+    guildId: "G1",
+    starterId: "U-starter",
+  };
+
+  it("start: ガード拒否は ok:false + reason(store には書かない)", async () => {
+    const { deps, store } = mkDeps({ hasActiveRecording: () => true });
+    const result = await startInterviewCore(startInput, deps);
+    expect(result.ok).toBe(false);
+    expect(result.message).toContain("通常の VC 録音が進行中");
+    expect(store.listPendingActions(INTERVIEW_SESSION_ACTION_TYPE)).toHaveLength(0);
+  });
+
+  it('start: 正常系は "armed" を積んで案内文を返す', async () => {
+    const { deps, store } = mkDeps();
+    const result = await startInterviewCore(startInput, deps);
+    expect(result.ok).toBe(true);
+    expect(result.message).toContain("山田 × リリース手順");
+    const actions = store.listPendingActions(INTERVIEW_SESSION_ACTION_TYPE);
+    expect(actions).toHaveLength(1);
+    expect(actions[0]?.state).toBe("armed");
+    const payload = interviewSessionPayloadSchema.parse(JSON.parse(actions[0]?.payloadJson ?? ""));
+    expect(payload).toMatchObject({ person: "山田", guildId: "G1", starterId: "U-starter" });
+  });
+
+  it("status: セッション無しは ok:false、あれば ok:true + 状態文", () => {
+    const { deps, store } = mkDeps();
+    expect(statusInterviewCore(deps)).toEqual({
+      ok: false,
+      message: "進行中のセッションはありません。",
+    });
+    seedSession(store, "armed");
+    const result = statusInterviewCore(deps);
+    expect(result.ok).toBe(true);
+    expect(result.message).toContain("armed");
+  });
+
+  it("cancel: recording は録音 abort + cancelled、無しは ok:false", async () => {
+    const { deps, store, aborts } = mkDeps();
+    expect((await cancelInterviewCore(deps)).ok).toBe(false);
+    seedSession(store, "recording");
+    const result = await cancelInterviewCore(deps);
+    expect(result.ok).toBe(true);
+    expect(aborts).toEqual(["interview cancel"]);
+    expect(store.listPendingActions(INTERVIEW_SESSION_ACTION_TYPE)[0]?.state).toBe("cancelled");
   });
 });
 

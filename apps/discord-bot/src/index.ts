@@ -5,6 +5,7 @@
  */
 import { randomUUID } from "node:crypto";
 import { readFile as fsReadFile, writeFile as fsWriteFile } from "node:fs/promises";
+import { join } from "node:path";
 import { createGhClientFromEnv, type GhClient } from "@stratum/gh-client";
 import { validateRepo } from "@stratum/kb-core";
 import {
@@ -13,7 +14,7 @@ import {
   nullUsageRecorder,
   type Transcriber,
 } from "@stratum/llm";
-import { Events } from "discord.js";
+import { type Client, Events } from "discord.js";
 import { type AskDeps, handleAskRequest } from "./ask.js";
 import { createFsConfigReader, loadChannels, loadOps, loadRepos, loadVoice } from "./config.js";
 import {
@@ -25,8 +26,17 @@ import {
 } from "./discord.js";
 import { parseEnv } from "./env.js";
 import { createFreshnessDmWorker, type FreshnessApplyDeps } from "./freshness-flow.js";
+import type { InterviewCommandDeps } from "./interview-commands.js";
+import {
+  bindingWithPanelRefresh,
+  ensurePanel,
+  type InterviewPanelDeps,
+  type PanelChannel,
+  refreshPanel,
+} from "./interview-panel.js";
 import { createInterviewSessionWorker } from "./interview-pipeline.js";
 import { createInterviewChunkBinding } from "./interview-session.js";
+import { loadInterviewTopics } from "./interview-topics.js";
 import { createLogger, withCorrelation } from "./logger.js";
 import { createCloneMembersLoader, DEFAULT_KB_DIR } from "./members.js";
 import { createQaSearch } from "./qa-search.js";
@@ -182,6 +192,50 @@ async function main(): Promise<void> {
   // §6.4 ③-b(ADR-0020): VC 録音は vc_channel_id + RECORDER_URL が揃ったときだけ有効。
   const vcEnabled = voice.vc_channel_id !== null && env.RECORDER_URL !== undefined;
   let vcWatcher: VcRecorderWatcher | undefined;
+
+  // ADR-0028 D5: /interview は VC 録音が有効な環境でのみ配線(未注入ならコマンド登録もしない)。
+  const interviewDeps: InterviewCommandDeps | undefined =
+    vcEnabled && voice.vc_channel_id !== null
+      ? {
+          store,
+          voiceVcChannelId: voice.vc_channel_id,
+          ...(gh !== undefined ? { gh } : {}),
+          ...(ops.kb_repo !== null ? { kbRepo: ops.kb_repo } : {}),
+          armTtlMinutes: voice.interview_arm_ttl_minutes,
+          maxRecordingMinutes: voice.max_recording_minutes,
+          // watcher は createBot 後に生成されるため遅延参照(vcRecorder と同じ流儀)。
+          hasActiveRecording: () => vcWatcher?.hasActive() ?? false,
+          abortActiveRecording: (reason: string) =>
+            vcWatcher?.abortActive(reason) ?? Promise.resolve(),
+          makeId: () => randomUUID(),
+          now: () => new Date(),
+          logger,
+        }
+      : undefined;
+
+  // ADR-0028 UI: 面談パネルは /interview 配線 + interview_panel_channel_id の環境でのみ有効。
+  // client は createBot 後に確定するため遅延参照(vcWatcher と同じ流儀)。
+  let clientForPanel: Client | undefined;
+  const panelDeps: InterviewPanelDeps | undefined =
+    interviewDeps !== undefined && voice.interview_panel_channel_id !== null
+      ? {
+          commands: interviewDeps,
+          panelChannelId: voice.interview_panel_channel_id,
+          // VC 内蔵テキストチャットも isTextBased() = true。ガードは ensurePanel/refreshPanel が持つ。
+          fetchChannel: async (id: string): Promise<PanelChannel | null> => {
+            const client = clientForPanel;
+            if (client === undefined) return null;
+            const ch =
+              client.channels.cache.get(id) ?? (await client.channels.fetch(id).catch(() => null));
+            if (ch === null || ch === undefined || !ch.isTextBased() || ch.isDMBased()) return null;
+            return ch;
+          },
+          getMembers,
+          loadTopics: () =>
+            loadInterviewTopics((p) => fsReadFile(p, "utf8"), join(env.CLONES_DIR, kbDir), logger),
+        }
+      : undefined;
+
   const bot = createBot({
     logger,
     channels,
@@ -208,26 +262,11 @@ async function main(): Promise<void> {
         }
       : {}),
     // ADR-0028 D5: /interview は VC 録音が有効な環境でのみ配線(未注入ならコマンド登録もしない)。
-    ...(vcEnabled && voice.vc_channel_id !== null
-      ? {
-          interview: {
-            store,
-            voiceVcChannelId: voice.vc_channel_id,
-            ...(gh !== undefined ? { gh } : {}),
-            ...(ops.kb_repo !== null ? { kbRepo: ops.kb_repo } : {}),
-            armTtlMinutes: voice.interview_arm_ttl_minutes,
-            maxRecordingMinutes: voice.max_recording_minutes,
-            // watcher は createBot 後に生成されるため遅延参照(vcRecorder と同じ流儀)。
-            hasActiveRecording: () => vcWatcher?.hasActive() ?? false,
-            abortActiveRecording: (reason: string) =>
-              vcWatcher?.abortActive(reason) ?? Promise.resolve(),
-            makeId: () => randomUUID(),
-            now: () => new Date(),
-            logger,
-          },
-        }
-      : {}),
+    ...(interviewDeps !== undefined ? { interview: interviewDeps } : {}),
+    // ADR-0028 UI: 面談パネルのコンポーネント応答(未注入なら無反応)。
+    ...(panelDeps !== undefined ? { interviewPanel: panelDeps } : {}),
   });
+  clientForPanel = bot;
   const messenger = createClientMessenger(bot);
   const memoWorker = createVoiceMemoWorker({
     logger,
@@ -259,6 +298,15 @@ async function main(): Promise<void> {
   };
   if (vcEnabled && voice.vc_channel_id !== null && env.RECORDER_URL !== undefined) {
     const vcChannelId = voice.vc_channel_id;
+    // ADR-0028 D1: interview セッションへのチャンク紐付け。パネル有効時はチャンク境界
+    // (claim/commit/drop/complete)ごとにパネルを更新するデコレータを被せる(失敗 warn のみ)。
+    const chunkBinding = createInterviewChunkBinding({
+      store,
+      now: () => new Date(),
+      armTtlMinutes: voice.interview_arm_ttl_minutes,
+      onQueued: () => voiceWorker?.kick(),
+      logger,
+    });
     vcWatcher = createVcRecorderWatcher({
       vcChannelId,
       recordingsDir: env.RECORDINGS_DIR,
@@ -278,14 +326,10 @@ async function main(): Promise<void> {
         if (ch === null || ch === undefined || !ch.isVoiceBased()) return null;
         return buildVcSnapshot(ch, ch.guild.id, vcChannelId);
       },
-      // ADR-0028 D1: interview セッションへのチャンク紐付け。
-      chunkBinding: createInterviewChunkBinding({
-        store,
-        now: () => new Date(),
-        armTtlMinutes: voice.interview_arm_ttl_minutes,
-        onQueued: () => voiceWorker?.kick(),
-        logger,
-      }),
+      chunkBinding:
+        panelDeps !== undefined
+          ? bindingWithPanelRefresh(chunkBinding, () => refreshPanel(panelDeps), logger)
+          : chunkBinding,
     });
   }
   logger.info({ vcRecorder: vcEnabled }, "VC 録音入口(ADR-0020)");
@@ -301,6 +345,8 @@ async function main(): Promise<void> {
     freshnessWorker.kick();
     // ADR-0028 D1: state:"recording" の interview セッションを復元(冪等 finalize → 次チャンク/完了)。
     void vcWatcher?.resume();
+    // ADR-0028 UI: 常設の面談パネルを設置/復元する(失敗 warn のみ)。
+    if (panelDeps !== undefined) void ensurePanel(panelDeps);
     // discord.js 14.x: 未キャッシュ DM へのリアクションは MessageReactionAdd が発火しない
     // (warmDmChannels の docblock 参照)。再起動前に送った DM への 👍✏️🗑 応答を生かす。
     void warmDmChannels(bot, getMembers, logger);

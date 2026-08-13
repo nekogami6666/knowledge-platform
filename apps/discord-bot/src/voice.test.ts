@@ -28,6 +28,7 @@ const VOICE: VoiceConfig = {
   vc_channel_id: null,
   max_recording_minutes: 15,
   interview_arm_ttl_minutes: 120,
+  interview_panel_channel_id: null,
 };
 
 function audio(over: Partial<VoiceAttachmentMeta> = {}): VoiceAttachmentMeta {

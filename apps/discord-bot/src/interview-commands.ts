@@ -2,11 +2,20 @@
  * /interview start・status・cancel のハンドラ(ADR-0028 D5 / design.md §6.6 ⑤-b)。
  * セッションの契約と状態機械は interview-session.ts、録音制御は vc-recorder.ts が持ち、
  * ここはコマンド入力 → セッション作成(pending_actions "armed")/ 表示 / 中止だけを担う。
+ * 「検証済み入力 → 実行 → 応答文字列」は interaction 非依存の純コア関数
+ * (startInterviewCore / statusInterviewCore / cancelInterviewCore)に抽出し、
+ * スラコマハンドラと面談パネル(interview-panel.ts)が同じコアを共有する。
  * 判定は純関数(interviewStartDecision)に抽出して単体テストする(CLAUDE.md §12.2)。
  * discord.js への依存は interaction の reply/options のみ(テストは fake interaction)。
  */
 import type { GhClient } from "@stratum/gh-client";
-import { INTERVIEW_KITS_DIR, interviewKitPath } from "@stratum/kb-core";
+import {
+  githubForDiscord,
+  INTERVIEW_KITS_DIR,
+  interviewKitPath,
+  type Members,
+  nameForDiscord,
+} from "@stratum/kb-core";
 import type { ChatInputCommandInteraction } from "discord.js";
 import type { Logger } from "pino";
 import type { BotStore } from "./db.js";
@@ -115,47 +124,74 @@ export async function resolveKitPath(
   }
 }
 
-// --- ハンドラ ---
+// --- person 解決 ---
+
+/**
+ * Discord ユーザ ID → セッション payload の person 表記(パネルの UserSelectMenu 用)。
+ * GitHub ユーザ名(人物識別子の正・§4.2)→ 表示名(ADR-0022)→ 生 ID の順にフォールバックする。
+ * members 対応表は KB の _meta/members.yaml が唯一の正(members.ts の MembersLoader seam)。
+ */
+export function resolvePersonDisplay(members: Members, discordUserId: string): string {
+  return (
+    githubForDiscord(members, discordUserId) ??
+    nameForDiscord(members, discordUserId) ??
+    discordUserId
+  );
+}
+
+// --- コア(interaction 非依存。スラコマとパネルが共有する)---
+
+/** コアの実行結果。message はそのまま ephemeral 応答に使える日本語文字列。 */
+export interface InterviewCoreResult {
+  ok: boolean;
+  message: string;
+}
 
 const NO_ACTIVE_SESSION_MESSAGE = "進行中のセッションはありません。";
 const GUILD_ONLY_MESSAGE = "/interview はサーバー内でのみ利用できます。";
 
-async function handleInterviewStart(
-  interaction: ChatInputCommandInteraction,
+/** startInterviewCore の検証済み入力(guild 内であることは呼び手が確認する)。 */
+export interface StartInterviewCoreInput {
+  /** 対象者の表記(スラコマは自由入力・パネルは resolvePersonDisplay の解決結果)。 */
+  person: string;
+  topic: string;
+  /** 明示 kit オプション(スラコマの kit。パネルは null = 自動発見のみ)。 */
+  kitOption: string | null;
+  guildId: string;
+  /** 開始操作をした人(= owner・完了 PR の DM 先)。 */
+  starterId: string;
+}
+
+/**
+ * セッション開始のコア: ガード判定 → キット解決 → pending_actions "armed" 投入 → 案内文。
+ * 拒否(ok: false)はガードの reason をそのまま返す(store には何も書かない)。
+ */
+export async function startInterviewCore(
+  input: StartInterviewCoreInput,
   deps: InterviewCommandDeps,
-): Promise<void> {
-  // ADR-0018 D4 と同じ: interaction は DM からも届くため guild を明示チェック。
-  if (!interaction.inGuild()) {
-    await interaction.reply({ content: GUILD_ONLY_MESSAGE, ephemeral: true });
-    return;
-  }
+): Promise<InterviewCoreResult> {
   const now = deps.now();
   const decision = interviewStartDecision({
     hasActiveSession: findActiveInterviewSession(deps.store, now, deps.armTtlMinutes) !== null,
     recordingActive: deps.hasActiveRecording(),
     vcConfigured: deps.voiceVcChannelId.length > 0,
   });
-  if (!decision.ok) {
-    await interaction.reply({ content: decision.reason, ephemeral: true });
-    return;
-  }
+  if (!decision.ok) return { ok: false, message: decision.reason };
 
-  const person = interaction.options.getString("person", true);
-  const topic = interaction.options.getString("topic", true);
   const kitPath = await resolveKitPath(
-    { kitOption: interaction.options.getString("kit"), person, topic },
+    { kitOption: input.kitOption, person: input.person, topic: input.topic },
     deps,
   );
 
   const sessionId = deps.makeId();
   const payload: InterviewSessionPayload = {
     sessionId,
-    person,
-    topic,
+    person: input.person,
+    topic: input.topic,
     kitPath,
-    guildId: interaction.guildId,
+    guildId: input.guildId,
     channelId: deps.voiceVcChannelId,
-    starterId: interaction.user.id,
+    starterId: input.starterId,
     participantIds: [],
     chunks: [],
     currentChunk: null,
@@ -170,9 +206,14 @@ async function handleInterviewStart(
     createdAt: isoJst(now),
   });
 
-  await interaction.reply({
-    content: [
-      `🎤 interview セッションを受け付けました: ${person} × ${topic}`,
+  withCorrelation(deps.logger, `interview:${sessionId}`).info(
+    { person: input.person, topic: input.topic, kitPath, starterId: input.starterId },
+    "interview session armed",
+  );
+  return {
+    ok: true,
+    message: [
+      `🎤 interview セッションを受け付けました: ${input.person} × ${input.topic}`,
       kitPath !== null
         ? `- 質問キット: \`${kitPath}\``
         : "- 質問キットが見つからないため、キット無しで開始します",
@@ -181,24 +222,14 @@ async function handleInterviewStart(
       `- ${deps.armTtlMinutes} 分以内に誰も入室しない場合は自動キャンセルされます`,
       "- 中止する場合は /interview cancel",
     ].join("\n"),
-    ephemeral: true,
-  });
-  withCorrelation(deps.logger, `interview:${sessionId}`).info(
-    { person, topic, kitPath, starterId: interaction.user.id },
-    "interview session armed",
-  );
+  };
 }
 
-async function handleInterviewStatus(
-  interaction: ChatInputCommandInteraction,
-  deps: InterviewCommandDeps,
-): Promise<void> {
+/** 状態表示のコア(読み取りのみ)。セッション無しは ok: false + 案内文。 */
+export function statusInterviewCore(deps: InterviewCommandDeps): InterviewCoreResult {
   const now = deps.now();
   const active = findActiveInterviewSession(deps.store, now, deps.armTtlMinutes);
-  if (active === null) {
-    await interaction.reply({ content: NO_ACTIVE_SESSION_MESSAGE, ephemeral: true });
-    return;
-  }
+  if (active === null) return { ok: false, message: NO_ACTIVE_SESSION_MESSAGE };
   const p = active.payload;
   const elapsedMin = Math.max(0, Math.floor((now.getTime() - Date.parse(p.startedAtJst)) / 60_000));
   const lines = [
@@ -211,31 +242,68 @@ async function handleInterviewStatus(
   if (active.state === "armed") {
     lines.push(`- 自動キャンセルまで: 残り ${Math.max(0, deps.armTtlMinutes - elapsedMin)} 分`);
   }
-  await interaction.reply({ content: lines.join("\n"), ephemeral: true });
+  return { ok: true, message: lines.join("\n") };
+}
+
+/** 中止のコア: recording なら録音 abort(チャンクは欠番)→ "cancelled" へ。 */
+export async function cancelInterviewCore(
+  deps: InterviewCommandDeps,
+): Promise<InterviewCoreResult> {
+  const active = findActiveInterviewSession(deps.store, deps.now(), deps.armTtlMinutes);
+  if (active === null) return { ok: false, message: NO_ACTIVE_SESSION_MESSAGE };
+  if (active.state === "recording") {
+    // 進行中の録音を破棄(interview チャンクは欠番扱い・ADR-0028 D5)。
+    await deps.abortActiveRecording("interview cancel");
+  }
+  deps.store.setActionState(active.id, "cancelled");
+  withCorrelation(deps.logger, `interview:${active.payload.sessionId}`).info(
+    { state: active.state },
+    "interview session cancelled",
+  );
+  return {
+    ok: true,
+    message: `🛑 interview セッション(${active.payload.person} × ${active.payload.topic})を中止しました。録音済みチャンクは処理されません。`,
+  };
+}
+
+// --- ハンドラ(interaction グルー)---
+
+async function handleInterviewStart(
+  interaction: ChatInputCommandInteraction,
+  deps: InterviewCommandDeps,
+): Promise<void> {
+  // ADR-0018 D4 と同じ: interaction は DM からも届くため guild を明示チェック。
+  if (!interaction.inGuild()) {
+    await interaction.reply({ content: GUILD_ONLY_MESSAGE, ephemeral: true });
+    return;
+  }
+  const result = await startInterviewCore(
+    {
+      person: interaction.options.getString("person", true),
+      topic: interaction.options.getString("topic", true),
+      kitOption: interaction.options.getString("kit"),
+      guildId: interaction.guildId,
+      starterId: interaction.user.id,
+    },
+    deps,
+  );
+  await interaction.reply({ content: result.message, ephemeral: true });
+}
+
+async function handleInterviewStatus(
+  interaction: ChatInputCommandInteraction,
+  deps: InterviewCommandDeps,
+): Promise<void> {
+  const result = statusInterviewCore(deps);
+  await interaction.reply({ content: result.message, ephemeral: true });
 }
 
 async function handleInterviewCancel(
   interaction: ChatInputCommandInteraction,
   deps: InterviewCommandDeps,
 ): Promise<void> {
-  const active = findActiveInterviewSession(deps.store, deps.now(), deps.armTtlMinutes);
-  if (active === null) {
-    await interaction.reply({ content: NO_ACTIVE_SESSION_MESSAGE, ephemeral: true });
-    return;
-  }
-  if (active.state === "recording") {
-    // 進行中の録音を破棄(interview チャンクは欠番扱い・ADR-0028 D5)。
-    await deps.abortActiveRecording("interview cancel");
-  }
-  deps.store.setActionState(active.id, "cancelled");
-  await interaction.reply({
-    content: `🛑 interview セッション(${active.payload.person} × ${active.payload.topic})を中止しました。録音済みチャンクは処理されません。`,
-    ephemeral: true,
-  });
-  withCorrelation(deps.logger, `interview:${active.payload.sessionId}`).info(
-    { state: active.state },
-    "interview session cancelled",
-  );
+  const result = await cancelInterviewCore(deps);
+  await interaction.reply({ content: result.message, ephemeral: true });
 }
 
 /**

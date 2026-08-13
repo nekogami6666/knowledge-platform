@@ -42,6 +42,14 @@ import {
 import type { BotStore } from "./db.js";
 import { type FreshnessApplyDeps, handleFreshnessReaction } from "./freshness-flow.js";
 import { handleInterviewCommand, type InterviewCommandDeps } from "./interview-commands.js";
+import {
+  handleInterviewPanelButton,
+  handleInterviewPersonSelect,
+  handleInterviewTopicModal,
+  handleInterviewTopicSelect,
+  INTERVIEW_CUSTOM_ID_PREFIX,
+  type InterviewPanelDeps,
+} from "./interview-panel.js";
 import { withCorrelation } from "./logger.js";
 import { EMPTY_MEMBERS, type MembersLoader } from "./members.js";
 import { aggregateStats, formatStatsMessage } from "./stats.js";
@@ -140,6 +148,8 @@ export interface BotDeps {
   vcRecorder?: Pick<VcRecorderWatcher, "handleSnapshot">;
   /** /interview(ADR-0028 D5)。VC 録音が無効な環境では未注入 = コマンド登録もしない。 */
   interview?: InterviewCommandDeps;
+  /** 面談パネル(ADR-0028 UI)。vcEnabled + interview_panel_channel_id の環境でのみ注入。 */
+  interviewPanel?: InterviewPanelDeps;
 }
 
 /**
@@ -286,7 +296,26 @@ export function createBot(deps: BotDeps): Client {
       // deps.interview 未注入ならコマンド自体を登録しない(commandsToRegister)ため通常ここには来ない。
       if (deps.interview !== undefined) await handleInterviewCommand(interaction, deps.interview);
     } else if (interaction.isButton()) {
-      await handleButton(interaction, deps);
+      // 面談パネル(ADR-0028 UI)。panel deps 未注入なら無反応(パネル自体が存在しない環境)。
+      if (interaction.customId.startsWith(INTERVIEW_CUSTOM_ID_PREFIX)) {
+        if (deps.interviewPanel !== undefined) {
+          await handleInterviewPanelButton(interaction, deps.interviewPanel);
+        }
+      } else {
+        await handleButton(interaction, deps);
+      }
+    } else if (interaction.isUserSelectMenu()) {
+      if (deps.interviewPanel !== undefined) {
+        await handleInterviewPersonSelect(interaction, deps.interviewPanel);
+      }
+    } else if (interaction.isStringSelectMenu()) {
+      if (deps.interviewPanel !== undefined) {
+        await handleInterviewTopicSelect(interaction, deps.interviewPanel);
+      }
+    } else if (interaction.isModalSubmit()) {
+      if (deps.interviewPanel !== undefined) {
+        await handleInterviewTopicModal(interaction, deps.interviewPanel);
+      }
     }
   });
 

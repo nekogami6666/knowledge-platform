@@ -9,3 +9,4 @@ daily_limit: 3 # user 1 日あたりの受付件数(乱用対策)
 # vc_channel_id: "123456789012345678"   # 録音専用ボイスチャンネル(名前/topic に「録音されます」を明記)
 # max_recording_minutes: 15             # 自動 finalize の上限(分)。22 超は STT 25MB 上限に接近(ADR-0028 D2)
 # interview_arm_ttl_minutes: 120        # /interview start 後、録音が始まらないまま失効するまでの分(ADR-0028 D5)
+# interview_panel_channel_id: "123456789012345678"  # 面談パネル(常設 embed)の設置チャンネル。VC 内蔵テキストチャット可。未設定=パネル OFF
