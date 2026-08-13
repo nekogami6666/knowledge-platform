@@ -12,10 +12,12 @@ import {
   ButtonBuilder,
   type ButtonInteraction,
   ButtonStyle,
+  type Channel,
   type ChatInputCommandInteraction,
   Client,
   Events,
   GatewayIntentBits,
+  type GuildBasedChannel,
   type Interaction,
   type Message,
   type MessageReaction,
@@ -95,6 +97,22 @@ export interface BotDeps {
   freshness?: FreshnessApplyDeps;
   /** VC 録音の制御(§6.4 ③-b / ADR-0020)。voice.vc_channel_id + RECORDER_URL が無ければ OFF。 */
   vcRecorder?: Pick<VcRecorderWatcher, "handleSnapshot">;
+}
+
+/**
+ * 専用 VC の現在参加者(bot 除外)スナップショットを組み立てる(ADR-0020 / ADR-0028)。
+ * VoiceStateUpdate と rotation/resume の fetchSnapshot(index.ts)で共用する。
+ * チャンネルが見えない・VC でない場合は humanIds: [](= 0 人扱い)。
+ */
+export function buildVcSnapshot(
+  channel: Channel | GuildBasedChannel | undefined | null,
+  guildId: string,
+  vcChannelId: string,
+): VcSnapshot {
+  const humanIds = channel?.isVoiceBased()
+    ? [...channel.members.values()].filter((m) => !m.user.bot).map((m) => m.id)
+    : [];
+  return { guildId, channelId: vcChannelId, humanIds };
 }
 
 /** §9.2(ADR-0018): 読めないチャンネルへの拒否メッセージ。許可なら null。 */
@@ -255,12 +273,7 @@ export function createBot(deps: BotDeps): Client {
     if (vcId === null || rec === undefined) return;
     if (oldState.channelId !== vcId && newState.channelId !== vcId) return;
     const guild = newState.guild ?? oldState.guild;
-    const ch = guild.channels.cache.get(vcId);
-    const humanIds =
-      ch !== undefined && ch.isVoiceBased()
-        ? [...ch.members.values()].filter((m) => !m.user.bot).map((m) => m.id)
-        : [];
-    const snapshot: VcSnapshot = { guildId: guild.id, channelId: vcId, humanIds };
+    const snapshot = buildVcSnapshot(guild.channels.cache.get(vcId), guild.id, vcId);
     void rec.handleSnapshot(snapshot).catch((err) => {
       deps.logger.warn({ err }, "vc snapshot handling failed");
     });

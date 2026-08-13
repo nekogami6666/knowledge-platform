@@ -78,6 +78,8 @@ export const voiceConfigSchema = z
     vc_channel_id: z.string().nullable().default(null),
     /** VC 録音の自動 finalize 上限(分・ADR-0020 D3。STT 25MB 上限に収める)。 */
     max_recording_minutes: z.number().int().positive().default(15),
+    /** interview セッション "armed" の失効(分・ADR-0028 D5。誰も VC に入らないまま超過で cancelled)。 */
+    interview_arm_ttl_minutes: z.number().int().positive().default(120),
   })
   .default({
     channel_id: null,
@@ -85,6 +87,7 @@ export const voiceConfigSchema = z
     daily_limit: 3,
     vc_channel_id: null,
     max_recording_minutes: 15,
+    interview_arm_ttl_minutes: 120,
   });
 export type VoiceConfig = z.infer<typeof voiceConfigSchema>;
 

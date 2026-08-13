@@ -16,9 +16,16 @@ import {
 import { Events } from "discord.js";
 import { type AskDeps, handleAskRequest } from "./ask.js";
 import { createFsConfigReader, loadChannels, loadOps, loadRepos, loadVoice } from "./config.js";
-import { type AskHandler, createBot, createClientMessenger, warmDmChannels } from "./discord.js";
+import {
+  type AskHandler,
+  buildVcSnapshot,
+  createBot,
+  createClientMessenger,
+  warmDmChannels,
+} from "./discord.js";
 import { parseEnv } from "./env.js";
 import { createFreshnessDmWorker, type FreshnessApplyDeps } from "./freshness-flow.js";
+import { createInterviewChunkBinding } from "./interview-session.js";
 import { createLogger, withCorrelation } from "./logger.js";
 import { createCloneMembersLoader, DEFAULT_KB_DIR } from "./members.js";
 import { createQaSearch } from "./qa-search.js";
@@ -86,6 +93,12 @@ async function main(): Promise<void> {
   }
   if (reposConfig.repos.length === 0) {
     logger.warn("repos.yaml が空です。検索対象リポがありません(§14 #5)。");
+  }
+  if (voice.max_recording_minutes > 22) {
+    logger.warn(
+      { maxRecordingMinutes: voice.max_recording_minutes },
+      "max_recording_minutes > 22 は 128kbps AAC のチャンクが STT の 25MB 上限に接近します(ADR-0028 D2)。",
+    );
   }
 
   const store = createSqliteStore(env.DB_PATH);
@@ -207,8 +220,9 @@ async function main(): Promise<void> {
     messenger,
   });
   if (vcEnabled && voice.vc_channel_id !== null && env.RECORDER_URL !== undefined) {
+    const vcChannelId = voice.vc_channel_id;
     vcWatcher = createVcRecorderWatcher({
-      vcChannelId: voice.vc_channel_id,
+      vcChannelId,
       recordingsDir: env.RECORDINGS_DIR,
       client: createRecorderClient(env.RECORDER_URL),
       store,
@@ -218,6 +232,22 @@ async function main(): Promise<void> {
       now: () => new Date(),
       logger,
       maxMinutes: voice.max_recording_minutes,
+      // ADR-0028 D2/D3: 上限 rotation・再起動 resume が現在参加者を取り直す。
+      fetchSnapshot: async () => {
+        const ch =
+          bot.channels.cache.get(vcChannelId) ??
+          (await bot.channels.fetch(vcChannelId).catch(() => null));
+        if (ch === null || ch === undefined || !ch.isVoiceBased()) return null;
+        return buildVcSnapshot(ch, ch.guild.id, vcChannelId);
+      },
+      // ADR-0028 D1: interview セッションへのチャンク紐付け。
+      chunkBinding: createInterviewChunkBinding({
+        store,
+        now: () => new Date(),
+        armTtlMinutes: voice.interview_arm_ttl_minutes,
+        onQueued: () => voiceWorker?.kick(),
+        logger,
+      }),
     });
   }
   logger.info({ vcRecorder: vcEnabled }, "VC 録音入口(ADR-0020)");
@@ -231,6 +261,8 @@ async function main(): Promise<void> {
   bot.once(Events.ClientReady, () => {
     voiceWorker?.kick();
     freshnessWorker.kick();
+    // ADR-0028 D1: state:"recording" の interview セッションを復元(冪等 finalize → 次チャンク/完了)。
+    void vcWatcher?.resume();
     // discord.js 14.x: 未キャッシュ DM へのリアクションは MessageReactionAdd が発火しない
     // (warmDmChannels の docblock 参照)。再起動前に送った DM への 👍✏️🗑 応答を生かす。
     void warmDmChannels(bot, getMembers, logger);

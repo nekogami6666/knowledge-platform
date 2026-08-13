@@ -145,6 +145,9 @@ export function createSqliteStore(path: string): BotStore {
   );
   const updateActionDone = db.prepare("UPDATE pending_actions SET state = 'done' WHERE id = ?");
   const updateActionState = db.prepare("UPDATE pending_actions SET state = ? WHERE id = ?");
+  const updateActionPayload = db.prepare(
+    "UPDATE pending_actions SET payload_json = @payloadJson WHERE id = @id",
+  );
   const upsertRate = db.prepare(`
     INSERT INTO rate_limits (subject, kind, window_start, count) VALUES (?, ?, ?, 1)
     ON CONFLICT (subject, kind, window_start) DO UPDATE SET count = count + 1
@@ -179,6 +182,9 @@ export function createSqliteStore(path: string): BotStore {
     },
     setActionState(id, state) {
       updateActionState.run(state, id);
+    },
+    setActionPayload(id, payloadJson) {
+      updateActionPayload.run({ id, payloadJson });
     },
     hitRateLimit(subject, kind, windowStart, limit): RateLimitResult {
       const row = upsertRate.get(subject, kind, windowStart) as { count: number };

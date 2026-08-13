@@ -147,4 +147,23 @@ describe.skipIf(!sqliteAvailable())("createSqliteStore(:memory:)", () => {
     s.setActionState("unknown", "sent");
     s.close();
   });
+
+  it("setActionPayload で payload_json を差し替え(未知 id は no-op・ADR-0028 D1)", () => {
+    const s = createStore(":memory:");
+    s.queueAction({
+      id: "a1",
+      type: "interview_session",
+      queryId: null,
+      payloadJson: '{"chunks":[]}',
+      state: "armed",
+      createdAt: "t",
+    });
+    s.setActionPayload("a1", '{"chunks":[{"seq":1}]}');
+    expect(s.listPendingActions("interview_session")[0]?.payloadJson).toBe(
+      '{"chunks":[{"seq":1}]}',
+    );
+    s.setActionPayload("unknown", "{}");
+    expect(s.listPendingActions()).toHaveLength(1);
+    s.close();
+  });
 });

@@ -9,6 +9,7 @@
  */
 import type { Logger } from "pino";
 import type { BotStore } from "./db.js";
+import type { InterviewChunkBinding } from "./interview-session.js";
 import { withCorrelation } from "./logger.js";
 import { isoJst } from "./time.js";
 import { type VcVoiceMemoPayload, VOICE_MEMO_ACTION_TYPE } from "./voice.js";
@@ -103,6 +104,13 @@ export interface VcRecorderDeps {
   logger: Logger;
   /** 自動 finalize の上限(分)。 */
   maxMinutes: number;
+  /**
+   * 現在の VC 参加者を取り直す(ADR-0028 D2/D3。上限 rotation・再起動 resume が使う)。
+   * 未注入なら上限到達で従来どおり切れる(自動チャンク分割 OFF)。
+   */
+  fetchSnapshot?: () => Promise<VcSnapshot | null>;
+  /** interview セッションへのチャンク紐付け(ADR-0028 D1)。未注入なら通常 voice_memo 経路のみ。 */
+  chunkBinding?: InterviewChunkBinding;
   /** finalize 後の status ポーリング間隔/上限(テスト注入用)。 */
   pollIntervalMs?: number;
   maxPollMs?: number;
@@ -115,6 +123,8 @@ interface ActiveSession {
   record: RecorderRecord;
   ownerId: string;
   limitTimer: NodeJS.Timeout;
+  /** interview セッションに claim 済みのチャンク(ADR-0028 D1)。無ければ通常 voice_memo。 */
+  interview?: { sessionActionId: string; seq: number };
 }
 
 export const RECORDING_FAILED_MESSAGE =
@@ -122,6 +132,13 @@ export const RECORDING_FAILED_MESSAGE =
 
 export interface VcRecorderWatcher {
   handleSnapshot(snapshot: VcSnapshot): Promise<void>;
+  /**
+   * 再起動復元(ADR-0028 D1。ClientReady から呼ぶ): state:"recording" の interview セッションの
+   * currentChunk を冪等 finalize し、VC の現在人数で次チャンク開始かセッション完了を選ぶ。
+   */
+  resume(): Promise<void>;
+  /** 進行中の録音を破棄する(/interview cancel 用。interview チャンクは欠番)。 */
+  abortActive(reason: string): Promise<void>;
 }
 
 export function createVcRecorderWatcher(deps: VcRecorderDeps): VcRecorderWatcher {
@@ -144,9 +161,30 @@ export function createVcRecorderWatcher(deps: VcRecorderDeps): VcRecorderWatcher
     }
   };
 
+  /** finalize 済みチャンクを interview payload へ commit する(voice_memo は積まない・ADR-0028 D1)。 */
+  const commitInterviewChunk = (
+    binding: InterviewChunkBinding,
+    meetingId: string,
+    interview: { sessionActionId: string; seq: number },
+    handle: RecorderHandle,
+  ): void => {
+    binding.commitChunk(
+      interview.sessionActionId,
+      {
+        seq: interview.seq,
+        meetingId,
+        filePath: handle.file_path,
+        recordedAtJst: isoJst(deps.now()),
+        transcript: null,
+      },
+      handle.participant_ids ?? [],
+    );
+  };
+
   const doFinalize = async (session: ActiveSession, cause: string): Promise<void> => {
     clearTimer(session.limitTimer);
     active = null;
+    const interview = session.interview;
     try {
       const first = await deps.client.finalize(session.record);
       const handle =
@@ -154,39 +192,82 @@ export function createVcRecorderWatcher(deps: VcRecorderDeps): VcRecorderWatcher
       if (handle.status !== "ok") {
         throw new Error(`recorder finalize status=${handle.status}`);
       }
-      const payload: VcVoiceMemoPayload = {
-        source: "vc",
-        meetingId: session.record.meeting_id,
-        filePath: handle.file_path,
-        guildId: session.record.guild_id,
-        channelId: session.record.voice_channel_id,
-        authorId: session.ownerId,
-        participantIds: handle.participant_ids ?? [],
-        recordedAtJst: isoJst(deps.now()),
-      };
-      deps.store.queueAction({
-        id: deps.makeId(),
-        type: VOICE_MEMO_ACTION_TYPE,
-        queryId: null,
-        payloadJson: JSON.stringify(payload),
-        state: "pending",
-        createdAt: isoJst(deps.now()),
-      });
-      deps.onQueued();
-      log.info({ meetingId: session.record.meeting_id, cause }, "vc recording queued");
-    } catch (err) {
-      // 録音は失われている可能性が高い(pending は積まない)。本人に案内して運用ログに残す。
-      log.error({ err, meetingId: session.record.meeting_id, cause }, "vc finalize failed");
-      try {
-        await deps.dm(session.ownerId, RECORDING_FAILED_MESSAGE);
-      } catch {
-        // DM 不達まで追わない(ログ済み)。
+      if (interview !== undefined && deps.chunkBinding !== undefined) {
+        commitInterviewChunk(deps.chunkBinding, session.record.meeting_id, interview, handle);
+        log.info(
+          { meetingId: session.record.meeting_id, seq: interview.seq, cause },
+          "interview chunk committed",
+        );
+      } else {
+        const payload: VcVoiceMemoPayload = {
+          source: "vc",
+          meetingId: session.record.meeting_id,
+          filePath: handle.file_path,
+          guildId: session.record.guild_id,
+          channelId: session.record.voice_channel_id,
+          authorId: session.ownerId,
+          participantIds: handle.participant_ids ?? [],
+          recordedAtJst: isoJst(deps.now()),
+        };
+        deps.store.queueAction({
+          id: deps.makeId(),
+          type: VOICE_MEMO_ACTION_TYPE,
+          queryId: null,
+          payloadJson: JSON.stringify(payload),
+          state: "pending",
+          createdAt: isoJst(deps.now()),
+        });
+        deps.onQueued();
+        log.info({ meetingId: session.record.meeting_id, cause }, "vc recording queued");
       }
+    } catch (err) {
+      if (interview !== undefined && deps.chunkBinding !== undefined) {
+        // 無音チャンク(finalize "failed")等は欠番として続行(ADR-0028 D2)。owner に DM しない。
+        log.warn(
+          { err, meetingId: session.record.meeting_id, seq: interview.seq, cause },
+          "interview chunk finalize failed; dropped(欠番)",
+        );
+        deps.chunkBinding.dropChunk(interview.sessionActionId, session.record.meeting_id);
+      } else {
+        // 録音は失われている可能性が高い(pending は積まない)。本人に案内して運用ログに残す。
+        log.error({ err, meetingId: session.record.meeting_id, cause }, "vc finalize failed");
+        try {
+          await deps.dm(session.ownerId, RECORDING_FAILED_MESSAGE);
+        } catch {
+          // DM 不達まで追わない(ログ済み)。
+        }
+      }
+    }
+    // --- チャンク境界の後処理(ADR-0028 D2/D3)。既存 chain 上で直列に行う ---
+    try {
+      if (cause === "empty") {
+        // 全員退室 = セッションの区切り(interview はここで STT キューへ)。
+        if (interview !== undefined) deps.chunkBinding?.completeSession(interview.sessionActionId);
+        return;
+      }
+      if (cause === "max-minutes" && deps.fetchSnapshot !== undefined) {
+        // 上限 rotation: finalize 完了(接続 destroy 済み)を待ってから直列に次チャンクを開始する
+        // (sidecar は 1 guild 1 接続。並行 start は新チャンクが無音になる・ADR-0028 D2)。
+        const snapshot = await deps.fetchSnapshot();
+        if (snapshot !== null && snapshot.humanIds.length >= 1) {
+          await doStart(snapshot, { inheritOwnerId: session.ownerId });
+        } else if (interview !== undefined) {
+          deps.chunkBinding?.completeSession(interview.sessionActionId);
+        }
+      }
+    } catch (err) {
+      // rotation 失敗で chain を汚さない(以降の入退室処理を生かす)。interview は完了へ倒す。
+      log.error({ err, meetingId: session.record.meeting_id, cause }, "vc chunk rotation failed");
+      if (interview !== undefined) deps.chunkBinding?.completeSession(interview.sessionActionId);
     }
   };
 
-  const doStart = async (snapshot: VcSnapshot): Promise<void> => {
-    const ownerId = snapshot.humanIds[0];
+  const doStart = async (
+    snapshot: VcSnapshot,
+    opts?: { inheritOwnerId?: string },
+  ): Promise<void> => {
+    // rotation / resume は旧チャンクの owner(DM 先)を継承する(ADR-0028 D2/D3)。
+    const ownerId = opts?.inheritOwnerId ?? snapshot.humanIds[0];
     if (ownerId === undefined) return;
     const now = deps.now();
     const meetingId = `vm-${now.getTime()}-${snapshot.channelId}`;
@@ -196,10 +277,14 @@ export function createVcRecorderWatcher(deps: VcRecorderDeps): VcRecorderWatcher
       voice_channel_id: snapshot.channelId,
       local_root_dir: `${deps.recordingsDir}/${meetingId}`,
     };
+    // ADR-0028 D1: recorder.start より先に claim を永続化する
+    // (start 直後にクラッシュしても resume が currentChunk を冪等 finalize できる)。
+    const claim = deps.chunkBinding?.claimChunk(meetingId, isoJst(now)) ?? null;
     try {
       await deps.client.start(record);
     } catch (err) {
       log.error({ err, meetingId }, "vc recording start failed");
+      if (claim !== null) deps.chunkBinding?.dropChunk(claim.sessionActionId, meetingId);
       try {
         await deps.dm(ownerId, RECORDING_FAILED_MESSAGE);
       } catch {
@@ -219,8 +304,57 @@ export function createVcRecorderWatcher(deps: VcRecorderDeps): VcRecorderWatcher
       deps.maxMinutes * 60 * 1000,
     );
     limitTimer.unref?.();
-    active = { record, ownerId, limitTimer };
-    log.info({ meetingId, ownerId }, "vc recording started");
+    active = {
+      record,
+      ownerId,
+      limitTimer,
+      ...(claim !== null
+        ? { interview: { sessionActionId: claim.sessionActionId, seq: claim.seq } }
+        : {}),
+    };
+    log.info({ meetingId, ownerId, interview: claim !== null }, "vc recording started");
+  };
+
+  /** 再起動復元の本体(ADR-0028 D1)。chain 上で直列に呼ばれる。 */
+  const doResume = async (): Promise<void> => {
+    const binding = deps.chunkBinding;
+    if (binding === undefined) return;
+    const target = binding.resumeTarget();
+    if (target === null) return;
+    const { id, payload } = target;
+    const cur = payload.currentChunk;
+    if (cur === null) {
+      // 録音間(チャンク境界)の再起動: 復元すべき録音は無い。chunks 有なら STT キューへ、
+      // 0 件なら cancelled(completeSession が判定する)。
+      binding.completeSession(id);
+      return;
+    }
+    // currentChunk を冪等 finalize(sidecar の finalize ジョブは冪等)。sidecar も再起動済みで
+    // "active recording not found" 等を throw したら録音は失われている → 欠番(ADR-0028 D1)。
+    const record: RecorderRecord = {
+      meeting_id: cur.meetingId,
+      guild_id: payload.guildId,
+      voice_channel_id: payload.channelId,
+      local_root_dir: `${deps.recordingsDir}/${cur.meetingId}`,
+    };
+    try {
+      const first = await deps.client.finalize(record);
+      const handle = first.status === "finalizing" ? await pollUntilDone(cur.meetingId) : first;
+      if (handle.status !== "ok") {
+        throw new Error(`recorder finalize status=${handle.status}`);
+      }
+      commitInterviewChunk(binding, cur.meetingId, { sessionActionId: id, seq: cur.seq }, handle);
+      log.info({ meetingId: cur.meetingId, seq: cur.seq }, "interview chunk resumed(committed)");
+    } catch (err) {
+      log.warn({ err, meetingId: cur.meetingId, seq: cur.seq }, "resume finalize failed; 欠番");
+      binding.dropChunk(id, cur.meetingId);
+    }
+    const snapshot = deps.fetchSnapshot !== undefined ? await deps.fetchSnapshot() : null;
+    if (snapshot !== null && snapshot.humanIds.length >= 1) {
+      await doStart(snapshot, { inheritOwnerId: payload.starterId });
+    } else {
+      binding.completeSession(id);
+    }
   };
 
   return {
@@ -230,6 +364,35 @@ export function createVcRecorderWatcher(deps: VcRecorderDeps): VcRecorderWatcher
         const action = vcSessionDecision(active !== null, snapshot.humanIds.length);
         if (action === "start") await doStart(snapshot);
         else if (action === "finalize" && active !== null) await doFinalize(active, "empty");
+      });
+      return chain;
+    },
+    resume() {
+      chain = chain.then(async () => {
+        try {
+          await doResume();
+        } catch (err) {
+          // 復元失敗で以降の入退室処理を止めない。
+          log.error({ err }, "vc recorder resume failed");
+        }
+      });
+      return chain;
+    },
+    abortActive(reason) {
+      chain = chain.then(async () => {
+        const s = active;
+        if (s === null) return;
+        clearTimer(s.limitTimer);
+        active = null;
+        try {
+          await deps.client.abort(s.record, reason);
+        } catch (err) {
+          log.warn({ err, meetingId: s.record.meeting_id, reason }, "vc abort failed");
+        }
+        if (s.interview !== undefined) {
+          deps.chunkBinding?.dropChunk(s.interview.sessionActionId, s.record.meeting_id);
+        }
+        log.info({ meetingId: s.record.meeting_id, reason }, "vc recording aborted");
       });
       return chain;
     },

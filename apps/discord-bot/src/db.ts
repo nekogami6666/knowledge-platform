@@ -78,6 +78,12 @@ export interface BotStore {
   setActionState(id: string, state: string): void;
 
   /**
+   * 保留アクションの payload を差し替える(ADR-0028 D1)。interview セッションの
+   * チャンク追記・STT キャッシュのように、消費前に payload が育つ type が使う。未知 id は no-op。
+   */
+  setActionPayload(id: string, payloadJson: string): void;
+
+  /**
    * (subject, kind, windowStart) の利用を1回数え、count<=limit なら allowed=true を返す(§6.2 直列+制御)。
    * subject 例: "user:123" / "channel:456" / "global"。windowStart はウィンドウ識別子(例 "2026-06-17T10")。
    */
@@ -119,6 +125,10 @@ export function createMemoryStore(): BotStore {
     setActionState(id, state) {
       const a = actions.find((row) => row.id === id);
       if (a) a.state = state;
+    },
+    setActionPayload(id, payloadJson) {
+      const a = actions.find((row) => row.id === id);
+      if (a) a.payloadJson = payloadJson;
     },
     hitRateLimit(subject, kind, windowStart, limit) {
       const key = `${subject}|${kind}|${windowStart}`;

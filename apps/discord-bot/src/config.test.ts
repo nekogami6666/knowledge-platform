@@ -7,6 +7,7 @@ import {
   loadChannels,
   loadOps,
   loadRepos,
+  loadVoice,
 } from "./config.js";
 
 function reader(files: Record<string, string | null>): ConfigReader {
@@ -88,5 +89,25 @@ describe("loadOps (👍 代理マージ設定・§6.3)", () => {
     const ops = await loadOps(reader({ "ops.yaml": "channel_id: '123'" }));
     expect(ops.channel_id).toBe("123");
     expect(ops.kb_repo).toBeNull();
+  });
+});
+
+describe("loadVoice(voice-memo / VC 録音 / interview・ADR-0015 / 0020 / 0028)", () => {
+  it("ファイルが無ければ既定値(interview_arm_ttl_minutes は 120 分・ADR-0028 D5)", async () => {
+    const voice = await loadVoice(reader({}));
+    expect(voice.channel_id).toBeNull();
+    expect(voice.max_recording_minutes).toBe(15);
+    expect(voice.interview_arm_ttl_minutes).toBe(120);
+  });
+
+  it("voice.yaml の実値を読む(不正値は reject)", async () => {
+    const voice = await loadVoice(
+      reader({ "voice.yaml": "vc_channel_id: '222'\ninterview_arm_ttl_minutes: 30" }),
+    );
+    expect(voice.vc_channel_id).toBe("222");
+    expect(voice.interview_arm_ttl_minutes).toBe(30);
+    await expect(
+      loadVoice(reader({ "voice.yaml": "interview_arm_ttl_minutes: 0" })),
+    ).rejects.toThrow();
   });
 });

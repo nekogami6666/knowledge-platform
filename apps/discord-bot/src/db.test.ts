@@ -84,6 +84,24 @@ describe("createMemoryStore: pending_actions", () => {
     expect(s.listPendingActions("freshness")[0]?.state).toBe("sent");
     s.setActionState("unknown", "sent"); // no-op(throw しない)
   });
+
+  it("setActionPayload で payload を差し替え(interview のチャンク追記・ADR-0028 D1)", () => {
+    const s = createMemoryStore();
+    s.queueAction({
+      id: "a1",
+      type: "interview_session",
+      queryId: null,
+      payloadJson: '{"chunks":[]}',
+      state: "armed",
+      createdAt: "t",
+    });
+    s.setActionPayload("a1", '{"chunks":[{"seq":1}]}');
+    expect(s.listPendingActions("interview_session")[0]?.payloadJson).toBe(
+      '{"chunks":[{"seq":1}]}',
+    );
+    s.setActionPayload("unknown", "{}"); // no-op(throw しない)
+    expect(s.listPendingActions()).toHaveLength(1);
+  });
 });
 
 describe("createMemoryStore: feedback / answerStatus", () => {
