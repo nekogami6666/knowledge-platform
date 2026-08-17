@@ -15,6 +15,7 @@ import {
   type Transcriber,
 } from "@stratum/llm";
 import { type Client, Events } from "discord.js";
+import { setNotifySecrets } from "./ack.js";
 import { type AskDeps, handleAskRequest } from "./ask.js";
 import { createFsConfigReader, loadChannels, loadOps, loadRepos, loadVoice } from "./config.js";
 import {
@@ -63,6 +64,8 @@ async function main(): Promise<void> {
     env.OPENAI_API_KEY,
   ].filter((v): v is string => typeof v === "string" && v.length > 0);
   const logger = createLogger("info", undefined, secrets);
+  // Discord 送信もログと同じ秘密値で伏字化する(ADR-0030。例外文言の混入対策・§9.1)。
+  setNotifySecrets(secrets);
 
   const reader = createFsConfigReader(env.CONFIG_DIR);
   const channels = await loadChannels(reader);
@@ -332,7 +335,18 @@ async function main(): Promise<void> {
           : chunkBinding,
     });
   }
+  // ADR-0030 D4: VC 入室には通知先(元メッセージ)が無いため、機能 OFF は起動ログで可視化する。
+  // 「VC に入ったのに録音されない」の原因が設定漏れだと管理者が気づけるようにする。
   logger.info({ vcRecorder: vcEnabled }, "VC 録音入口(ADR-0020)");
+  if (!vcEnabled) {
+    logger.warn(
+      {
+        vcChannelId: voice.vc_channel_id !== null,
+        recorderUrl: env.RECORDER_URL !== undefined,
+      },
+      "VC 録音は未設定です(voice.yaml の vc_channel_id と RECORDER_URL が両方必要・ADR-0020)。VC に入っても録音・文字起こしは行われません。",
+    );
+  }
 
   // §6.7(ADR-0019 D2): checker(VM timer)が積んだ鮮度確認 pending を DM で送る worker。
   // checker は日次(平日 11:00 JST)なので、起動時 + 定期ポーリングで拾えば十分。

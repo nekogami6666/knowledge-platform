@@ -4,6 +4,7 @@ import type { Members } from "@stratum/kb-core";
 import { LlmError, type Transcriber } from "@stratum/llm";
 import type { Logger } from "pino";
 import { describe, expect, it, vi } from "vitest";
+import { TRANSIENT_RETRY_MESSAGE } from "./ack.js";
 import type { OpsConfig } from "./config.js";
 import type { BotStore, PendingAction } from "./db.js";
 import {
@@ -78,6 +79,7 @@ function fakeStore(actions: PendingAction[]): {
 } {
   const done: string[] = [];
   const payloads: string[] = [];
+  const rateCounts = new Map<string, number>();
   const store = {
     listPendingActions: vi.fn((type?: string) =>
       actions.filter((a) => type === undefined || a.type === type),
@@ -87,6 +89,13 @@ function fakeStore(actions: PendingAction[]): {
     }),
     setActionPayload: vi.fn((_id: string, json: string) => {
       payloads.push(json);
+    }),
+    // 失敗通知の 1日1回抑制(ADR-0030 D3)。テストでは 1 回だけ通す実挙動を再現する。
+    hitRateLimit: vi.fn((subject: string, kind: string, window: string, limit: number) => {
+      const key = `${subject}|${kind}|${window}`;
+      const count = (rateCounts.get(key) ?? 0) + 1;
+      rateCounts.set(key, count);
+      return { count, allowed: count <= limit };
     }),
   };
   return { store: store as unknown as BotStore, done, payloads };
@@ -326,11 +335,23 @@ describe("processInterviewSessionQueue(ADR-0028 D4)", () => {
     expect(done).toEqual(["ACT1"]);
   });
 
-  it("PR 作成の一時的失敗は pending を残す", async () => {
+  it("PR 作成の一時的失敗は pending を残し、starter に再試行を伝える(ADR-0030 D3)", async () => {
     const { store, done } = fakeStore([pendingAction()]);
     const { gh } = fakeGh({ createThrows: new LlmError("OVERLOADED", "529") });
-    await processInterviewSessionQueue(mkDeps({ store, gh }));
+    const { messenger, dms } = fakeMessenger();
+    await processInterviewSessionQueue(mkDeps({ store, gh, messenger }));
     expect(done).toEqual([]);
+    expect(dms).toEqual([{ userId: "U-starter", content: TRANSIENT_RETRY_MESSAGE }]);
+  });
+
+  it("想定外の恒久失敗も無言にせず理由を DM する(連投は 1日1回に抑制)", async () => {
+    const { store, done } = fakeStore([pendingAction()]);
+    const { gh } = fakeGh({ createThrows: new Error("boom") });
+    const { messenger, dms } = fakeMessenger();
+    await processInterviewSessionQueue(mkDeps({ store, gh, messenger }));
+    await processInterviewSessionQueue(mkDeps({ store, gh, messenger }));
+    expect(done).toEqual([]);
+    expect(dms).toEqual([{ userId: "U-starter", content: "処理できませんでした: boom" }]);
   });
 
   it("壊れた payload は done にして飛ばす(再試行しても直らない)", async () => {

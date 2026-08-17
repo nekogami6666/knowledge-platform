@@ -29,8 +29,9 @@ import {
   type User,
 } from "discord.js";
 import type { Logger } from "pino";
+import { ackReaction, noticeAllowedOnce } from "./ack.js";
 import type { AskResult } from "./ask.js";
-import { handleLightbulb } from "./capture.js";
+import { handleLightbulb, jstDayKey } from "./capture.js";
 import { SerialQueue } from "./concurrency.js";
 import {
   type ChannelGateInput,
@@ -482,6 +483,48 @@ export function proxyMergeDecision(input: ProxyMergeInput): ProxyMergeDecision {
   return { merge: true, repo: pr.repo, number: pr.number };
 }
 
+/** 代理マージが設定不足で使えないときの案内(ADR-0030 D4。抑制つきで返す)。 */
+export const PROXY_MERGE_OFF_MESSAGE = "代理マージは現在利用できません(設定が未完了です)。";
+
+/**
+ * 拒否理由 → ユーザー向け日本語(ADR-0030 D5・純関数)。null = 通知不要
+ * (not-thumbsup / bot-reactor / no-pr-url / not-self-dm は通常運用で大量に出るノイズ)。
+ * ops チャンネルはハードコードせず設定値から mention を組む(CLAUDE.md 鉄則)。
+ */
+export function proxyMergeRejectMessage(
+  reason: string,
+  opsChannelId: string | null,
+): string | null {
+  switch (reason) {
+    case "not-ops-channel":
+      return opsChannelId === null
+        ? "PR のマージは bot の通知チャンネルに投稿された通知に 👍 でお願いします。"
+        : `PR のマージは <#${opsChannelId}> の通知に 👍 でお願いします。`;
+    case "not-webhook-message":
+      return "bot の通知メッセージにのみ 👍 でマージできます。";
+    case "repo-not-allowed":
+      return "このリポジトリの PR は代理マージの対象外です。";
+    case "ops-config-off":
+      return PROXY_MERGE_OFF_MESSAGE;
+    default:
+      return null;
+  }
+}
+
+/**
+ * 拒否理由を返すべきか(ADR-0030 D5・純関数)。👍 は通常運用で大量に付くため、
+ * 「人間が PR URL を含むメッセージに 👍 した」= 代理マージを意図したと判る場合だけ説明する。
+ */
+export function shouldExplainProxyMergeReject(input: {
+  emojiName: string | null;
+  reactorIsBot: boolean;
+  content: string;
+}): boolean {
+  return (
+    input.emojiName === "👍" && !input.reactorIsBot && parseGithubPrUrl(input.content) !== null
+  );
+}
+
 /**
  * 👍 代理マージ(§6.3 ops ルート / §6.4 💡 capture の DM ルート)。
  * validate 赤(mergeable_state != clean)はマージしない(ADR-0004 D2)。マージ済みは冪等に案内のみ。
@@ -493,7 +536,11 @@ export async function handleProxyMergeReaction(
   deps: BotDeps,
 ): Promise<void> {
   const { ops, gh } = deps;
-  if (ops === undefined || gh === undefined) return; // 機能 OFF(設定か認証が無い)
+  // 👍 以外(💡 capture・鮮度確認の ✏️🗑 等)は REST fetch せず無視する。
+  if (reaction.emoji.name !== "👍") return;
+  // ops 設定そのものが無い環境では「どのチャンネルの通知か」が判らず、操作の意図を特定できない
+  // (= 通知先を決められない)。ADR-0030 D4 の対象外として静かに終える。
+  if (ops === undefined) return;
   try {
     // webhook メッセージ・DM はキャッシュ外で partial として届くため、実体を fetch してから判定する。
     const r = reaction.partial ? await reaction.fetch() : reaction;
@@ -511,9 +558,53 @@ export async function handleProxyMergeReaction(
       messageAuthorIsSelf:
         message.author?.id !== undefined && message.author.id === message.client?.user?.id,
     });
-    if (!decision.merge) return; // 対象外のリアクションには反応しない(通常運用で大量に発生する)
+    if (!decision.merge) {
+      // ADR-0030 D5: 「👍 × 人間 × PR URL」= 代理マージの意図が明確なときだけ理由を返す。
+      if (
+        !shouldExplainProxyMergeReject({
+          emojiName: r.emoji.name,
+          reactorIsBot: reactor.bot,
+          content: message.content,
+        })
+      ) {
+        return;
+      }
+      const text = proxyMergeRejectMessage(decision.reason, ops.channel_id);
+      if (text === null) return;
+      const rejectLog = withCorrelation(deps.logger, "proxy-merge");
+      // 設定不足の案内だけは連投を抑える(D4。ユーザーには直せないため)。
+      if (
+        text === PROXY_MERGE_OFF_MESSAGE &&
+        !noticeAllowedOnce(
+          deps.store,
+          `user:${reactor.id}`,
+          "feature-off-notice:proxy-merge",
+          jstDayKey(new Date()),
+        )
+      ) {
+        return;
+      }
+      rejectLog.info({ reason: decision.reason, userId: reactor.id }, "proxy merge rejected");
+      await message.reply(text);
+      return;
+    }
 
     const log = withCorrelation(deps.logger, `${decision.repo}#${decision.number}`);
+    if (gh === undefined) {
+      // ops.yaml はあるが GitHub 認証が無い(ADR-0011 / ADR-0030 D4)。設定不足を本人に返す。
+      log.warn({ userId: reactor.id }, "proxy merge is disabled (no GitHub auth)");
+      if (
+        noticeAllowedOnce(
+          deps.store,
+          `user:${reactor.id}`,
+          "feature-off-notice:proxy-merge",
+          jstDayKey(new Date()),
+        )
+      ) {
+        await message.reply(PROXY_MERGE_OFF_MESSAGE);
+      }
+      return;
+    }
     const pr = await gh.getPullRequest(decision.repo, decision.number);
     if (pr.merged || pr.state === "closed") {
       // 冪等: 二重 👍・bot 再起動後の再配送でも二重マージしない。
@@ -599,6 +690,35 @@ export function gapAnswerDecision(input: GapAnswerInput): GapAnswerDecision {
   return { capture: true, questionId };
 }
 
+/** 回答として受け取れなかったときの案内(ADR-0030 D5)。 */
+export const GAP_ANSWER_REJECT_MESSAGE =
+  "回答として受け取れませんでした。依頼メッセージ(bot が送った依頼)に直接返信してください。";
+
+/** 依頼メッセージらしさ(q-ID 形の文字列を含むか)。他の webhook 通知と区別する。 */
+export function looksLikeGapRequest(content: string): boolean {
+  return /q-\d{4}-/.test(content);
+}
+
+/**
+ * 未捕捉の返信に案内を返すべきか(ADR-0030 D5・純関数)。null = 無反応のまま。
+ * 通常の会話の返信すべてに反応すると鬱陶しいので、次を全て満たす場合だけ返す:
+ * - 返信先が bot / webhook の投稿(人間同士の返信には無反応)
+ * - 返信先が自 bot の投稿ではない(voice 訂正フライホイールや /ask 回答への返信を横取りしない)
+ * - no-question-id は「依頼らしい(q-ID 形を含む)のに読めない」ときだけ
+ *   (extractor の PR 通知など、q-ID を持たない webhook への雑談返信には反応しない)
+ */
+export function gapAnswerRejectMessage(
+  reason: string,
+  referenced: { isBot: boolean; isSelf: boolean; content: string },
+): string | null {
+  if (!referenced.isBot || referenced.isSelf) return null;
+  if (reason === "not-webhook-reference") return GAP_ANSWER_REJECT_MESSAGE;
+  if (reason === "no-question-id" && looksLikeGapRequest(referenced.content)) {
+    return GAP_ANSWER_REJECT_MESSAGE;
+  }
+  return null;
+}
+
 /**
  * 依頼メッセージへの「返信」を捕捉して gap_answer を pending_actions へ積む(§6.5 ④UI / PR-D2)。
  * MessageCreate は全メッセージに発火するため、返信でない/bot の投稿は REST fetch 前に早期 return する。
@@ -619,7 +739,21 @@ export async function handleGapAnswer(message: Message, deps: BotDeps): Promise<
       referencedWebhookId: referenced.webhookId ?? null,
       referencedContent: referenced.content,
     });
-    if (!decision.capture) return;
+    if (!decision.capture) {
+      // ADR-0030 D5: 依頼(bot/webhook 投稿)への返信のつもりで外した人にだけ案内する。
+      const text = gapAnswerRejectMessage(decision.reason, {
+        isBot: referenced.author?.bot ?? false,
+        isSelf:
+          referenced.author?.id !== undefined && referenced.author.id === message.client?.user?.id,
+        content: referenced.content,
+      });
+      if (text === null) return;
+      const rejectLog = withCorrelation(deps.logger, "gap-answer");
+      rejectLog.info({ reason: decision.reason, authorId: message.author.id }, "gap answer missed");
+      await ackReaction(message, "failed", rejectLog);
+      await message.reply(text);
+      return;
+    }
 
     const log = withCorrelation(deps.logger, decision.questionId);
     // 回答の出典は Discord permalink(PR-D3 が Source kind:"discord" として使う)。
@@ -636,7 +770,7 @@ export async function handleGapAnswer(message: Message, deps: BotDeps): Promise<
       state: "pending",
       createdAt: isoJst(),
     });
-    await message.react("✅"); // 回答者へ「受け取った」ことを示す ack(§6.5 ④UI)
+    await ackReaction(message, "accepted", log); // 回答者へ「受け取った」ことを示す ack(§6.5 ④UI)
     log.info({ authorId: message.author.id }, "gap answer captured");
   } catch (err) {
     withCorrelation(deps.logger, "gap-answer").error({ err }, "gap answer capture failed");
@@ -730,6 +864,7 @@ export async function warmDmChannels(
     const { members } = await getMembers();
     let warmed = 0;
     let total = 0;
+    let failed = 0;
     for (const member of members) {
       // primary + 別名 Discord の両方を温める(1 人で複数アカウント・ADR-0021 D2)。
       for (const discordId of [member.discord, ...(member.discord_alts ?? [])]) {
@@ -738,6 +873,7 @@ export async function warmDmChannels(
           await client.users.createDM(discordId);
           warmed += 1;
         } catch (err) {
+          failed += 1;
           // DM を開けない(相手の設定等)のは準正常系 — 該当者のリアクション応答だけが効かない。
           logger.warn(
             { err, github: member.github, discord: discordId },
@@ -746,7 +882,12 @@ export async function warmDmChannels(
         }
       }
     }
-    logger.info({ warmed, total }, "DM チャンネルをキャッシュしました(リアクション受信対策)");
+    // ADR-0030 D6: DM を開けない人が居ると DM 👍 の承認導線が死ぬため、起動ログで件数を見せる
+    // (誰が開けないかは上の warn 行に github 名が出る)。
+    logger.info(
+      { warmed, total, dmWarmFailed: failed },
+      "DM チャンネルをキャッシュしました(リアクション受信対策)",
+    );
   } catch (err) {
     logger.warn({ err }, "DM チャンネルのウォームをスキップしました(members 読込失敗)");
   }
@@ -759,15 +900,24 @@ export async function warmDmChannels(
 export function createClientMessenger(client: Client): {
   reply(channelId: string, messageId: string, content: string): Promise<void>;
   dm(userId: string, content: string): Promise<void>;
+  react(channelId: string, messageId: string, emoji: string): Promise<void>;
 } {
+  const fetchMessage = async (channelId: string, messageId: string): Promise<Message> => {
+    const channel = await client.channels.fetch(channelId);
+    if (channel === null || !channel.isTextBased()) {
+      throw new Error(`channel ${channelId} is not text-based`);
+    }
+    return channel.messages.fetch(messageId);
+  };
   return {
     async reply(channelId, messageId, content) {
-      const channel = await client.channels.fetch(channelId);
-      if (channel === null || !channel.isTextBased()) {
-        throw new Error(`channel ${channelId} is not text-based`);
-      }
-      const message = await channel.messages.fetch(messageId);
+      const message = await fetchMessage(channelId, messageId);
       await message.reply(content);
+    },
+    // ADR-0030 D1: パイプライン側の ack(⏳ / ⚠️)。失敗は ackReaction 側が warn で吸収する。
+    async react(channelId, messageId, emoji) {
+      const message = await fetchMessage(channelId, messageId);
+      await message.react(emoji);
     },
     async dm(userId, content) {
       const user = await client.users.fetch(userId);

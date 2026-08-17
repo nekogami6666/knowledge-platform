@@ -44,6 +44,13 @@ import type {
 import type { Logger } from "pino";
 import { z } from "zod";
 import {
+  ackReaction,
+  FEATURE_OFF_MESSAGE,
+  noticeAllowedOnce,
+  notifyUser,
+  permanentFailureMessage,
+} from "./ack.js";
+import {
   type ChannelGateInput,
   type ChannelsConfig,
   isChannelAllowed,
@@ -52,6 +59,7 @@ import {
 import type { BotStore } from "./db.js";
 import { withCorrelation } from "./logger.js";
 import type { MembersLoader } from "./members.js";
+import { isTransient } from "./transient.js";
 import { gateInputFromChannel } from "./visibility.js";
 
 // --- 中間スキーマ(LLM 出力契約。kb entry の再定義ではない・.default() 禁止=candidate.ts 方針)---
@@ -313,10 +321,15 @@ export interface CaptureDeps {
   now?: () => Date;
 }
 
+/** 再試行キューが無い経路の一時的失敗(ADR-0030 D3。「自動再試行します」とは言えない)。 */
+export const CAPTURE_TRANSIENT_MESSAGE =
+  "一時的な問題で処理できませんでした。少し時間をおいて 💡 を付け直してください。";
+
 /**
  * 💡 リアクション → triage → draft → 単発 PR → DM(§6.4 ③-a)。
  * MessageReactionAdd 全発火に備え、💡 以外は fetch もせず早期 return。
- * 例外は封じ込め(catch → log。リスナを落とさない)。ブランチ既存の CONFLICT は冪等扱い。
+ * 例外は封じ込め(catch → log。リスナを落とさない)が、無言では終わらせない
+ * (ADR-0030 D3: 一時的 / 恒久を区別して本人に返す)。ブランチ既存の CONFLICT は冪等扱い。
  */
 export async function handleLightbulb(
   reaction: MessageReaction | PartialMessageReaction,
@@ -325,14 +338,13 @@ export async function handleLightbulb(
 ): Promise<void> {
   // 絵文字は partial でも判る。💡 以外(👍 代理マージ等)は REST fetch せず無視。
   if (reaction.emoji.name !== "💡") return;
-  const { ops, gh, promptStore } = deps;
-  if (ops === undefined || ops.kb_repo === null || gh === undefined || promptStore === undefined) {
-    return; // 機能 OFF(設定・認証・プロンプトのいずれかが無い)
-  }
+  // catch から通知するため、fetch できた分は外に持ち出す(ADR-0030 D3)。
+  let message: Message | undefined;
+  let reactor: User | undefined;
   try {
     const r = reaction.partial ? await reaction.fetch() : reaction;
-    const message = r.message.partial ? await r.message.fetch() : r.message;
-    const reactor = user.partial ? await user.fetch() : user;
+    message = r.message.partial ? await r.message.fetch() : r.message;
+    reactor = user.partial ? await user.fetch() : user;
     const decision = captureDecision({
       emojiName: r.emoji.name,
       reactorIsBot: reactor.bot,
@@ -344,6 +356,31 @@ export async function handleLightbulb(
     const log = withCorrelation(deps.logger, `capture:${message.id}`);
     const now = deps.now?.() ?? new Date();
 
+    // 機能 OFF(設定・認証・プロンプトのいずれかが無い)。ゲート通過後に判定するのは、
+    // 対象外チャンネルの 💡 にまで案内を出さないため(ADR-0030 D4。💡 は稀なので fetch のコストは許容)。
+    const { ops, gh, promptStore } = deps;
+    if (
+      ops === undefined ||
+      ops.kb_repo === null ||
+      gh === undefined ||
+      promptStore === undefined
+    ) {
+      log.warn("💡 capture は設定未完了のため無効です(ops.kb_repo / GitHub 認証 / プロンプト)");
+      // 連投で鬱陶しくならないよう、同一ユーザー・同一機能で 1日1回だけ案内する。
+      if (
+        noticeAllowedOnce(
+          deps.store,
+          `user:${reactor.id}`,
+          "feature-off-notice:capture",
+          jstDayKey(now),
+        )
+      ) {
+        await ackReaction(message, "failed", log);
+        await notifyUser({ user: reactor, message }, FEATURE_OFF_MESSAGE, log);
+      }
+      return;
+    }
+
     // 乱用対策: user 日3件(§6.4 / ⑳)。超過はチャンネルを汚さず DM で案内。
     const rate = deps.store.hitRateLimit(
       `user:${reactor.id}`,
@@ -352,8 +389,9 @@ export async function handleLightbulb(
       CAPTURE_DAILY_LIMIT,
     );
     if (!rate.allowed) {
-      await tryDm(
-        reactor,
+      await ackReaction(message, "failed", log);
+      await notifyUser(
+        { user: reactor, message },
         "💡 ナレッジ化の本日の上限(3件)に達しています。明日また試してください。",
         log,
       );
@@ -366,12 +404,27 @@ export async function handleLightbulb(
       (p) => p.headRef === head,
     );
     if (existing !== undefined) {
-      await tryDm(reactor, `この 💡 は既に PR 化されています: ${existing.url}`, log);
+      // 既に受理済み(冪等)。取りこぼしではないので ✅ を付けて PR を案内する。
+      await ackReaction(message, "accepted", log);
+      await notifyUser(
+        { user: reactor, message },
+        `この 💡 は既に PR 化されています: ${existing.url}`,
+        log,
+      );
       return;
     }
 
     const context = await collectContext(message);
-    if (context.length === 0) return; // 本文なし(embed のみ等)は対象外
+    if (context.length === 0) {
+      // 本文なし(画像・embed のみ等)。無言だと「壊れている」と区別できない(ADR-0030 D1)。
+      await ackReaction(message, "failed", log);
+      await notifyUser(
+        { user: reactor, message },
+        "💡 ナレッジ化を見送りました: 対象のメッセージに本文がありません(画像・添付のみ)。\n要点をテキストで書いたメッセージに 💡 を付けてください。",
+        log,
+      );
+      return;
+    }
 
     const triage = await runTriage(
       { context, cwd: deps.cwd },
@@ -381,8 +434,9 @@ export async function handleLightbulb(
       // 見送りは本人に理由を返す(ADR-0029 D4)。無音だと「壊れている」と区別できず、
       // どう直せば通るかも分からない(レート超過・既存 PR は既に DM している)。
       log.info({ reason: triage.reason }, "capture triaged out");
-      await tryDm(
-        reactor,
+      await ackReaction(message, "failed", log);
+      await notifyUser(
+        { user: reactor, message },
         `💡 ナレッジ化を見送りました: ${triage.reason}\n要点をまとめ直したメッセージに 💡 を付け直すと通ることがあります。`,
         log,
       );
@@ -416,8 +470,10 @@ export async function handleLightbulb(
         },
       ],
     });
-    await tryDm(
-      reactor,
+    // 受理 ack(ADR-0030 D1)。DM が閉じていても「受け取った」ことは元メッセージで判る。
+    await ackReaction(message, "accepted", log);
+    await notifyUser(
+      { user: reactor, message },
       [
         `💡 をナレッジ化する PR を作成しました: ${pr.url}`,
         "内容を確認して、この DM に 👍 を付けるとマージされます。修正したい場合は PR を直接編集してください。",
@@ -426,20 +482,25 @@ export async function handleLightbulb(
     );
     log.info({ pr: pr.number, id }, "capture PR created");
   } catch (err) {
+    const log = withCorrelation(deps.logger, "capture");
     if (err instanceof GhClientError && err.code === "CONFLICT") {
-      // ブランチ既存(ほぼ同時の 💡)。冪等扱いで静かに終える。
-      withCorrelation(deps.logger, "capture").warn({ err }, "capture PR already exists");
+      // ブランチ既存(ほぼ同時の 💡)。冪等扱い = 受理済みなので ✅ だけ付けて終える。
+      log.warn({ err }, "capture PR already exists");
+      if (message !== undefined) await ackReaction(message, "accepted", log);
       return;
     }
-    withCorrelation(deps.logger, "capture").error({ err }, "lightbulb capture failed");
-  }
-}
-
-/** DM 送信(DM 拒否設定ではエラーになるため握りつぶしてログのみ)。 */
-async function tryDm(user: User, content: string, log: Logger): Promise<void> {
-  try {
-    await user.send(content);
-  } catch (err) {
-    log.warn({ err }, "DM 送信に失敗(受信拒否設定の可能性)");
+    // ADR-0030 D3: 無言で終わらせない。capture には再試行キューが無いため、一時的失敗でも
+    // 「自動再試行します」とは言わず「付け直してください」と案内する。
+    const transient = isTransient(err);
+    if (transient) log.warn({ err }, "capture transient failure");
+    else log.error({ err }, "lightbulb capture failed");
+    // fetch 自体に失敗した場合は通知先が特定できない(ログのみ)。
+    if (message === undefined || reactor === undefined) return;
+    await ackReaction(message, "failed", log);
+    await notifyUser(
+      { user: reactor, message },
+      transient ? CAPTURE_TRANSIENT_MESSAGE : permanentFailureMessage(err),
+      log,
+    );
   }
 }

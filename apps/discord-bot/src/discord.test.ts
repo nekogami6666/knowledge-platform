@@ -23,15 +23,21 @@ import {
   denyReason,
   extractQuestionId,
   feedbackButtons,
+  GAP_ANSWER_REJECT_MESSAGE,
   gapAnswerDecision,
+  gapAnswerRejectMessage,
   handleButton,
   handleGapAnswer,
   handleProxyMergeReaction,
   handleStats,
   interviewCommand,
+  looksLikeGapRequest,
+  PROXY_MERGE_OFF_MESSAGE,
   parseFeedbackCustomId,
   parseGithubPrUrl,
   proxyMergeDecision,
+  proxyMergeRejectMessage,
+  shouldExplainProxyMergeReject,
   statsCommand,
   warmDmChannels,
   windowKey,
@@ -119,6 +125,7 @@ function fakeStore(opts: { throwOnFeedback?: boolean } = {}): {
 } {
   const feedback: [string, string][] = [];
   const queued: unknown[] = [];
+  const rateCounts = new Map<string, number>();
   const store = {
     setFeedback: (id: string, value: "up" | "down") => {
       if (opts.throwOnFeedback) throw new Error("db locked");
@@ -126,6 +133,13 @@ function fakeStore(opts: { throwOnFeedback?: boolean } = {}): {
     },
     queueAction: (a: unknown) => {
       queued.push(a);
+    },
+    // 設定不足の案内は 1日1回に抑制される(ADR-0030 D4)ため、実挙動を再現する。
+    hitRateLimit: (subject: string, kind: string, window: string, limit: number) => {
+      const key = `${subject}|${kind}|${window}`;
+      const count = (rateCounts.get(key) ?? 0) + 1;
+      rateCounts.set(key, count);
+      return { count, allowed: count <= limit };
     },
   };
   return { store: store as unknown as BotStore, feedback, queued };
@@ -350,6 +364,62 @@ describe("proxyMergeDecision — DM ルート(§6.4 💡 capture)", () => {
   });
 });
 
+describe("proxyMergeRejectMessage / shouldExplainProxyMergeReject (ADR-0030 D5)", () => {
+  it("直せる拒否理由は日本語で返し、ops チャンネルは設定値から mention する", () => {
+    expect(proxyMergeRejectMessage("not-ops-channel", "OPS")).toContain("<#OPS>");
+    expect(proxyMergeRejectMessage("not-ops-channel", null)).not.toContain("<#");
+    expect(proxyMergeRejectMessage("not-webhook-message", "OPS")).toContain("bot の通知メッセージ");
+    expect(proxyMergeRejectMessage("repo-not-allowed", "OPS")).toContain("対象外");
+    expect(proxyMergeRejectMessage("ops-config-off", "OPS")).toBe(PROXY_MERGE_OFF_MESSAGE);
+  });
+
+  it("ノイズになる理由は null(通知しない)", () => {
+    for (const reason of ["not-thumbsup", "bot-reactor", "no-pr-url", "not-self-dm"]) {
+      expect(proxyMergeRejectMessage(reason, "OPS")).toBeNull();
+    }
+  });
+
+  it("説明するのは「👍 × 人間 × PR URL」のときだけ(👍 は通常運用で大量に付く)", () => {
+    const base = {
+      emojiName: "👍" as string | null,
+      reactorIsBot: false,
+      content: "https://github.com/org/knowledge-base/pull/12",
+    };
+    expect(shouldExplainProxyMergeReject(base)).toBe(true);
+    expect(shouldExplainProxyMergeReject({ ...base, emojiName: "🎉" })).toBe(false);
+    expect(shouldExplainProxyMergeReject({ ...base, reactorIsBot: true })).toBe(false);
+    expect(shouldExplainProxyMergeReject({ ...base, content: "いいね" })).toBe(false);
+  });
+});
+
+describe("gapAnswerRejectMessage / looksLikeGapRequest (ADR-0030 D5)", () => {
+  const webhookRef = { isBot: true, isSelf: false, content: "依頼です(q-2026-abc123)" };
+
+  it("bot/webhook 投稿への返信が捕捉できなかったときだけ案内する", () => {
+    expect(gapAnswerRejectMessage("not-webhook-reference", webhookRef)).toBe(
+      GAP_ANSWER_REJECT_MESSAGE,
+    );
+    expect(gapAnswerRejectMessage("no-question-id", webhookRef)).toBe(GAP_ANSWER_REJECT_MESSAGE);
+  });
+
+  it("人間同士の返信・自 bot 投稿への返信・依頼でない webhook には反応しない", () => {
+    expect(
+      gapAnswerRejectMessage("not-webhook-reference", { ...webhookRef, isBot: false }),
+    ).toBeNull();
+    expect(gapAnswerRejectMessage("no-question-id", { ...webhookRef, isSelf: true })).toBeNull();
+    expect(
+      gapAnswerRejectMessage("no-question-id", { ...webhookRef, content: "📥 抽出 PR です" }),
+    ).toBeNull();
+    expect(gapAnswerRejectMessage("bot-author", webhookRef)).toBeNull();
+  });
+
+  it("looksLikeGapRequest は q-ID 形の有無で依頼らしさを見る", () => {
+    expect(looksLikeGapRequest("(q-2026-0007)")).toBe(true);
+    expect(looksLikeGapRequest("(q-2026-abc123)")).toBe(true);
+    expect(looksLikeGapRequest("PR を作成しました")).toBe(false);
+  });
+});
+
 /** handleProxyMergeReaction 用の最小 fake(webhook 通知メッセージ or 💡 DM + 人間のリアクション)。 */
 function fakeReaction(
   over: {
@@ -439,13 +509,18 @@ describe("handleProxyMergeReaction (§6.3 👍 代理マージ)", () => {
     expect(replies[0]).toContain("✅");
   });
 
-  it("gh 未設定(認証なし)は完全 no-op", async () => {
+  it("gh 未設定(認証なし)はマージせず、設定不足を 1日1回だけ案内する(ADR-0030 D4)", async () => {
     const { logger } = fakeLogger();
     const { store, queued } = fakeStore();
     const { reaction, user, replies } = fakeReaction();
-    await handleProxyMergeReaction(reaction, user, mkDeps(logger, store, undefined));
+    const deps = mkDeps(logger, store, undefined);
+    await handleProxyMergeReaction(reaction, user, deps);
     expect(queued).toHaveLength(0);
-    expect(replies).toHaveLength(0);
+    expect(replies).toEqual([PROXY_MERGE_OFF_MESSAGE]);
+    // 連投は抑制(同一ユーザー・同日)。
+    const second = fakeReaction();
+    await handleProxyMergeReaction(second.reaction, second.user, deps);
+    expect(second.replies).toHaveLength(0);
   });
 
   it("💡 capture の DM(自 bot 投稿)への 👍 でマージ(§6.4 DM ルート)", async () => {
@@ -577,18 +652,25 @@ function fakeMessage(
     content?: string;
     fetchThrows?: boolean;
     reactThrows?: boolean;
+    /** 返信元の投稿者(既定 = webhook 相当の bot)。 */
+    referencedAuthorBot?: boolean;
+    /** 返信元が自 bot の投稿か(voice 訂正・/ask 回答への返信を区別する)。 */
+    referencedAuthorId?: string;
   } = {},
-): { message: Message; reacted: string[] } {
+): { message: Message; reacted: string[]; replies: string[] } {
   const reacted: string[] = [];
+  const replies: string[] = [];
   const referenced = {
     webhookId: over.referencedWebhookId !== undefined ? over.referencedWebhookId : "WH1",
     content: over.referencedContent ?? "山田 さんが「湿度」を探していました。\n(q-2026-0007)",
+    author: { bot: over.referencedAuthorBot ?? true, id: over.referencedAuthorId ?? "WEBHOOK" },
   };
   const message = {
     author: { bot: over.authorBot ?? false, id: "U1" },
     reference: over.isReply === false ? null : { messageId: "REQ1" },
     content: over.content ?? "湿度が高いと Y 軸が脱調します。",
     url: "https://discord.com/channels/1/2/3",
+    client: { user: { id: "BOT" } },
     fetchReference: async () => {
       if (over.fetchThrows) throw new Error("unknown message");
       return referenced;
@@ -597,8 +679,11 @@ function fakeMessage(
       if (over.reactThrows) throw new Error("missing permissions");
       reacted.push(emoji);
     },
+    reply: async (content: string) => {
+      replies.push(content);
+    },
   };
-  return { message: message as unknown as Message, reacted };
+  return { message: message as unknown as Message, reacted, replies };
 }
 
 describe("handleGapAnswer (§6.5 ④UI 捕捉 / 例外封じ込め)", () => {
@@ -653,6 +738,37 @@ describe("handleGapAnswer (§6.5 ④UI 捕捉 / 例外封じ込め)", () => {
     expect(queued).toHaveLength(0);
   });
 
+  it("bot 投稿への返信を捕捉できなかったら ⚠️ + 案内を返す(ADR-0030 D5)", async () => {
+    const { logger } = fakeLogger();
+    const { store, queued } = fakeStore();
+    // (a) 依頼ではないメッセージ(bot の非 webhook 投稿)に返信した
+    const a = fakeMessage({ referencedWebhookId: null });
+    await handleGapAnswer(a.message, deps(logger, store));
+    // (b) 依頼らしい(q-ID 形)のに読めない
+    const b = fakeMessage({ referencedContent: "依頼です(q-2026-XXXX)" });
+    await handleGapAnswer(b.message, deps(logger, store));
+    expect(queued).toHaveLength(0);
+    expect(a.reacted).toEqual(["⚠️"]);
+    expect(a.replies).toEqual([GAP_ANSWER_REJECT_MESSAGE]);
+    expect(b.replies).toEqual([GAP_ANSWER_REJECT_MESSAGE]);
+  });
+
+  it("人間同士の返信・自 bot の投稿への返信・q-ID と無関係な webhook には無反応", async () => {
+    const { logger } = fakeLogger();
+    const { store } = fakeStore();
+    const cases = [
+      // 人間への返信(会話)
+      fakeMessage({ referencedWebhookId: null, referencedAuthorBot: false }),
+      // 自 bot の投稿への返信(voice 訂正フライホイール等)
+      fakeMessage({ referencedWebhookId: null, referencedAuthorId: "BOT" }),
+      // q-ID を持たない webhook 通知(extractor の PR 通知など)への雑談返信
+      fakeMessage({ referencedContent: "📥 抽出 PR を作成しました" }),
+    ];
+    for (const c of cases) await handleGapAnswer(c.message, deps(logger, store));
+    expect(cases.flatMap((c) => c.replies)).toEqual([]);
+    expect(cases.flatMap((c) => c.reacted)).toEqual([]);
+  });
+
   it("fetchReference が throw(削除済み等)でも例外を漏らさず log.error", async () => {
     const { logger, errors } = fakeLogger();
     const { store, queued } = fakeStore();
@@ -668,7 +784,8 @@ describe("handleGapAnswer (§6.5 ④UI 捕捉 / 例外封じ込め)", () => {
     const { message } = fakeMessage({ reactThrows: true });
     await expect(handleGapAnswer(message, deps(logger, store))).resolves.toBeUndefined();
     expect(queued).toHaveLength(1);
-    expect(errors).toHaveLength(1);
+    // ack の失敗は本処理を落とさない(ADR-0030 D1)。warn に落ちて error にはならない。
+    expect(errors).toHaveLength(0);
   });
 });
 
@@ -710,7 +827,8 @@ describe("warmDmChannels(discord.js DM リアクション欠落対策)", () => {
     );
     expect(opened).toEqual(["U1", "U3"]);
     expect(warns).toHaveLength(1);
-    expect(infos.at(-1)).toMatchObject({ warmed: 2, total: 3 });
+    // ADR-0030 D6: DM を開けない人数を起動ログに出す(DM 👍 の承認導線が死ぬため)。
+    expect(infos.at(-1)).toMatchObject({ warmed: 2, total: 3, dmWarmFailed: 1 });
   });
 
   it("members 読込失敗は warn のみで throw しない", async () => {

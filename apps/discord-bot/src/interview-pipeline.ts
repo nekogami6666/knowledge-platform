@@ -17,6 +17,13 @@ import type { GhClient } from "@stratum/gh-client";
 import { GhClientError } from "@stratum/gh-client";
 import { buildInterviewSessionDoc, interviewSessionPath, nameForDiscord } from "@stratum/kb-core";
 import type { Transcriber } from "@stratum/llm";
+import {
+  type DmTarget,
+  noticeAllowedOnce,
+  notifyUser,
+  permanentFailureMessage,
+  TRANSIENT_RETRY_MESSAGE,
+} from "./ack.js";
 import { jstDayKey } from "./capture.js";
 import { SerialQueue } from "./concurrency.js";
 import {
@@ -102,6 +109,15 @@ async function processSession(
     return;
   }
 
+  // ADR-0030 D2/D3: 通知先は starter の DM のみ(セッションには元メッセージが無い)。
+  const starter: DmTarget = { send: (text: string) => deps.messenger.dm(payload.starterId, text) };
+  /** 失敗を starter へ返す。再試行のたびに繰り返さないよう 1日1回に抑える。 */
+  const notifyFailure = async (text: string): Promise<void> => {
+    const dayKey = jstDayKey(deps.now?.() ?? new Date());
+    if (!noticeAllowedOnce(deps.store, `action:${actionId}`, "failure-notice", dayKey)) return;
+    await notifyUser({ user: starter }, text, log);
+  };
+
   try {
     // 冪等: 同一セッションの既存 PR(open/closed 問わず)があれば作り直さない
     // (PR 作成後・markActionDone 前にクラッシュしたケースのレジューム)。
@@ -117,11 +133,7 @@ async function processSession(
 
     // チャンク 0 件は completeSession が cancelled に落とすため通常来ないが、防御的に閉じる。
     if (payload.chunks.length === 0) {
-      try {
-        await deps.messenger.dm(payload.starterId, SESSION_NO_AUDIO_MESSAGE);
-      } catch (err) {
-        log.warn({ err }, "DM 送信に失敗(受信拒否設定の可能性)");
-      }
+      await notifyUser({ user: starter }, SESSION_NO_AUDIO_MESSAGE, log);
       deps.store.markActionDone(actionId);
       return;
     }
@@ -208,19 +220,17 @@ async function processSession(
       files: [{ path, content: doc }],
     });
 
-    // starter へ DM(既存の DM 👍 代理マージ導線がそのまま効く)。
-    try {
-      await deps.messenger.dm(
-        payload.starterId,
-        [
-          `🎤 インタビュー(${payload.person} × ${payload.topic})の文字起こし PR を作成しました: ${pr.url}`,
-          `原本: \`${path}\``,
-          "内容を確認して、この DM に 👍 を付けるとマージできます。マージ後は夜間の extractor が複数のナレッジ記事に自動分割します。",
-        ].join("\n"),
-      );
-    } catch (err) {
-      log.warn({ err }, "DM 送信に失敗(受信拒否設定の可能性)");
-    }
+    // starter へ DM(既存の DM 👍 代理マージ導線がそのまま効く)。DM が閉じている場合は
+    // 返信先が無いため届かない — その事実は warn ログに残る(ADR-0030 D2 の限界)。
+    await notifyUser(
+      { user: starter },
+      [
+        `🎤 インタビュー(${payload.person} × ${payload.topic})の文字起こし PR を作成しました: ${pr.url}`,
+        `原本: \`${path}\``,
+        "内容を確認して、この DM に 👍 を付けるとマージできます。マージ後は夜間の extractor が複数のナレッジ記事に自動分割します。",
+      ].join("\n"),
+      log,
+    );
     deps.store.markActionDone(actionId);
     log.info({ pr: pr.number, path }, "interview session PR created");
   } catch (err) {
@@ -232,10 +242,13 @@ async function processSession(
     }
     if (isTransient(err)) {
       log.warn({ err }, "interview session transient failure; will retry");
-      return; // pending を残す
+      // pending は残る = 自動再試行される(ADR-0030 D3)。連投しないよう 1日1回だけ伝える。
+      await notifyFailure(TRANSIENT_RETRY_MESSAGE);
+      return;
     }
     // 想定外は pending を残しつつログ(次回 kick で再試行。連続失敗は運用ログで気づく)。
     log.error({ err }, "interview session processing failed");
+    await notifyFailure(permanentFailureMessage(err));
   }
 }
 

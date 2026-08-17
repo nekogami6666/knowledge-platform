@@ -165,13 +165,20 @@ function fakeMessage(
     attachments?: VoiceAttachmentMeta[];
     isVoiceMessage?: boolean;
   } = {},
-): { message: Message; replies: string[]; reactions: string[] } {
+): { message: Message; replies: string[]; reactions: string[]; dms: string[] } {
   const replies: string[] = [];
   const reactions: string[] = [];
+  const dms: string[] = [];
   const atts = over.attachments ?? [audio()];
   const message = {
     id: "MSG1",
-    author: { id: "U1", bot: over.authorBot ?? false },
+    author: {
+      id: "U1",
+      bot: over.authorBot ?? false,
+      send: async (s: string) => {
+        dms.push(s);
+      },
+    },
     guildId: over.guildId !== undefined ? over.guildId : "G1",
     channelId: over.channelId ?? "VC1",
     channel: {
@@ -190,7 +197,7 @@ function fakeMessage(
       reactions.push(e);
     },
   };
-  return { message: message as unknown as Message, replies, reactions };
+  return { message: message as unknown as Message, replies, reactions, dms };
 }
 
 describe("handleVoiceMemo", () => {
@@ -251,14 +258,26 @@ describe("handleVoiceMemo", () => {
     expect(queued).toHaveLength(0);
   });
 
-  it("例外は封じ込めてログに残す(Gateway リスナを落とさない)", async () => {
+  it("例外は封じ込めつつ ⚠️ と理由を本人に返す(ADR-0030 D3)", async () => {
     const { logger, errors } = fakeLogger();
     const { store } = fakeStore({ queueThrows: true });
-    const { message } = fakeMessage();
+    const { message, reactions, dms } = fakeMessage();
     await expect(
       handleVoiceMemo(message, { logger, channels: CHANNELS, store, voice: VOICE }),
     ).resolves.toBeUndefined();
     expect(errors).toHaveLength(1);
+    expect(reactions).toEqual(["⚠️"]); // ✅ は付かない(受け付けていない)
+    expect(dms).toEqual(["処理できませんでした: db closed"]);
+  });
+
+  it("受付判定を通らない投稿の例外では通知しない(無関係な人を驚かせない)", async () => {
+    const { logger } = fakeLogger();
+    const { store } = fakeStore();
+    const { message, dms, replies } = fakeMessage({ channelId: "OTHER" });
+    // 専用チャンネル外 → 判定で落ちるため、その後の例外通知経路には入らない。
+    await handleVoiceMemo(message, { logger, channels: CHANNELS, store, voice: VOICE });
+    expect(dms).toEqual([]);
+    expect(replies).toEqual([]);
   });
 });
 

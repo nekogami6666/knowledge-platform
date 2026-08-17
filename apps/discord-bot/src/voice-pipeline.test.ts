@@ -5,6 +5,7 @@ import type { PromptStore } from "@stratum/llm";
 import { LlmError, type Transcriber } from "@stratum/llm";
 import type { Logger } from "pino";
 import { describe, expect, it, vi } from "vitest";
+import { TRANSIENT_RETRY_MESSAGE } from "./ack.js";
 import type { CaptureCandidate, DraftSearchFn } from "./capture.js";
 import type { OpsConfig } from "./config.js";
 import type { BotStore, PendingAction } from "./db.js";
@@ -67,12 +68,20 @@ function fakeLogger(): { logger: Logger; errors: unknown[]; warns: unknown[] } {
 
 function fakeStore(actions: PendingAction[]): { store: BotStore; done: string[] } {
   const done: string[] = [];
+  const rateCounts = new Map<string, number>();
   const store = {
     listPendingActions: vi.fn((type?: string) =>
       actions.filter((a) => type === undefined || a.type === type),
     ),
     markActionDone: vi.fn((id: string) => {
       done.push(id);
+    }),
+    // 失敗通知の 1日1回抑制(ADR-0030 D3)。テストでは 1 回だけ通す実挙動を再現する。
+    hitRateLimit: vi.fn((subject: string, kind: string, window: string, limit: number) => {
+      const key = `${subject}|${kind}|${window}`;
+      const count = (rateCounts.get(key) ?? 0) + 1;
+      rateCounts.set(key, count);
+      return { count, allowed: count <= limit };
     }),
   };
   return { store: store as unknown as BotStore, done };
@@ -113,10 +122,12 @@ function fakeMessenger(): {
   messenger: VoicePipelineDeps["messenger"];
   replies: string[];
   dms: string[];
+  reactions: string[];
   dmThrows?: boolean;
 } {
   const replies: string[] = [];
   const dms: string[] = [];
+  const reactions: string[] = [];
   const messenger = {
     reply: async (_c: string, _m: string, content: string) => {
       replies.push(content);
@@ -124,8 +135,11 @@ function fakeMessenger(): {
     dm: async (_u: string, content: string) => {
       dms.push(content);
     },
+    react: async (_c: string, _m: string, emoji: string) => {
+      reactions.push(emoji);
+    },
   };
-  return { messenger, replies, dms };
+  return { messenger, replies, dms, reactions };
 }
 
 const candidate: CaptureCandidate = {
@@ -283,6 +297,35 @@ describe("processVoiceMemoQueue", () => {
     expect(done).toEqual(["ACT1"]);
   });
 
+  it("一時的失敗は ⏳ と「自動的に再試行します」を返して pending を残す(ADR-0030 D3)", async () => {
+    const { store, done } = fakeStore([pendingAction()]);
+    const { gh } = fakeGh({ createThrows: new LlmError("OVERLOADED", "529") });
+    const { messenger, dms, reactions } = fakeMessenger();
+    await processVoiceMemoQueue(mkDeps({ store, gh, messenger }));
+    expect(done).toEqual([]); // pending のまま(次回 kick で再試行)
+    expect(reactions).toEqual(["⏳"]);
+    expect(dms).toEqual([TRANSIENT_RETRY_MESSAGE]);
+  });
+
+  it("同じ処理の失敗通知は 1日1回だけ(再試行のたびに連投しない)", async () => {
+    const { store } = fakeStore([pendingAction()]);
+    const { gh } = fakeGh({ createThrows: new LlmError("OVERLOADED", "529") });
+    const { messenger, dms } = fakeMessenger();
+    await processVoiceMemoQueue(mkDeps({ store, gh, messenger }));
+    await processVoiceMemoQueue(mkDeps({ store, gh, messenger }));
+    expect(dms).toHaveLength(1);
+  });
+
+  it("想定外の恒久失敗は ⚠️ と理由を返す(無言で pending に沈めない)", async () => {
+    const { store, done } = fakeStore([pendingAction()]);
+    const { gh } = fakeGh({ createThrows: new Error("boom") });
+    const { messenger, dms, reactions } = fakeMessenger();
+    await processVoiceMemoQueue(mkDeps({ store, gh, messenger }));
+    expect(done).toEqual([]);
+    expect(reactions).toEqual(["⚠️"]);
+    expect(dms).toEqual(["処理できませんでした: boom"]);
+  });
+
   it("壊れた payload は done にして飛ばす(再試行しても直らない)", async () => {
     const broken: PendingAction = { ...pendingAction(), payloadJson: JSON.stringify({ x: 1 }) };
     const { store, done } = fakeStore([broken]);
@@ -292,7 +335,7 @@ describe("processVoiceMemoQueue", () => {
     expect(done).toEqual(["ACT1"]);
   });
 
-  it("DM 失敗(受信拒否)は握りつぶして done(スレッド返信は済んでいる)", async () => {
+  it("DM 失敗(受信拒否)はスレッド返信にフォールバックして done(ADR-0030 D2)", async () => {
     const { store, done } = fakeStore([pendingAction()]);
     const replies: string[] = [];
     const messenger = {
@@ -304,7 +347,10 @@ describe("processVoiceMemoQueue", () => {
       },
     };
     await processVoiceMemoQueue(mkDeps({ store, messenger }));
-    expect(replies).toHaveLength(1);
+    // 1本目 = 「こう記録しました」、2本目 = DM が届かなかった旨を添えた PR 案内。
+    expect(replies).toHaveLength(2);
+    expect(replies[1]).toContain("DM を送れませんでした");
+    expect(replies[1]).toContain("https://github.com/org/knowledge-base/pull/7");
     expect(done).toEqual(["ACT1"]);
   });
 });

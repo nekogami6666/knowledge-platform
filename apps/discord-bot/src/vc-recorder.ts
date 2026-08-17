@@ -235,8 +235,13 @@ export function createVcRecorderWatcher(deps: VcRecorderDeps): VcRecorderWatcher
         log.error({ err, meetingId: session.record.meeting_id, cause }, "vc finalize failed");
         try {
           await deps.dm(session.ownerId, RECORDING_FAILED_MESSAGE);
-        } catch {
-          // DM 不達まで追わない(ログ済み)。
+        } catch (dmErr) {
+          // VC 入室には元メッセージが無く、DM 以外の通知先が無い(ADR-0030 D2 の限界)。
+          // 本人には届かないため、管理者が気づけるよう warn で残す。
+          log.warn(
+            { err: dmErr, ownerId: session.ownerId },
+            "録音失敗の DM を送れませんでした(本人に届いていません)",
+          );
         }
       }
     }

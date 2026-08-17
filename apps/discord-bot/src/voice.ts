@@ -9,6 +9,7 @@ import { randomUUID } from "node:crypto";
 import { type Message, MessageFlags } from "discord.js";
 import type { Logger } from "pino";
 import { z } from "zod";
+import { ackReaction, notifyUser, permanentFailureMessage } from "./ack.js";
 import { jstDayKey } from "./capture.js";
 import {
   type ChannelGateInput,
@@ -151,6 +152,9 @@ export interface VoiceMemoDeps {
  * 例外は封じ込め(catch → log)。ここで throw すると Gateway リスナが不安定になる。
  */
 export async function handleVoiceMemo(message: Message, deps: VoiceMemoDeps): Promise<void> {
+  // 受付判定を通過した後の失敗だけを本人に返す(ADR-0030 D3)。判定前の例外は
+  // 「この機能と無関係な投稿」でも起きうるため、無関係な人に通知しない。
+  let accepted = false;
   try {
     const voice = deps.voice;
     if (voice === undefined || voice.channel_id === null) return; // 機能 OFF
@@ -177,6 +181,7 @@ export async function handleVoiceMemo(message: Message, deps: VoiceMemoDeps): Pr
       return;
     }
 
+    accepted = true;
     const log = withCorrelation(deps.logger, `voice:${message.id}`);
     const now = deps.now?.() ?? new Date();
 
@@ -211,10 +216,17 @@ export async function handleVoiceMemo(message: Message, deps: VoiceMemoDeps): Pr
       state: "pending",
       createdAt: isoJst(),
     });
-    await message.react("✅"); // 受領 ack(ADR-0015 D5。文字起こし完了は別途スレッド返信)
+    // 受領 ack(ADR-0015 D5 / ADR-0030 D1。文字起こし完了は別途スレッド返信)。
+    // react 失敗(権限不足)でキュー投入まで巻き戻さない — ackReaction が warn で吸収する。
+    await ackReaction(message, "accepted", log);
     log.info({ authorId: message.author.id, size: decision.attachment.size }, "voice memo queued");
   } catch (err) {
-    withCorrelation(deps.logger, "voice-memo").error({ err }, "voice memo capture failed");
+    const log = withCorrelation(deps.logger, "voice-memo");
+    log.error({ err }, "voice memo capture failed");
+    // ADR-0030 D3: 受け付けたのにキューへ積めなかったことを本人に返す(無言だと届いたと誤解する)。
+    if (!accepted) return;
+    await ackReaction(message, "failed", log);
+    await notifyUser({ user: message.author, message }, permanentFailureMessage(err), log);
   }
 }
 
@@ -305,6 +317,9 @@ export function voiceCorrectionDecision(input: VoiceCorrectionInput): VoiceCorre
  * 例外は封じ込め(catch → log)。
  */
 export async function handleVoiceCorrection(message: Message, deps: VoiceMemoDeps): Promise<void> {
+  // 訂正と判定できた後の失敗だけを返す(削除済みメッセージへの返信など、無関係な返信でも
+  // fetchReference は throw するため・ADR-0030 D3)。
+  let accepted = false;
   try {
     if (message.author.bot) return;
     const referenceId = message.reference?.messageId;
@@ -323,6 +338,7 @@ export async function handleVoiceCorrection(message: Message, deps: VoiceMemoDep
     });
     if (!decision.capture) return;
 
+    accepted = true;
     const log = withCorrelation(deps.logger, `voice-correction:${message.id}`);
     const payload: VoiceCorrectionPayload = {
       originalMessageId: decision.originalMessageId,
@@ -341,12 +357,13 @@ export async function handleVoiceCorrection(message: Message, deps: VoiceMemoDep
       state: "pending",
       createdAt: isoJst(),
     });
-    await message.react("✅"); // 受領 ack(反映完了は別途返信)
+    await ackReaction(message, "accepted", log); // 受領 ack(反映完了は別途返信)
     log.info({ correctorId: message.author.id, pr: decision.prNumber }, "voice correction queued");
   } catch (err) {
-    withCorrelation(deps.logger, "voice-correction").error(
-      { err },
-      "voice correction capture failed",
-    );
+    const log = withCorrelation(deps.logger, "voice-correction");
+    log.error({ err }, "voice correction capture failed");
+    if (!accepted) return;
+    await ackReaction(message, "failed", log);
+    await notifyUser({ user: message.author, message }, permanentFailureMessage(err), log);
   }
 }

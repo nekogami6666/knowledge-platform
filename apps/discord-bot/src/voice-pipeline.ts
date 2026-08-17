@@ -29,16 +29,19 @@ import type {
   PromptStore,
   Transcriber,
 } from "@stratum/llm";
-import {
-  LlmError,
-  loadPrompt,
-  nullUsageRecorder,
-  RETRYABLE_LLM_CODES,
-  runAgentSearch,
-  withRetry,
-} from "@stratum/llm";
+import { loadPrompt, nullUsageRecorder, runAgentSearch, withRetry } from "@stratum/llm";
 import type { Logger } from "pino";
 import { z } from "zod";
+import {
+  type AckMessage,
+  ackReaction,
+  DM_BLOCKED_NOTICE,
+  type DmTarget,
+  noticeAllowedOnce,
+  notifyUser,
+  permanentFailureMessage,
+  TRANSIENT_RETRY_MESSAGE,
+} from "./ack.js";
 import {
   buildCaptureEntry,
   type CaptureLlmDeps,
@@ -51,6 +54,7 @@ import type { OpsConfig } from "./config.js";
 import type { BotStore } from "./db.js";
 import { withCorrelation } from "./logger.js";
 import type { MembersLoader } from "./members.js";
+import { isTransient } from "./transient.js";
 import {
   VOICE_CORRECTION_ACTION_TYPE,
   VOICE_MEMO_ACTION_TYPE,
@@ -68,6 +72,11 @@ export function voiceMemoBranch(messageId: string): string {
 export interface VoiceMessenger {
   reply(channelId: string, messageId: string, content: string): Promise<void>;
   dm(userId: string, content: string): Promise<void>;
+  /**
+   * 元メッセージへの ack リアクション(ADR-0030 D1)。未実装の配線では ack を諦める
+   * (通知本体は reply/dm で届くため、任意にして既存の呼び出し側を壊さない)。
+   */
+  react?(channelId: string, messageId: string, emoji: string): Promise<void>;
 }
 
 export interface VoicePipelineDeps {
@@ -97,10 +106,8 @@ export interface VoicePipelineDeps {
   now?: () => Date;
 }
 
-/** 一時的(リトライ可能)な失敗か。pending を残す判定(D5。interview-pipeline も同じ分類を使う)。 */
-export function isTransient(err: unknown): boolean {
-  return err instanceof LlmError && RETRYABLE_LLM_CODES.includes(err.code);
-}
+/** 一時的(リトライ可能)な失敗か。pending を残す判定(D5)。実体は transient.ts(capture と共有)。 */
+export { isTransient };
 
 const TRANSCRIBE_FAILED_MESSAGE = "音声の文字起こしに失敗しました。もう一度投稿してみてください。";
 const EMPTY_TRANSCRIPT_MESSAGE =
@@ -168,6 +175,28 @@ async function processOne(
     "source" in payload
       ? deps.messenger.dm(payload.authorId, text)
       : deps.messenger.reply(payload.channelId, payload.messageId, text);
+  // ADR-0030 D1/D2 の通知先 seam。VC 録音は元メッセージが無いため DM のみ(ack もできない)。
+  const dmTarget: DmTarget = { send: (text: string) => deps.messenger.dm(payload.authorId, text) };
+  const ackTarget: AckMessage | undefined =
+    "source" in payload
+      ? undefined
+      : {
+          react: async (emoji: string) => {
+            await deps.messenger.react?.(payload.channelId, payload.messageId, emoji);
+          },
+          reply: async (text: string) => {
+            await deps.messenger.reply(payload.channelId, payload.messageId, text);
+          },
+        };
+  const notifyTarget =
+    ackTarget === undefined ? { user: dmTarget } : { user: dmTarget, message: ackTarget };
+  /** 失敗をユーザーへ返す(ADR-0030 D3)。同じ処理の連投は 1日1回に抑える。 */
+  const notifyFailure = async (text: string, kind: "pending" | "failed"): Promise<void> => {
+    const dayKey = jstDayKey(deps.now?.() ?? new Date());
+    if (!noticeAllowedOnce(deps.store, `action:${actionId}`, "failure-notice", dayKey)) return;
+    if (ackTarget !== undefined) await ackReaction(ackTarget, kind, log);
+    await notifyUser(notifyTarget, text, log);
+  };
 
   try {
     // 冪等: 同一メモの既存 PR(open/closed 問わず)があれば作り直さない
@@ -339,24 +368,23 @@ async function processOne(
         ].join("\n"),
       );
     }
-    try {
-      await deps.messenger.dm(
-        payload.authorId,
-        isVc
-          ? [
-              `🎙️ VC 録音をナレッジ化する PR を作成しました: ${pr.url}`,
-              `記録${excerptLine}`,
-              `原本: \`${transcriptPath}\``,
-              "内容を確認して、この DM に 👍 を付けるとマージされます。修正したい場合は PR を直接編集してください。",
-            ].join("\n")
-          : [
-              `🎙️ 音声メモをナレッジ化する PR を作成しました: ${pr.url}`,
-              "内容を確認して、この DM に 👍 を付けるとマージされます。修正したい場合は PR を直接編集してください。",
-            ].join("\n"),
-      );
-    } catch (err) {
-      log.warn({ err }, "DM 送信に失敗(受信拒否設定の可能性)");
-    }
+    // DM が閉じていても PR の存在は伝える(ADR-0030 D2。VC 録音は返信先が無いため DM のみ)。
+    await notifyUser(
+      notifyTarget,
+      isVc
+        ? [
+            `🎙️ VC 録音をナレッジ化する PR を作成しました: ${pr.url}`,
+            `記録${excerptLine}`,
+            `原本: \`${transcriptPath}\``,
+            "内容を確認して、この DM に 👍 を付けるとマージされます。修正したい場合は PR を直接編集してください。",
+          ].join("\n")
+        : [
+            `🎙️ 音声メモをナレッジ化する PR を作成しました: ${pr.url}`,
+            "内容を確認して、この DM に 👍 を付けるとマージされます。修正したい場合は PR を直接編集してください。",
+          ].join("\n"),
+      log,
+      { fallbackPrefix: DM_BLOCKED_NOTICE },
+    );
     deps.store.markActionDone(actionId);
     log.info({ pr: pr.number, id }, "voice memo PR created");
   } catch (err) {
@@ -368,10 +396,13 @@ async function processOne(
     }
     if (isTransient(err)) {
       log.warn({ err }, "voice memo transient failure; will retry");
-      return; // pending を残す
+      // pending は残る = 自動再試行される(ADR-0030 D3)。連投しないよう 1日1回だけ伝える。
+      await notifyFailure(TRANSIENT_RETRY_MESSAGE, "pending");
+      return;
     }
     // 想定外は pending を残しつつログ(次回 kick で再試行。連続失敗は運用ログで気づく)。
     log.error({ err }, "voice memo processing failed");
+    await notifyFailure(permanentFailureMessage(err), "failed");
   }
 }
 

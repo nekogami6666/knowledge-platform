@@ -1,12 +1,13 @@
 import type { GhClient } from "@stratum/gh-client";
 import { GhClientError } from "@stratum/gh-client";
-import type { PromptStore } from "@stratum/llm";
+import { LlmError, type PromptStore } from "@stratum/llm";
 import type { MessageReaction, User } from "discord.js";
 import type { Logger } from "pino";
 import { describe, expect, it, vi } from "vitest";
 import {
   buildCaptureEntry,
   buildCapturePrompt,
+  CAPTURE_TRANSIENT_MESSAGE,
   type CaptureCandidate,
   type CaptureDeps,
   captureBranch,
@@ -21,7 +22,7 @@ import {
   triageResultSchema,
 } from "./capture.js";
 import type { ChannelGateInput, ChannelsConfig } from "./config.js";
-import type { BotStore } from "./db.js";
+import { type BotStore, createMemoryStore } from "./db.js";
 
 const channels = (over: Partial<ChannelsConfig> = {}): ChannelsConfig => ({
   permanent_exclude: [],
@@ -272,12 +273,23 @@ function fakeContext(
     channelId?: string;
     userBot?: boolean;
     visible?: boolean;
+    dmThrows?: boolean;
+    /** 本文なし(画像・添付のみのメッセージ)。 */
+    noText?: boolean;
   } = {},
-): { reaction: MessageReaction; user: User; dms: string[] } {
+): {
+  reaction: MessageReaction;
+  user: User;
+  dms: string[];
+  reactions: string[];
+  replies: string[];
+} {
   const dms: string[] = [];
+  const reactions: string[] = [];
+  const replies: string[] = [];
   const mkMsg = (id: string, content: string, ts: number) => ({
     id,
-    content,
+    content: over.noText === true ? "" : content,
     createdTimestamp: ts,
     author: { username: "yamada", bot: false },
   });
@@ -287,6 +299,12 @@ function fakeContext(
     guildId: over.guildId !== undefined ? over.guildId : "G1",
     channelId: over.channelId ?? "CH1",
     url: URL,
+    react: async (e: string) => {
+      reactions.push(e);
+    },
+    reply: async (c: string) => {
+      replies.push(c);
+    },
     channel: {
       isThread: () => false,
       isDMBased: () => false,
@@ -312,6 +330,7 @@ function fakeContext(
     bot: over.userBot ?? false,
     id: "U1",
     send: async (s: string) => {
+      if (over.dmThrows === true) throw new Error("Cannot send messages to this user");
       dms.push(s);
     },
   };
@@ -319,6 +338,8 @@ function fakeContext(
     reaction: reaction as unknown as MessageReaction,
     user: user as unknown as User,
     dms,
+    reactions,
+    replies,
   };
 }
 
@@ -364,9 +385,10 @@ describe("handleLightbulb (§6.4 ③-a)", () => {
     const { logger } = fakeLogger();
     const { store } = fakeStore();
     const { gh, created } = fakeGh();
-    const { reaction, user, dms } = fakeContext();
+    const { reaction, user, dms, reactions } = fakeContext();
     await handleLightbulb(reaction, user, mkDeps(logger, store, gh));
     expect(created).toHaveLength(1);
+    expect(reactions).toEqual(["✅"]); // 受理 ack(ADR-0030 D1)
     const pr = created[0] as { head: string; repo: string; files: { path: string }[] };
     expect(pr.repo).toBe("org/knowledge-base");
     expect(pr.head).toBe("capture/MSG1");
@@ -378,16 +400,28 @@ describe("handleLightbulb (§6.4 ③-a)", () => {
     expect(dms[0]).toContain("👍");
   });
 
-  it("triage 不成立なら PR は作らず、理由を DM で返す(ADR-0029 D4)", async () => {
+  it("triage 不成立なら PR は作らず、⚠️ と理由を返す(ADR-0029 D4 / ADR-0030 D1)", async () => {
     const { logger } = fakeLogger();
     const { store } = fakeStore();
     const { gh, created } = fakeGh();
-    const { reaction, user, dms } = fakeContext();
+    const { reaction, user, dms, reactions } = fakeContext();
     await handleLightbulb(reaction, user, mkDeps(logger, store, gh, { triageSearch: triageNo }));
     expect(created).toHaveLength(0);
+    expect(reactions).toEqual(["⚠️"]);
     expect(dms).toHaveLength(1);
     expect(dms[0]).toContain("見送りました");
     expect(dms[0]).toContain("付け直す"); // どう直せば通るかの案内
+  });
+
+  it("DM が閉じていても元メッセージへの返信で理由が届く(ADR-0030 D2)", async () => {
+    const { logger } = fakeLogger();
+    const { store } = fakeStore();
+    const { gh } = fakeGh();
+    const { reaction, user, dms, replies } = fakeContext({ dmThrows: true });
+    await handleLightbulb(reaction, user, mkDeps(logger, store, gh, { triageSearch: triageNo }));
+    expect(dms).toHaveLength(0);
+    expect(replies).toHaveLength(1);
+    expect(replies[0]).toContain("見送りました");
   });
 
   it("💡 以外・bot・DM・未許可チャンネルは gh に触れない", async () => {
@@ -406,40 +440,71 @@ describe("handleLightbulb (§6.4 ③-a)", () => {
     }
   });
 
-  it("機能 OFF(gh なし / kb_repo null / promptStore なし)は完全 no-op", async () => {
+  it("機能 OFF(gh なし / kb_repo null / promptStore なし)は PR を作らず案内を返す(ADR-0030 D4)", async () => {
     const { logger } = fakeLogger();
-    const { store } = fakeStore();
-    const { gh } = fakeGh();
+    const { gh, list } = fakeGh();
     for (const over of [
       { gh: undefined },
       { ops: { channel_id: "OPS", kb_repo: null } },
       { promptStore: undefined },
     ] as Partial<CaptureDeps>[]) {
-      const { reaction, user, dms } = fakeContext();
+      // 抑制(1日1回)を実際に数えるため memory store を使う。
+      const store = createMemoryStore();
+      const { reaction, user, dms, reactions } = fakeContext();
       await handleLightbulb(reaction, user, { ...mkDeps(logger, store, gh), ...over });
-      expect(dms).toHaveLength(0);
+      expect(list).not.toHaveBeenCalled();
+      expect(reactions).toEqual(["⚠️"]);
+      expect(dms).toHaveLength(1);
+      expect(dms[0]).toContain("設定が未完了");
     }
   });
 
-  it("日次上限超過は DM 案内のみ(PR 無し・§6.4 乱用対策)", async () => {
+  it("機能 OFF の案内は同一ユーザー・同一日で 1 回だけ(連投を抑制する)", async () => {
+    const { logger } = fakeLogger();
+    const store = createMemoryStore();
+    const { gh } = fakeGh();
+    const deps = { ...mkDeps(logger, store, gh), gh: undefined };
+    const first = fakeContext();
+    await handleLightbulb(first.reaction, first.user, deps);
+    const second = fakeContext();
+    await handleLightbulb(second.reaction, second.user, deps);
+    expect(first.dms).toHaveLength(1);
+    expect(second.dms).toHaveLength(0);
+    expect(second.reactions).toEqual([]);
+  });
+
+  it("日次上限超過は ⚠️ + 案内のみ(PR 無し・§6.4 乱用対策)", async () => {
     const { logger } = fakeLogger();
     const { store } = fakeStore({ rateAllowed: false });
     const { gh, created } = fakeGh();
-    const { reaction, user, dms } = fakeContext();
+    const { reaction, user, dms, reactions } = fakeContext();
     await handleLightbulb(reaction, user, mkDeps(logger, store, gh));
     expect(created).toHaveLength(0);
+    expect(reactions).toEqual(["⚠️"]);
     expect(dms[0]).toContain("上限");
   });
 
-  it("既存 PR(同 head)があれば再作成せず DM 案内(冪等)", async () => {
+  it("既存 PR(同 head)があれば再作成せず ✅ + 案内(冪等)", async () => {
     const { logger } = fakeLogger();
     const { store } = fakeStore();
     const { gh, created } = fakeGh({ existingHead: "capture/MSG1" });
-    const { reaction, user, dms } = fakeContext();
+    const { reaction, user, dms, reactions } = fakeContext();
     await handleLightbulb(reaction, user, mkDeps(logger, store, gh));
     expect(created).toHaveLength(0);
+    expect(reactions).toEqual(["✅"]);
     expect(dms[0]).toContain("既に");
     expect(dms[0]).toContain("pull/5");
+  });
+
+  it("本文なし(画像のみ)の 💡 も無言にしない(⚠️ + 理由・ADR-0030 D1)", async () => {
+    const { logger } = fakeLogger();
+    const { store } = fakeStore();
+    const { gh, created } = fakeGh();
+    const { reaction, user, dms, reactions } = fakeContext({ noText: true });
+    await handleLightbulb(reaction, user, mkDeps(logger, store, gh));
+    expect(created).toHaveLength(0);
+    expect(reactions).toEqual(["⚠️"]);
+    expect(dms[0]).toContain("本文がありません");
   });
 
   it("createPullRequest の CONFLICT(並行 💡)は warn で封じ込め", async () => {
@@ -454,14 +519,28 @@ describe("handleLightbulb (§6.4 ③-a)", () => {
     expect(errors).toHaveLength(0);
   });
 
-  it("その他の throw は log.error で封じ込め(リスナを落とさない)", async () => {
+  it("その他の throw は log.error で封じ込めつつ理由を返す(ADR-0030 D3)", async () => {
     const { logger, errors } = fakeLogger();
     const { store } = fakeStore();
     const { gh } = fakeGh({ createThrows: new Error("boom") });
-    const { reaction, user } = fakeContext();
+    const { reaction, user, dms, reactions } = fakeContext();
     await expect(
       handleLightbulb(reaction, user, mkDeps(logger, store, gh)),
     ).resolves.toBeUndefined();
     expect(errors).toHaveLength(1);
+    expect(reactions).toEqual(["⚠️"]);
+    expect(dms[0]).toBe("処理できませんでした: boom");
+  });
+
+  it("一時的な失敗は warn + 「付け直してください」(capture に再試行キューは無い・D3)", async () => {
+    const { logger, errors, warns } = fakeLogger();
+    const { store } = fakeStore();
+    const { gh } = fakeGh({ createThrows: new LlmError("RATE_LIMITED", "429") });
+    const { reaction, user, dms, reactions } = fakeContext();
+    await handleLightbulb(reaction, user, mkDeps(logger, store, gh));
+    expect(errors).toHaveLength(0);
+    expect(warns.length).toBeGreaterThan(0);
+    expect(reactions).toEqual(["⚠️"]);
+    expect(dms[0]).toBe(CAPTURE_TRANSIENT_MESSAGE);
   });
 });
