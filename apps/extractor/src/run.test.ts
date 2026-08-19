@@ -168,6 +168,55 @@ describe("runExtractor", () => {
     expect(r.domains.reusedDomainCount).toBe(0);
   });
 
+  it("PR body に出典別のエントリ一覧が載り、confidence low は ⚠️ 付き(㉞ A4)", async () => {
+    const gh = makeGh();
+    const twoLearnings: ExtractionResult = {
+      decisions: [],
+      learnings: [
+        {
+          kind: "learning",
+          title: "湿度しきい値",
+          body: "40%RH 以下",
+          entryType: "fact",
+          domain: "hardware",
+          people: ["yamada"],
+          tags: [],
+          confidence: "high",
+          slug: "humidity",
+        },
+        {
+          kind: "learning",
+          title: "配線の目安",
+          body: "b",
+          entryType: "fact",
+          domain: "electronics",
+          people: ["yamada"],
+          tags: [],
+          confidence: "low",
+          slug: "wiring",
+        },
+      ],
+      openQuestions: [],
+    };
+    await runExtractor(
+      makeDeps({
+        gh,
+        extractDeps: {
+          promptStore: { read: async () => "---\nrole: standard\n---\nR" },
+          search: async () => ({
+            value: twoLearnings,
+            usage: { inputTokens: 1, outputTokens: 1 },
+          }),
+        },
+      }),
+    );
+    const body = vi.mocked(gh.createPullRequest).mock.calls[0]?.[0]?.body ?? "";
+    expect(body).toContain("## 収録エントリ");
+    expect(body).toContain("### 出典: 2026/06/x.md");
+    expect(body).toContain("- 湿度しきい値(hardware)");
+    expect(body).toContain("- ⚠️ 配線の目安(electronics)"); // low は重点レビューの印
+  });
+
   it("既存 domain に載る新規 learning は再利用としてカウント", async () => {
     const r = await runExtractor(
       makeDeps({ readdir: async () => [{ name: "hardware", isDirectory: () => true }] }),

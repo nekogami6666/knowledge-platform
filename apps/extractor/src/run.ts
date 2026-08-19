@@ -184,6 +184,56 @@ async function loadNameResolver(
   }
 }
 
+/** PR body のエントリ一覧 1 行分(㉞ A4。レビューが diff を上から読まなくて済むように)。 */
+interface EntryListing {
+  action: Exclude<MaterializeAction, "skip">;
+  kind: "decision" | "learning";
+  title: string;
+  /** learning のみ(decision は「決定」表示)。 */
+  domain?: string;
+  confidence?: string;
+  sourcePath: string;
+}
+
+/** 一覧の行数上限(65536 字の GitHub body 上限への防御。エントリ cap 導入後は実質届かない)。 */
+const LISTING_MAX_ROWS = 80;
+
+/**
+ * 出典ファイル別 → domain 別のエントリ一覧を 1 つの markdown ブロックとして組む(㉞ A4)。
+ * confidence low は ⚠️ を付けて重点レビュー対象を示す(guards の安全フラグも low 強制なのでここに乗る)。
+ * 戻り値は単一文字列(buildPrBody の空行フィルタに内部の空行を消されないため)。
+ */
+function buildEntryListing(listing: readonly EntryListing[]): string {
+  if (listing.length === 0) return "";
+  const byPath = new Map<string, EntryListing[]>();
+  for (const e of listing) {
+    const arr = byPath.get(e.sourcePath) ?? [];
+    arr.push(e);
+    byPath.set(e.sourcePath, arr);
+  }
+  const lines: string[] = ["## 収録エントリ"];
+  let rows = 0;
+  for (const [path, entries] of byPath) {
+    lines.push("", `### 出典: ${path}`, "");
+    const sorted = [...entries].sort((a, b) => (a.domain ?? "").localeCompare(b.domain ?? ""));
+    for (const e of sorted) {
+      if (rows >= LISTING_MAX_ROWS) {
+        lines.push(`- …他 ${listing.length - rows} 件(diff を参照)`);
+        return lines.join("\n");
+      }
+      const labels = [
+        e.action === "append" ? "出典追記" : e.action === "supersede" ? "矛盾更新" : "",
+        e.kind === "decision" ? "決定" : (e.domain ?? ""),
+      ]
+        .filter((s) => s.length > 0)
+        .join("・");
+      lines.push(`- ${e.confidence === "low" ? "⚠️ " : ""}${e.title}(${labels})`);
+      rows += 1;
+    }
+  }
+  return lines.join("\n");
+}
+
 function buildPrBody(
   counts: NotifyCounts,
   guards: GuardTotals,
@@ -191,6 +241,7 @@ function buildPrBody(
   people: readonly string[],
   skippedFiles: readonly string[],
   deferredCount: number,
+  listing: readonly EntryListing[],
 ): string {
   const newDomains = domains.newDomains.length > 0 ? domains.newDomains.join(", ") : "なし";
   return [
@@ -215,6 +266,7 @@ function buildPrBody(
     deferredCount > 0 ? `- 次回持ち越し(上限超過): ${deferredCount} 件` : "",
     skippedFiles.length > 0 ? `- ⚠️ 抽出失敗で skip(次回再試行): ${skippedFiles.join(", ")}` : "",
     people.length > 0 ? `関係者: ${people.join(", ")}` : "",
+    buildEntryListing(listing),
   ]
     .filter((l) => l.length > 0)
     .join("\n");
@@ -367,6 +419,7 @@ export async function runExtractor(deps: RunDeps): Promise<RunSummary> {
   const counts = emptyCounts();
   const guardTotals = emptyGuards();
   const people = new Set<string>();
+  const entryListing: EntryListing[] = []; // PR body の一覧(㉞ A4)
   const files: FileChange[] = [];
   // domain 再利用(§2-C): run 開始時の既存 domain を起点に、materialize した新設 domain を逐次
   // 追記して次の議事録の extract へ渡す(clone への書き込みはループ後なので in-memory で追う)。
@@ -538,6 +591,16 @@ export async function runExtractor(deps: RunDeps): Promise<RunSummary> {
         bump(counts, change.action);
         files.push(...change.files);
         addPeople(people, c);
+        if (change.action !== "skip") {
+          entryListing.push({
+            action: change.action,
+            kind: c.kind,
+            title: c.title,
+            sourcePath: path,
+            ...(c.kind === "learning" ? { domain: c.domain } : {}),
+            confidence: c.confidence,
+          });
+        }
         if (c.kind === "learning" && change.action === "new") {
           recordLearningDomain(c.domain, domainSet, domains, logger);
         }
@@ -673,7 +736,15 @@ export async function runExtractor(deps: RunDeps): Promise<RunSummary> {
     head: buildBranch(runKey),
     base: config.base_branch,
     title,
-    body: buildPrBody(counts, guardTotals, domains, [...people], skippedFiles, deferredCount),
+    body: buildPrBody(
+      counts,
+      guardTotals,
+      domains,
+      [...people],
+      skippedFiles,
+      deferredCount,
+      entryListing,
+    ),
     files,
   });
   await deps.notifier.notifyPrCreated({
