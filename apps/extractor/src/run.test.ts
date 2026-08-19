@@ -217,6 +217,74 @@ describe("runExtractor", () => {
     expect(body).toContain("- ⚠️ 配線の目安(electronics)"); // low は重点レビューの印
   });
 
+  it("LLM 出力の人名を members.yaml で正規化し、集合名は関係者に載せない(ADR-0031)", async () => {
+    const gh = makeGh();
+    const membersYaml = [
+      "members:",
+      "  - name: Shoma Nagata",
+      "    github: shoma",
+      '    discord: "1"',
+      "  - name: Yoshimasa Muneishi",
+      "    github: yoshimuneco",
+      "    aliases: [宗石]",
+      '    discord: "2"',
+      "",
+    ].join("\n");
+    const mixedNames: ExtractionResult = {
+      decisions: [
+        {
+          kind: "decision",
+          title: "X の採用",
+          decision: "X を使う",
+          deciders: ["Nagata", "会議参加者"], // 姓のみ + 集合名(実運用 KB #38 で観測した形)
+          confidence: "high",
+          slug: "x",
+        },
+      ],
+      learnings: [
+        {
+          kind: "learning",
+          title: "湿度しきい値",
+          body: "b",
+          entryType: "fact",
+          domain: "hardware",
+          people: ["宗石"], // 漢字姓 → aliases で解決
+          tags: [],
+          confidence: "high",
+          slug: "humidity",
+        },
+      ],
+      openQuestions: [],
+    };
+    await runExtractor(
+      makeDeps({
+        gh,
+        readFile: async (p) => {
+          if (p === "/m/2026/06/x.md") return "# 会議\n参加者: Shoma Nagata\n本文";
+          if (p === "/kb/_meta/members.yaml") return membersYaml;
+          throw new Error(`ENOENT ${p}`);
+        },
+        extractDeps: {
+          promptStore: { read: async () => "---\nrole: standard\n---\nR" },
+          search: async () => ({ value: mixedNames, usage: { inputTokens: 1, outputTokens: 1 } }),
+        },
+      }),
+    );
+    const arg = vi.mocked(gh.createPullRequest).mock.calls[0]?.[0];
+    const body = arg?.body ?? "";
+    // 関係者欄: 正規名のみ(姓のみ・集合名は出ない)
+    expect(body).toContain("shoma");
+    expect(body).toContain("yoshimuneco");
+    expect(body).not.toContain("会議参加者");
+    expect(body).not.toContain("宗石");
+    // エントリ本体にも正規名が書かれる(deciders / people・ADR-0031 D3)
+    const dr = arg?.files.find((f) => f.path.startsWith("decisions/"));
+    expect(dr?.content).toContain("shoma");
+    expect(dr?.content).not.toContain("会議参加者");
+    const kb = arg?.files.find((f) => f.path.startsWith("knowledge/hardware/"));
+    expect(kb?.content).toContain("yoshimuneco");
+  });
+
   it("既存 domain に載る新規 learning は再利用としてカウント", async () => {
     const r = await runExtractor(
       makeDeps({ readdir: async () => [{ name: "hardware", isDirectory: () => true }] }),

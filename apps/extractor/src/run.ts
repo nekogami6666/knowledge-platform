@@ -18,10 +18,15 @@ import { checkDomainProximity, listDomains, type ReaddirFn } from "./domains.js"
 import { type ExtractDeps, extractFromMinutes } from "./extract.js";
 import { applyCandidateGuards } from "./guards.js";
 import type { Logger } from "./logger.js";
-import { type MaterializeAction, type MaterializeDeps, materializeOne } from "./materialize.js";
+import {
+  isValidPerson,
+  type MaterializeAction,
+  type MaterializeDeps,
+  materializeOne,
+} from "./materialize.js";
 import type { Notifier, NotifyCounts } from "./notify.js";
 import { materializeOpenQuestion } from "./open-question.js";
-import { buildNameResolver, parseParticipants } from "./participants.js";
+import { buildNameResolver, parseParticipants, resolvePeople } from "./participants.js";
 import { buildBranch, buildPrTitle, buildRunKey, findOpenExtractPr } from "./pr-title.js";
 import { type ReconcileDeps, reconcileCandidate } from "./reconcile.js";
 import type { RepoSyncer } from "./repos.js";
@@ -154,7 +159,9 @@ function bump(counts: NotifyCounts, action: MaterializeAction): void {
 
 function addPeople(people: Set<string>, c: DecisionCandidate | LearningCandidate): void {
   const names = c.kind === "decision" ? c.deciders : c.people;
-  for (const n of names) people.add(n);
+  // 集合名・非人物は関係者欄にも載せない(ADR-0031 D4。skip 候補も無条件にここへ来るため、
+  // 以前は「会議参加者」「全員」が通知の関係者に混入していた)。
+  for (const n of names) if (isValidPerson(n)) people.add(n);
 }
 
 /** ログ用の短い候補ラベル(skip 記録時に何が落ちたか分かるように)。 */
@@ -506,6 +513,23 @@ export async function runExtractor(deps: RunDeps): Promise<RunSummary> {
           demotedDecisions: guarded.demotedDecisions,
           safetyFlagged: guarded.safetyFlagged,
         });
+      }
+      // 人名の正規化(ADR-0031 D3): LLM 生出力の deciders/people を members.yaml 正規名に
+      // 揃える。ここが materialize・関係者欄・問い起票すべての上流一点(以前は LLM 生出力が
+      // 無加工で流れ、「宗石, Nagata」等の姓のみ表記が KB と通知に混入していた)。
+      // 解決不能は生名保持(外部出席者を消さない — ADR-0027 の判断を維持)。
+      if (resolveName !== undefined) {
+        extraction = {
+          ...extraction,
+          decisions: extraction.decisions.map((d) => ({
+            ...d,
+            deciders: resolvePeople(d.deciders, resolveName),
+          })),
+          learnings: extraction.learnings.map((l) => ({
+            ...l,
+            people: resolvePeople(l.people, resolveName),
+          })),
+        };
       }
 
       // 源泉日 = 議事録パスの日付(ADR-0026 D3)。パース不能は now() にフォールバック。

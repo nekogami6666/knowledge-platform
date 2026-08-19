@@ -255,6 +255,59 @@ describe("materializeOne — 人物帰属の厳格化(ADR-0027 D1)", () => {
     expect(parsed.frontmatter.deciders).toEqual(["yamada"]);
   });
 
+  it("learning の people/owner にも集合名ガードが効く(ADR-0031 D4)", async () => {
+    const r = await materializeOne(
+      {
+        kbRoot: "/kb",
+        source: { kind: "meeting", repo: "org/minutes", path: "m.md", ref: "sha" },
+        fallbackPeople: [],
+        candidate: {
+          kind: "learning",
+          title: "t",
+          body: "b",
+          entryType: "fact",
+          domain: "hardware",
+          people: ["会議参加者", "yamada"],
+          tags: [],
+          confidence: "high",
+          slug: "t",
+        },
+        verdict: { classification: "new", reason: "新規" },
+      },
+      { makeId: stubMakeId(), now: NOW },
+    );
+    const parsed = parseEntry(r.files[0]?.content ?? "", "knowledge");
+    expect(parsed.frontmatter.owner).toBe("yamada"); // 先頭の**有効な**人物(集合名を owner にしない)
+    if (parsed.frontmatter.id.startsWith("kb-")) {
+      expect((parsed.frontmatter as { people?: string[] }).people).toEqual(["yamada"]);
+    }
+  });
+
+  it("people が集合名のみの learning は owner: unassigned(ADR-0031 D4)", async () => {
+    const r = await materializeOne(
+      {
+        kbRoot: "/kb",
+        source: { kind: "meeting", repo: "org/minutes", path: "m.md", ref: "sha" },
+        fallbackPeople: [],
+        candidate: {
+          kind: "learning",
+          title: "t",
+          body: "b",
+          entryType: "fact",
+          domain: "hardware",
+          people: ["会議参加者"],
+          tags: [],
+          confidence: "high",
+          slug: "t",
+        },
+        verdict: { classification: "new", reason: "新規" },
+      },
+      { makeId: stubMakeId(), now: NOW },
+    );
+    const parsed = parseEntry(r.files[0]?.content ?? "", "knowledge");
+    expect(parsed.frontmatter.owner).toBe("unassigned");
+  });
+
   it("people 空の learning は参加者を owner にせず unassigned(ADR 検証4)", async () => {
     const learningInput = (allowPeopleFallback: boolean): MaterializeInput => ({
       kbRoot: "/kb",

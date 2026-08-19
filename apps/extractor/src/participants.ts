@@ -69,21 +69,69 @@ export function parseParticipants(content: string, opts?: ParseParticipantsOptio
 }
 
 /**
- * members.yaml から名前リゾルバを作る。名前系のキー(name / github / github_alts)と
- * 大小無視・trim 一致すれば GitHub ユーザ名(§4.2 の正)を返す(discord / discord_alts は
- * snowflake ID であり議事録の名前とは照合しない)。github を持たない member は
- * null(= 呼び出し側が生名を保持)。
+ * members.yaml から名前リゾルバを作る(ADR-0027 D1 / ADR-0031 D2・D5)。
+ * - キー: name / github / github_alts / **aliases**(漢字姓等の別表記・kb-core-v6)。
+ *   大小無視・trim 完全一致。discord / discord_alts は snowflake ID なので照合しない。
+ * - 戻り値の正規名: `github ?? name`(D2。github 未所持でも members に載っていれば name に揃う)。
+ *   どちらも無い member は解決対象外。
+ * - 補助(D5): name / aliases の空白区切りトークンのうち**全メンバーで一意なもの**だけを
+ *   完全一致キーに加える(「Nagata」→ Shoma Nagata)。衝突したトークンは索引に入れない
+ *   (解決しない = 生名保持で安全側)。**前方一致・「最終トークン=姓」の推測は恒久禁止**
+ *   (Nagai/Nagata・Matsumoto/Matsuhashi で衝突、Yoshikawa Hiroshi は姓が先頭で誤爆する)。
  */
 export function buildNameResolver(members: readonly Member[]): (raw: string) => string | null {
-  const index = new Map<string, string | null>();
+  const index = new Map<string, string>();
+  const add = (key: string | undefined, canonical: string): void => {
+    if (key === undefined) return;
+    const norm = key.trim().toLowerCase();
+    if (norm.length === 0 || index.has(norm)) return;
+    index.set(norm, canonical);
+  };
+  const canonicalOf = (m: Member): string | undefined => m.github ?? m.name;
   for (const m of members) {
-    const keys = [m.name, m.github, ...(m.github_alts ?? [])];
-    for (const k of keys) {
-      if (k === undefined) continue;
-      const norm = k.trim().toLowerCase();
-      if (norm.length === 0 || index.has(norm)) continue;
-      index.set(norm, m.github ?? null);
+    const canonical = canonicalOf(m);
+    if (canonical === undefined) continue;
+    for (const k of [m.name, m.github, ...(m.github_alts ?? []), ...(m.aliases ?? [])]) {
+      add(k, canonical);
     }
   }
+  // 一意トークン索引(D5)。衝突は null マークして解決対象から外す。
+  const tokenOwner = new Map<string, string | null>();
+  for (const m of members) {
+    const canonical = canonicalOf(m);
+    if (canonical === undefined) continue;
+    for (const source of [m.name, ...(m.aliases ?? [])]) {
+      if (source === undefined) continue;
+      for (const t of source.split(/\s+/)) {
+        const norm = t.trim().toLowerCase();
+        if ([...norm].length < 2) continue; // 1 文字トークンは曖昧
+        const existing = tokenOwner.get(norm);
+        if (existing === undefined) tokenOwner.set(norm, canonical);
+        else if (existing !== canonical) tokenOwner.set(norm, null); // 同名トークン衝突 → 無効化
+      }
+    }
+  }
+  for (const [token, canonical] of tokenOwner) {
+    if (canonical !== null && !index.has(token)) index.set(token, canonical);
+  }
   return (raw) => index.get(raw.trim().toLowerCase()) ?? null;
+}
+
+/**
+ * LLM 出力の人名リストを正規化する(ADR-0031 D3)。解決できれば正規名、できなければ生名保持
+ * (外部出席者を消さない)。正規化後の重複(「宗石」と「Yoshimasa Muneishi」の併記等)は畳む。
+ */
+export function resolvePeople(
+  names: readonly string[],
+  resolve: ((raw: string) => string | null) | undefined,
+): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const raw of names) {
+    const name = resolve?.(raw) ?? raw;
+    if (seen.has(name)) continue;
+    seen.add(name);
+    out.push(name);
+  }
+  return out;
 }
