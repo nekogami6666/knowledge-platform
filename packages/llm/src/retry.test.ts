@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { LlmError } from "./errors.js";
-import { withRetry } from "./retry.js";
+import { retryableExceptTimeout, withRetry } from "./retry.js";
 
 const noSleep = (): Promise<void> => Promise.resolve();
 
@@ -64,5 +64,28 @@ describe("withRetry", () => {
       withRetry(fn, { maxRetries: 4, baseDelayMs: 100, maxDelayMs: 250, sleep }),
     ).rejects.toBeInstanceOf(LlmError);
     expect(delays).toEqual([100, 200, 250, 250]);
+  });
+});
+
+describe("retryableExceptTimeout(2026-08-16 の教訓)", () => {
+  it("TIMEOUT は対象外・429/529 は対象・LlmError 以外は対象外", () => {
+    expect(retryableExceptTimeout(new LlmError("TIMEOUT", "timeout"))).toBe(false);
+    expect(retryableExceptTimeout(new LlmError("RATE_LIMITED", "429"))).toBe(true);
+    expect(retryableExceptTimeout(new LlmError("OVERLOADED", "529"))).toBe(true);
+    expect(retryableExceptTimeout(new Error("boom"))).toBe(false);
+  });
+
+  it("withRetry に渡すと TIMEOUT は 1 回で throw する", async () => {
+    let calls = 0;
+    await expect(
+      withRetry(
+        async () => {
+          calls += 1;
+          throw new LlmError("TIMEOUT", "timeout");
+        },
+        { maxRetries: 1, shouldRetry: retryableExceptTimeout, sleep: async () => {} },
+      ),
+    ).rejects.toThrow("timeout");
+    expect(calls).toBe(1);
   });
 });

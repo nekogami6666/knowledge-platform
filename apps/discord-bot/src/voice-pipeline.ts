@@ -29,7 +29,13 @@ import type {
   PromptStore,
   Transcriber,
 } from "@stratum/llm";
-import { loadPrompt, nullUsageRecorder, runAgentSearch, withRetry } from "@stratum/llm";
+import {
+  loadPrompt,
+  nullUsageRecorder,
+  retryableExceptTimeout,
+  runAgentSearch,
+  withRetry,
+} from "@stratum/llm";
 import type { Logger } from "pino";
 import { z } from "zod";
 import {
@@ -473,7 +479,7 @@ export async function runCorrection(
         },
         { usage },
       ),
-    { maxRetries: 1, ...deps.retry },
+    { maxRetries: 1, shouldRetry: retryableExceptTimeout, ...deps.retry },
   );
   return r.value;
 }

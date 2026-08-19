@@ -20,6 +20,7 @@ import {
   type LlmDeps,
   type LoadedPrompt,
   type RetryOptions,
+  retryableExceptTimeout,
   runAgentSearch,
   withRetry,
 } from "@stratum/llm";
@@ -110,7 +111,7 @@ export async function judgeAnswer(input: JudgeInput, deps: JudgeDeps): Promise<J
         },
         deps.searchDeps,
       ),
-    { maxRetries: 1, ...deps.retry },
+    { maxRetries: 1, shouldRetry: retryableExceptTimeout, ...deps.retry },
   );
   return value;
 }

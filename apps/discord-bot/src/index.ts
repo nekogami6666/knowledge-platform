@@ -183,7 +183,12 @@ async function main(): Promise<void> {
   // §6.4 ③-b voice-memo の STT(ADR-0015)。キー未設定なら機能 OFF(検知が有効ならその旨警告)。
   let transcriber: Transcriber | undefined;
   if (env.OPENAI_API_KEY !== undefined && env.OPENAI_API_KEY.length > 0) {
-    transcriber = createOpenAiTranscriber({ apiKey: env.OPENAI_API_KEY });
+    // STT のリトライは 1 回に絞る(withRetry 既定の 3 だと 120s タイムアウト × 4 = 最悪 480s/
+    // チャンクを、pending が残る限り kick のたびに払い続ける)。
+    transcriber = createOpenAiTranscriber({
+      apiKey: env.OPENAI_API_KEY,
+      retry: { maxRetries: 1 },
+    });
   } else if (voice.channel_id !== null) {
     logger.warn(
       "voice.yaml は設定されていますが OPENAI_API_KEY が無いため文字起こしは行われません(受付のみ・ADR-0015)。",

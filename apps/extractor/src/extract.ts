@@ -13,6 +13,7 @@ import {
   nullUsageRecorder,
   type PromptStore,
   type RetryOptions,
+  retryableExceptTimeout,
   runAgentSearch,
   type Usage,
   type UsageRecorder,
@@ -109,6 +110,6 @@ export async function extractFromMinutes(
         },
         { usage },
       ),
-    { maxRetries: 1, ...deps.retry },
+    { maxRetries: 1, shouldRetry: retryableExceptTimeout, ...deps.retry },
   );
 }

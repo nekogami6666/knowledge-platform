@@ -30,6 +30,7 @@ import {
   nullUsageRecorder,
   type PromptStore,
   type RetryOptions,
+  retryableExceptTimeout,
   runAgentSearch,
   type UsageRecorder,
   withRetry,
@@ -238,7 +239,7 @@ export async function runTriage(
         },
         { usage },
       ),
-    { maxRetries: 1, ...deps.retry },
+    { maxRetries: 1, shouldRetry: retryableExceptTimeout, ...deps.retry },
   );
   return r.value;
 }
@@ -266,7 +267,7 @@ export async function runDraft(
         },
         { usage },
       ),
-    { maxRetries: 1, ...deps.retry },
+    { maxRetries: 1, shouldRetry: retryableExceptTimeout, ...deps.retry },
   );
   return r.value;
 }

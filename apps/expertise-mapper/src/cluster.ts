@@ -13,12 +13,11 @@ import {
   type AgentSearchOptions,
   type AgentSearchResult,
   type LlmDeps,
-  LlmError,
   loadPrompt,
   nullUsageRecorder,
   type PromptStore,
-  RETRYABLE_LLM_CODES,
   type RetryOptions,
+  retryableExceptTimeout,
   runAgentSearch,
   type Usage,
   type UsageRecorder,
@@ -133,16 +132,6 @@ export interface ClusterDeps {
   timeoutMs?: number;
   /** Agent SDK の cwd(ツール無し単発だが必須項目)。KB clone ルート。 */
   cwd: string;
-}
-
-/**
- * TIMEOUT はリトライしない(429/529 のみ)。所要時間は material 件数にほぼ比例する決定的な
- * ものなので、同じプロンプトの再送は同じ時間を burn して同じ結果に終わる(2026-08-16 の失敗
- * run は 300s × 2 = 実質 2 倍払って落ちた)。一過性の網羅より暴走上限を優先する。
- */
-export function retryableExceptTimeout(error: unknown): boolean {
-  if (!(error instanceof LlmError)) return false;
-  return error.code !== "TIMEOUT" && RETRYABLE_LLM_CODES.includes(error.code);
 }
 
 /**

@@ -4,7 +4,6 @@ import {
   buildClusterPrompt,
   type ClusteringResult,
   type ClusterSearchFn,
-  retryableExceptTimeout,
   runClustering,
   type TopicRef,
   validateClustering,
@@ -129,13 +128,6 @@ describe("runClustering(是正リトライ 1 回 → fail-loud)", () => {
 });
 
 describe("リトライ意味論(TIMEOUT は再送しない)", () => {
-  it("retryableExceptTimeout: TIMEOUT は対象外・429/529 は対象・LlmError 以外は対象外", () => {
-    expect(retryableExceptTimeout(new LlmError("TIMEOUT", "timeout"))).toBe(false);
-    expect(retryableExceptTimeout(new LlmError("RATE_LIMITED", "429"))).toBe(true);
-    expect(retryableExceptTimeout(new LlmError("OVERLOADED", "529"))).toBe(true);
-    expect(retryableExceptTimeout(new Error("boom"))).toBe(false);
-  });
-
   it("TIMEOUT は 1 回で throw する(同じプロンプトの再送は同じ時間を burn するだけ)", async () => {
     const search = vi.fn<ClusterSearchFn>(async () => {
       throw new LlmError("TIMEOUT", "Agent SDK query が 300000ms でタイムアウトしました");

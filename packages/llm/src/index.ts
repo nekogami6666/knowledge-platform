@@ -28,7 +28,7 @@ export {
   type PromptStore,
 } from "./prompts.js";
 // --- リトライ ---
-export { type RetryOptions, withRetry } from "./retry.js";
+export { type RetryOptions, retryableExceptTimeout, withRetry } from "./retry.js";
 // --- STT(音声文字起こし。ADR-0015。音声のみ OpenAI・言語処理は Claude のまま)---
 export {
   createOpenAiTranscriber,

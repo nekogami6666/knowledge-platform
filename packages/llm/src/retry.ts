@@ -26,6 +26,18 @@ function defaultShouldRetry(error: unknown): boolean {
 }
 
 /**
+ * TIMEOUT を除いた 429/529 のみをリトライ対象とする判定(2026-08-16 の expertise 障害の教訓)。
+ * LLM 呼び出しの所要時間は入力サイズにほぼ比例する決定的なもので、タイムアウト後に同じ
+ * プロンプトを再送しても同じ時間を burn して同じ結果に終わる(当該 run は 300s × 2 =
+ * 実質 2 倍払って失敗した)。**入力が有界でない・成長しうる LLM 呼び出しはこちらを渡す**。
+ * 一過性のネットワーク断による救済は失うが、暴走上限を優先する。
+ */
+export function retryableExceptTimeout(error: unknown): boolean {
+  if (!(error instanceof LlmError)) return false;
+  return error.code !== "TIMEOUT" && RETRYABLE_LLM_CODES.includes(error.code);
+}
+
+/**
  * fn を実行し、リトライ対象エラーなら指数バックオフで最大 maxRetries 回まで再試行する。
  * リトライ対象外、または上限到達時は最後のエラーを throw する。
  */
