@@ -1,9 +1,10 @@
-import type { PromptStore } from "@stratum/llm";
+import { LlmError, type PromptStore } from "@stratum/llm";
 import { describe, expect, it, vi } from "vitest";
 import {
   buildClusterPrompt,
   type ClusteringResult,
   type ClusterSearchFn,
+  retryableExceptTimeout,
   runClustering,
   type TopicRef,
   validateClustering,
@@ -124,5 +125,46 @@ describe("runClustering(是正リトライ 1 回 → fail-loud)", () => {
     await expect(
       runClustering(EXISTING, MATERIALS, { promptStore, search, cwd: "/kb" }),
     ).rejects.toThrow(/検証に失敗/);
+  });
+});
+
+describe("リトライ意味論(TIMEOUT は再送しない)", () => {
+  it("retryableExceptTimeout: TIMEOUT は対象外・429/529 は対象・LlmError 以外は対象外", () => {
+    expect(retryableExceptTimeout(new LlmError("TIMEOUT", "timeout"))).toBe(false);
+    expect(retryableExceptTimeout(new LlmError("RATE_LIMITED", "429"))).toBe(true);
+    expect(retryableExceptTimeout(new LlmError("OVERLOADED", "529"))).toBe(true);
+    expect(retryableExceptTimeout(new Error("boom"))).toBe(false);
+  });
+
+  it("TIMEOUT は 1 回で throw する(同じプロンプトの再送は同じ時間を burn するだけ)", async () => {
+    const search = vi.fn<ClusterSearchFn>(async () => {
+      throw new LlmError("TIMEOUT", "Agent SDK query が 300000ms でタイムアウトしました");
+    });
+    await expect(
+      runClustering(EXISTING, MATERIALS, {
+        promptStore,
+        search,
+        cwd: "/kb",
+        retry: { sleep: async () => {} },
+      }),
+    ).rejects.toThrow(/タイムアウト/);
+    expect(search).toHaveBeenCalledTimes(1);
+  });
+
+  it("RATE_LIMITED は従来どおり再試行して成功できる", async () => {
+    let calls = 0;
+    const search: ClusterSearchFn = async () => {
+      calls += 1;
+      if (calls === 1) throw new LlmError("RATE_LIMITED", "429");
+      return { value: ok, usage: { inputTokens: 10, outputTokens: 5 } };
+    };
+    const { value } = await runClustering(EXISTING, MATERIALS, {
+      promptStore,
+      search,
+      cwd: "/kb",
+      retry: { sleep: async () => {} },
+    });
+    expect(calls).toBe(2);
+    expect(value.assignments.size).toBe(2);
   });
 });

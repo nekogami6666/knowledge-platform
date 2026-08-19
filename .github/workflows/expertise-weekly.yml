@@ -14,6 +14,7 @@
 # 必要 vars(リポ名はハードコードしない・ADR-0013 D3):
 #   EXPERTISE_KB_REPO(例 org/knowledge-base。空 = 全体 OFF)
 #   EXPERTISE_TARGETS(カンマ区切り。空 = commit evidence 無しで KB evidence のみ — 機能自体は動く)
+#   任意: EXPERTISE_TIMEOUT_MS(クラスタリング LLM 呼び出しの上限 ms。未設定 = 900000)
 # 手順の詳細: docs/runbooks/expertise-weekly.md
 name: expertise-weekly
 
@@ -25,6 +26,8 @@ on:
 jobs:
   map:
     runs-on: ubuntu-latest
+    # LLM タイムアウト(既定 900s)× リトライ経路でも収まる上限。無いと GH 既定 360 分まで burn しうる。
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
         with:
@@ -97,6 +100,10 @@ jobs:
           CONFIG_DIR: ${{ github.workspace }}/apps/expertise-mapper/config
           PROMPTS_DIR: ${{ github.workspace }}/prompts
           KB_ROOT: ${{ github.workspace }}/.clones/knowledge-base
+          # クラスタリングは全 material をひとつのプロンプトに載せる deep 単発のため、evidence の
+          # 蓄積とともに所要時間が伸びる(2026-08-16 にコード既定の 300s 超過で失敗)。
+          # 既定 900s。さらに伸びたら var で調整(コード変更不要)。
+          EXPERTISE_TIMEOUT_MS: ${{ vars.EXPERTISE_TIMEOUT_MS || '900000' }}
           # 実 commit するときのみ設定(既定は dry-run)。初回 GO は人間判断(ADR-0013 D1(d)・runbook 参照)。
           # 実 commit ON(2026-07-16 有効化。dry-run 目視済み — runbook 手順 3)。
           EXPERTISE_REAL: "1"

@@ -34,6 +34,7 @@ commit evidence は **fine-grained PAT** で読む(read = PAT / write = App・AD
 | secret | `DISCORD_OPS_WEBHOOK` | #stratum-ops(risk:high 通知) |
 | var | `EXPERTISE_KB_REPO` | `org/knowledge-base` 形式。**空 = 全体 OFF**(安全な既定) |
 | var | `EXPERTISE_TARGETS` | 対象リポをカンマ区切り。**空でも KB evidence 単独で動く** |
+| var | `EXPERTISE_TIMEOUT_MS` | 任意。クラスタリング LLM 呼び出しの上限 ms(未設定 = workflow 既定 900000) |
 
 ## 3. 初回の監督付き実行(ADR-0013 D1(d))
 
@@ -61,6 +62,12 @@ commit evidence は **fine-grained PAT** で読む(read = PAT / write = App・AD
   (無意味な週次 diff を作らない・ADR-0017 D5)。レポートは毎週 1 枚(同日再実行は再 commit しない)。
 - **クラスタリングの fail-loud**: LLM 出力の参照整合が是正リトライ 1 回でも直らない場合は run ごと失敗する
   (部分出力で expertise.yaml を汚さない)。Actions の失敗通知で気づける。
+- **タイムアウト**: クラスタリングは全 material を 1 プロンプトに載せる deep 単発のため、KB エントリ数に
+  比例して所要時間が伸びる(実測 ≈2.1 秒/件。2026-08-16 に 210 件で旧既定 300s を超過して失敗 →
+  workflow 既定を 900s に延長)。再発したら var `EXPERTISE_TIMEOUT_MS` を引き上げる。
+  恒久策は割当キャッシュ(ADR-0032・新規 material のみを LLM に投入)。なお `window_days` は
+  commit evidence の人物活動窓にのみ効き、material 件数には無関係なので短縮しても時間は縮まない。
+  ログの「クラスタリング開始/完了」行(materials・promptChars・elapsedMs)で伸びを監視できる。
 - **author 不明 commit**: GitHub アカウント未紐付けの commit は evidence から除外され、レポートに件数が
   出る。多い場合は本人に GitHub のメール設定を確認してもらう。
 - **gap-tracker との接続**: expertise.yaml が生成されると、gap の担当選定が「質問文にトピックの

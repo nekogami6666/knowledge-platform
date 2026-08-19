@@ -13,9 +13,11 @@ import {
   type AgentSearchOptions,
   type AgentSearchResult,
   type LlmDeps,
+  LlmError,
   loadPrompt,
   nullUsageRecorder,
   type PromptStore,
+  RETRYABLE_LLM_CODES,
   type RetryOptions,
   runAgentSearch,
   type Usage,
@@ -134,6 +136,16 @@ export interface ClusterDeps {
 }
 
 /**
+ * TIMEOUT はリトライしない(429/529 のみ)。所要時間は material 件数にほぼ比例する決定的な
+ * ものなので、同じプロンプトの再送は同じ時間を burn して同じ結果に終わる(2026-08-16 の失敗
+ * run は 300s × 2 = 実質 2 倍払って落ちた)。一過性の網羅より暴走上限を優先する。
+ */
+export function retryableExceptTimeout(error: unknown): boolean {
+  if (!(error instanceof LlmError)) return false;
+  return error.code !== "TIMEOUT" && RETRYABLE_LLM_CODES.includes(error.code);
+}
+
+/**
  * 増分クラスタリングを実行する(deep・ツール無し単発)。
  * 後検証の違反は是正フィードバック付きで 1 回だけ再試行 → それでも違反なら throw(fail-loud)。
  */
@@ -164,7 +176,7 @@ export async function runClustering(
           },
           { usage },
         ),
-      { maxRetries: 1, ...deps.retry },
+      { maxRetries: 1, shouldRetry: retryableExceptTimeout, ...deps.retry },
     );
 
   let res = await attempt(basePrompt);

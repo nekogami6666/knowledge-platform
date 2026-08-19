@@ -16,7 +16,7 @@ import {
   sameExpertiseContent,
   serializeExpertiseMap,
 } from "@stratum/kb-core";
-import { type ClusterDeps, runClustering, type TopicRef } from "./cluster.js";
+import { buildClusterPrompt, type ClusterDeps, runClustering, type TopicRef } from "./cluster.js";
 import { collectCommitEvidence } from "./commit-collector.js";
 import type { ExpertiseMapperConfig } from "./config.js";
 import { mergeEvidence } from "./evidence.js";
@@ -103,17 +103,36 @@ export async function runExpertiseMapper(deps: RunDeps): Promise<RunSummary> {
   }));
 
   // 3) クラスタリング(deep・是正リトライ 1 回 → fail-loud)→ 指標(決定的)
-  const { value: outcome, usage } = await runClustering(
-    existingRefs,
-    pool.materials.map((m) => m.material),
-    { ...deps.clusterDeps, cwd: kbRoot },
-  );
+  // 所要時間 ≈ 2.1s × material 件数(実測)。タイムアウトで落ちるとログが残らないため、
+  // 件数・プロンプト長・上限は**呼び出し前に**出す(2026-08-16 の失敗 run は件数すら分からなかった)。
+  const materialList = pool.materials.map((m) => m.material);
+  const timeoutMs = deps.clusterDeps.timeoutMs ?? 300_000;
+  logger.info("クラスタリング開始", {
+    materials: materialList.length,
+    existingTopics: existingRefs.length,
+    promptChars: buildClusterPrompt(existingRefs, materialList).length,
+    timeoutMs,
+  });
+  const startedAt = performance.now();
+  const { value: outcome, usage } = await runClustering(existingRefs, materialList, {
+    ...deps.clusterDeps,
+    cwd: kbRoot,
+  });
+  const elapsedMs = Math.round(performance.now() - startedAt);
   logger.info("クラスタリング完了", {
-    materials: pool.materials.length,
+    materials: materialList.length,
     unassigned: outcome.unassigned.length,
     inputTokens: usage.inputTokens,
     outputTokens: usage.outputTokens,
+    elapsedMs,
   });
+  if (elapsedMs > timeoutMs * 0.6) {
+    logger.warn("クラスタリング所要時間がタイムアウトの 6 割を超えました(予兆)", {
+      elapsedMs,
+      timeoutMs,
+      materials: materialList.length,
+    });
+  }
   const topics = computeTopics(pool, outcome.assignments, outcome.topicLabels);
   const next = buildExpertiseMap(topics, toJstIso(now));
   const highRisk = topics.filter((t) => t.risk === "high");
