@@ -1,7 +1,7 @@
 /**
  * 週次 golden eval の CLI(design.md §10.2)。`node dist/run-qa-cli.js` で実行する。
  * runGoldenEval を実走 → baseline と比較 → eval-result.json を書き出す。
- * アラート(>10pt 低下 or passCount<8)の判定は `alert` フラグに載せ、Discord 通知は workflow が行う。
+ * アラート(>10pt 低下 or 出典一致率 <0.8)の判定は `alert` フラグに載せ、Discord 通知は workflow が行う。
  * eval 自体が失敗(API エラー等)したときのみ exit≠0(GitHub の失敗通知に乗せる)。
  */
 import { readFileSync, writeFileSync } from "node:fs";
@@ -35,7 +35,9 @@ async function main(): Promise<void> {
     validityRate: validity.validityRate,
   };
   const comparison = compareToBaseline(current, BASELINE);
-  const belowFloor = citation.passCount < 8; // §6.2 AC1 の床
+  // §6.2 AC1 の床。**率**で判定する(旧実装は `passCount < 8` の絶対数で、golden を 10 件から
+  // 増やした瞬間に床が実質無効化する時限バグだった — 50 件なら「正答 16% 未満」まで鳴らない)。
+  const belowFloor = citation.citationMatchRate < 0.8;
   const alert = comparison.regressed || belowFloor;
 
   const out = {

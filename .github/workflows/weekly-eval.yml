@@ -1,5 +1,5 @@
 # 週次 golden eval(design.md §10.2 / ADR-0009)。synthetic コーパスに対し Claude on AWS(Agent SDK)で
-# 出典一致/回答妥当性を計測し、ベースラインから 10pt 以上低下(or passCount<8)したら #stratum-ops に
+# 出典一致/回答妥当性を計測し、ベースラインから 10pt 以上低下(or 出典一致率 <0.8)したら #stratum-ops に
 # Discord webhook で通知する。corpus は in-repo synthetic(ADR-0002 安全)。cross-repo PAT 不要。
 # 必要な secrets: ANTHROPIC_AWS_API_KEY / ANTHROPIC_AWS_WORKSPACE_ID / AWS_REGION(Claude on AWS 認証・eval 実行)/
 #   DISCORD_OPS_WEBHOOK(#stratum-ops 通知)。
@@ -43,7 +43,7 @@ jobs:
           AWS_REGION: ${{ secrets.AWS_REGION }}
         run: pnpm --filter @stratum/evals run eval:qa
 
-      # ベースラインから 10pt 以上低下 or passCount<8 のとき #stratum-ops に通知(§10.2)。
+      # ベースラインから 10pt 以上低下 or 出典一致率 <0.8(率の床・§6.2 AC1)のとき #stratum-ops に通知(§10.2)。
       - name: Alert on regression
         if: always()
         env:
