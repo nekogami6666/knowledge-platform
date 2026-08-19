@@ -237,6 +237,44 @@ export async function runExtractor(deps: RunDeps): Promise<RunSummary> {
   const minutesHead = synced.minutes.resolvedCommit;
   const kbHead = synced.kb.resolvedCommit;
 
+  // レビュー担当の日替わりローテーション(試用運用・㉘)。gap-tracker run.ts の rr と同じ日数基準。
+  // 実 ID は config(extractor.yaml / Actions vars)から来る — コードに人名・ID を持たない。
+  const reviewer =
+    config.review_mentions.length > 0
+      ? config.review_mentions[
+          Math.floor(deps.now().getTime() / 86_400_000) % config.review_mentions.length
+        ]
+      : undefined;
+
+  // 冪等性: 未マージの抽出 PR が 1 本でもあれば skip(実 PR 時のみ gh に触れる)。
+  // カーソルは merge 時にしか main へ反映されないため、先にレビューをさばくのが正しい順序。
+  // 範囲(ランキー)では判定しない — 上流に新コミットが入るとキーが変わり、PR が積み上がるため。
+  // **diff の有無より先に確認する**: 以前は「差分ゼロ」の early return が先にあり、議事録が
+  // 動かない夜は滞留 PR のリマインドが一切飛ばなかった(滞留こそ毎晩の催促が要る局面なのに)。
+  if (deps.realPr) {
+    const existing = findOpenExtractPr(
+      await deps.gh.listPullRequests(config.kb.repo, { state: "open" }),
+    );
+    if (existing) {
+      logger.info("未マージの抽出 PR があるため skip(冪等)", { prUrl: existing.url });
+      await deps.notifier.notifySkipped({
+        prUrl: existing.url,
+        ...(reviewer !== undefined ? { reviewer } : {}),
+      });
+      return {
+        created: false,
+        reason: "already-exists",
+        prUrl: existing.url,
+        counts: emptyCounts(),
+        guards: emptyGuards(),
+        domains: emptyDomains(),
+        fileCount: 0,
+        skippedFiles: [],
+        deferredCount: 0,
+      };
+    }
+  }
+
   const state = await readState(join(kbRoot, "_meta", "state.json"), deps.readFile);
 
   // ソース別 diff(§6.3 step1)。interviews は KB リポ内のディレクトリなので kb clone を diff する。
@@ -297,42 +335,7 @@ export async function runExtractor(deps: RunDeps): Promise<RunSummary> {
     };
   }
 
-  // レビュー担当の日替わりローテーション(試用運用・㉘)。gap-tracker run.ts の rr と同じ日数基準。
-  // 実 ID は config(extractor.yaml / Actions vars)から来る — コードに人名・ID を持たない。
-  const reviewer =
-    config.review_mentions.length > 0
-      ? config.review_mentions[
-          Math.floor(deps.now().getTime() / 86_400_000) % config.review_mentions.length
-        ]
-      : undefined;
-
-  // 冪等性: 未マージの抽出 PR が 1 本でもあれば skip(実 PR 時のみ gh に触れる)。
-  // カーソルは merge 時にしか main へ反映されないため、先にレビューをさばくのが正しい順序。
-  // 範囲(ランキー)では判定しない — 上流に新コミットが入るとキーが変わり、PR が積み上がるため。
   const runKey = buildRunKey(minutesHead, kbHead);
-  if (deps.realPr) {
-    const existing = findOpenExtractPr(
-      await deps.gh.listPullRequests(config.kb.repo, { state: "open" }),
-    );
-    if (existing) {
-      logger.info("未マージの抽出 PR があるため skip(冪等)", { prUrl: existing.url });
-      await deps.notifier.notifySkipped({
-        prUrl: existing.url,
-        ...(reviewer !== undefined ? { reviewer } : {}),
-      });
-      return {
-        created: false,
-        reason: "already-exists",
-        prUrl: existing.url,
-        counts: emptyCounts(),
-        guards: emptyGuards(),
-        domains: emptyDomains(),
-        fileCount: 0,
-        skippedFiles: [],
-        deferredCount: 0,
-      };
-    }
-  }
 
   // 参加者名の正規化(members.yaml 照合・ADR-0027 D1)。欠落は warn 済みで undefined。
   const resolveName = await loadNameResolver(kbRoot, deps.readFile, logger);

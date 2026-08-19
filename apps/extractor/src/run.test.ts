@@ -238,6 +238,34 @@ describe("runExtractor", () => {
     expect(notifier.notifySkipped).toHaveBeenCalledWith({ prUrl: "https://stale-pr" });
   });
 
+  it("差分ゼロの夜でも滞留 PR があればリマインドを送る(ガードは diff 判定より先)", async () => {
+    // 以前は「変更なし」の early return がガードより先にあり、議事録が動かない夜は滞留 PR の
+    // リマインドが一切飛ばなかった(#35 が週末 3 晩リマインド無しで滞留した構造)。
+    const existing: PrSummary = {
+      number: 10,
+      title: "extract: sources 0000000+1111111 ナレッジ抽出",
+      headRef: "extract/0000000+1111111",
+      url: "https://stale-pr",
+    };
+    const gh = makeGh({ listPullRequests: vi.fn(async () => [existing]) });
+    const notifier = makeNotifier();
+    const r = await runExtractor(makeDeps({ gh, notifier, exec: async () => ({ stdout: "" }) }));
+    expect(r.created).toBe(false);
+    expect(r.reason).toBe("already-exists");
+    expect(notifier.notifySkipped).toHaveBeenCalledWith({ prUrl: "https://stale-pr" });
+    expect(gh.createPullRequest).not.toHaveBeenCalled();
+  });
+
+  it("dry-run は差分ゼロなら gh に触れず no-changes(従来どおり)", async () => {
+    const gh = makeGh();
+    const r = await runExtractor(
+      makeDeps({ gh, realPr: false, exec: async () => ({ stdout: "" }) }),
+    );
+    expect(r.created).toBe(false);
+    expect(r.reason).toBe("no-changes");
+    expect(gh.listPullRequests).not.toHaveBeenCalled();
+  });
+
   it("抽出 PR 以外の open PR は skip の理由にならない", async () => {
     const unrelated: PrSummary = {
       number: 9,
