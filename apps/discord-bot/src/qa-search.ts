@@ -13,6 +13,7 @@ import {
   type AgentSearchResult,
   type LlmDeps,
   nullUsageRecorder,
+  retryableExceptTimeout,
   runAgentSearch,
   type UsageRecorder,
   withRetry,
@@ -45,6 +46,11 @@ export interface QaSearchFactoryDeps {
   usage?: UsageRecorder;
   /** §6.2: 失敗時のリトライ回数(既定 1)。 */
   maxRetries?: number;
+  /**
+   * agentic search の上限 ms(既定 120_000)。検索対象(実 KB + minutes clone)の成長とともに
+   * 所要時間が伸びるため、env(ASK_TIMEOUT_MS)からコード変更なしに調整できるようにする。
+   */
+  timeoutMs?: number;
 }
 
 /**
@@ -57,6 +63,7 @@ export function createQaSearch(deps: QaSearchFactoryDeps = {}): QaSearch {
   const runSearch = deps.runSearch ?? runAgentSearch;
   const usage = deps.usage ?? nullUsageRecorder;
   const maxRetries = deps.maxRetries ?? 1;
+  const timeoutMs = deps.timeoutMs ?? 120_000;
   return (input) =>
     withRetry(
       () =>
@@ -68,9 +75,12 @@ export function createQaSearch(deps: QaSearchFactoryDeps = {}): QaSearch {
             prompt: input.question,
             cwd: input.cwd,
             outputSchema: qaAnswerSchema,
+            timeoutMs,
           },
           { usage },
         ),
-      { maxRetries },
+      // TIMEOUT は再送しない(所要時間は検索対象サイズ比例 — 再送は待ち時間を倍にするだけで、
+      // ユーザーは interaction の 15 分期限内で待っている・2026-08-16 の教訓)。
+      { maxRetries, shouldRetry: retryableExceptTimeout },
     );
 }

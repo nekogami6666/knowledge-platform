@@ -425,7 +425,13 @@ async function handleAsk(
   } catch (err) {
     // パイプライン内部エラーは AskResult で返るため、ここに来るのは主に Discord 送信失敗。
     log.error({ err }, "/ask reply failed");
-    await interaction.editReply("すみません、回答の送信に失敗しました。");
+    // interaction token は 15 分で失効する(直列キューで長く待つと本返信もここも失敗しうる)。
+    // 二次失敗でハンドラごと落とさない(async リスナの unhandled rejection 防止)。
+    try {
+      await interaction.editReply("すみません、回答の送信に失敗しました。");
+    } catch (err2) {
+      log.error({ err: err2 }, "/ask のエラー通知も送信できませんでした(interaction 失効の可能性)");
+    }
   }
 }
 

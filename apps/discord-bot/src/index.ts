@@ -152,7 +152,24 @@ async function main(): Promise<void> {
 
   // 実 agentic search(runAgentSearch + §6.2 リトライ)を共有ファクトリで構築。
   // golden eval も同じ createQaSearch を使い、同一パイプラインを評価する(PR-5)。
-  const search = createQaSearch({ usage: nullUsageRecorder });
+  // /ask の検索タイムアウト(既定 120s)。不正値は既定へフォールバック + warn。
+  const askTimeoutRaw = env.ASK_TIMEOUT_MS;
+  const askTimeoutNum =
+    askTimeoutRaw === undefined || askTimeoutRaw.trim() === "" ? undefined : Number(askTimeoutRaw);
+  const askTimeoutMs =
+    askTimeoutNum !== undefined && Number.isInteger(askTimeoutNum) && askTimeoutNum > 0
+      ? askTimeoutNum
+      : undefined;
+  if (askTimeoutNum !== undefined && askTimeoutMs === undefined) {
+    logger.warn(
+      { env: "ASK_TIMEOUT_MS", raw: askTimeoutRaw },
+      "不正な ASK_TIMEOUT_MS のため既定(120s)で実行します",
+    );
+  }
+  const search = createQaSearch({
+    usage: nullUsageRecorder,
+    ...(askTimeoutMs !== undefined ? { timeoutMs: askTimeoutMs } : {}),
+  });
 
   const onAsk: AskHandler = (question, ctx) => {
     const deps: AskDeps = {
