@@ -146,6 +146,22 @@ describe("githubForDiscord / discordForGithub", () => {
   });
 });
 
+describe("aliases (ADR-0031 解決用別表記・kb-core-v6)", () => {
+  it("aliases を parse する(github 有無どちらでも)", () => {
+    const m = parseMembers(
+      'members:\n  - name: Yoshimasa Muneishi\n    github: yoshimuneco\n    aliases: [宗石]\n    discord: "1"\n  - name: kanto ide\n    aliases: [井出]\n    discord: "2"\n',
+    );
+    expect(m.members[0]?.aliases).toEqual(["宗石"]);
+    expect(m.members[1]?.aliases).toEqual(["井出"]); // github 未所持でも可(github_alts と違い refine なし)
+  });
+
+  it("空の aliases は不可(nonempty)", () => {
+    expect(() => parseMembers('members:\n  - aliases: []\n    discord: "1"\n')).toThrow(
+      KbParseError,
+    );
+  });
+});
+
 describe("name (ADR-0022 表示名)", () => {
   it("name を parse する(github 有無どちらでも)", () => {
     const m = parseMembers(VALID_NAME);

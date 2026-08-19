@@ -14,6 +14,11 @@ export const memberSchema = z
   .object({
     /** 表示名(フルネーム)。人間向け表示専用・任意(ADR-0022)。解決には使わない。 */
     name: z.string().min(1).optional(),
+    /**
+     * 議事録・チャット上の別表記(漢字姓「宗石」・旧表記・typo の吸収先。ADR-0031 D1)。
+     * **人名 → 正規名の解決キー専用**で、表示には常に name を使う。kb-core-v6 で追加。
+     */
+    aliases: z.array(z.string().min(1)).nonempty().optional(),
     /** GitHub ユーザ名(人物識別子の正)。GitHub 未所持のメンバーは省略可(ADR-0021 D1)。 */
     github: z.string().min(1).optional(),
     /** 追加の GitHub ユーザ名(1 人で複数アカウントを持つ場合の別名。primary=github・ADR-0021 D2)。 */
