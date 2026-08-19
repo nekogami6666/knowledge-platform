@@ -25,6 +25,7 @@ import { buildNameResolver, parseParticipants } from "./participants.js";
 import { buildBranch, buildPrTitle, buildRunKey, findOpenExtractPr } from "./pr-title.js";
 import { type ReconcileDeps, reconcileCandidate } from "./reconcile.js";
 import type { RepoSyncer } from "./repos.js";
+import { daysOpen, pickReviewer } from "./review.js";
 import { minutesDateFromPath } from "./source-date.js";
 
 export interface RunDeps {
@@ -243,14 +244,9 @@ export async function runExtractor(deps: RunDeps): Promise<RunSummary> {
   const minutesHead = synced.minutes.resolvedCommit;
   const kbHead = synced.kb.resolvedCommit;
 
-  // レビュー担当の日替わりローテーション(試用運用・㉘)。gap-tracker run.ts の rr と同じ日数基準。
+  // レビュー担当の日替わりローテーション(試用運用・㉘)。新規 PR は「今日」の担当(review.ts)。
   // 実 ID は config(extractor.yaml / Actions vars)から来る — コードに人名・ID を持たない。
-  const reviewer =
-    config.review_mentions.length > 0
-      ? config.review_mentions[
-          Math.floor(deps.now().getTime() / 86_400_000) % config.review_mentions.length
-        ]
-      : undefined;
+  const reviewer = pickReviewer(config.review_mentions, deps.now());
 
   // 冪等性: 未マージの抽出 PR が 1 本でもあれば skip(実 PR 時のみ gh に触れる)。
   // カーソルは merge 時にしか main へ反映されないため、先にレビューをさばくのが正しい順序。
@@ -262,10 +258,27 @@ export async function runExtractor(deps: RunDeps): Promise<RunSummary> {
       await deps.gh.listPullRequests(config.kb.repo, { state: "open" }),
     );
     if (existing) {
-      logger.info("未マージの抽出 PR があるため skip(冪等)", { prUrl: existing.url });
+      // 滞留リマインドの宛先は **PR 作成日**の担当に固定する(㉞ A3)。毎晩 now() で計算すると
+      // リマインドのたびに宛先が入れ替わり、責任の所在がぼける(#35/#38 で実際に起きた)。
+      // createdAt が取れない場合(古い fake 等)は従来どおり今日の担当へフォールバック。
+      const open =
+        existing.createdAt !== undefined ? daysOpen(existing.createdAt, deps.now()) : null;
+      const pinned =
+        existing.createdAt !== undefined && open !== null
+          ? pickReviewer(config.review_mentions, new Date(existing.createdAt))
+          : reviewer;
+      const escalate = open !== null && open >= config.review_escalate_after_days;
+      logger.info("未マージの抽出 PR があるため skip(冪等)", {
+        prUrl: existing.url,
+        ...(open !== null ? { daysOpen: open } : {}),
+      });
       await deps.notifier.notifySkipped({
         prUrl: existing.url,
-        ...(reviewer !== undefined ? { reviewer } : {}),
+        ...(pinned !== undefined ? { reviewer: pinned } : {}),
+        ...(open !== null ? { daysOpen: open } : {}),
+        ...(escalate && config.review_mentions.length > 0
+          ? { escalationMentions: config.review_mentions }
+          : {}),
       });
       return {
         created: false,

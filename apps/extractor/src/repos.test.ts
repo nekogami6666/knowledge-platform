@@ -29,6 +29,7 @@ const config = (minutesUrl?: string): ExtractorConfig => ({
   interviews: { dir: "interviews", exclude_dirs: ["kits", "voice-memos"] },
   participants_exclude: ["QB", "Recorder"],
   review_mentions: [],
+  review_escalate_after_days: 2,
   base_branch: "main",
 });
 

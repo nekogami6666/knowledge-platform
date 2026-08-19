@@ -48,6 +48,13 @@ kb:
     const cfg = await loadExtractorConfig(reader({ "extractor.yaml": overridden }));
     expect(cfg.review_mentions).toEqual(["111", "222"]);
   });
+  it("review_escalate_after_days は既定 2、明示指定で上書きできる(㉞ A3)", async () => {
+    const def = await loadExtractorConfig(reader({ "extractor.yaml": validYaml }));
+    expect(def.review_escalate_after_days).toBe(2);
+    const overridden = `${validYaml}review_escalate_after_days: 5\n`;
+    const cfg = await loadExtractorConfig(reader({ "extractor.yaml": overridden }));
+    expect(cfg.review_escalate_after_days).toBe(5);
+  });
   it("extractor.yaml が無ければ throw", async () => {
     await expect(loadExtractorConfig(reader({}))).rejects.toThrow();
   });

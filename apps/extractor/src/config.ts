@@ -47,6 +47,11 @@ export const extractorConfigSchema = z
      * コードに人名・ID をハードコードしない。空ならメンション無し(従来どおり)。
      */
     review_mentions: z.array(z.string()).default([]),
+    /**
+     * 滞留エスカレーションのしきい値(日)。抽出 PR が作成からこの日数以上 open のままなら、
+     * 見送り通知で担当 1 名でなく review_mentions **全員**をメンションする(㉞ A3)。
+     */
+    review_escalate_after_days: z.number().int().positive().default(2),
   })
   .strict();
 export type ExtractorConfig = z.infer<typeof extractorConfigSchema>;

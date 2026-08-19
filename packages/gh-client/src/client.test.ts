@@ -41,6 +41,7 @@ function fakeOctokit(
         title: "Extract: a..b",
         head: { ref: "extract/x" },
         html_url: "https://github.com/o/r/pull/7",
+        created_at: "2026-08-18T18:05:00Z",
       },
     ],
   });
@@ -190,6 +191,7 @@ describe("listPullRequests", () => {
         title: "Extract: a..b",
         headRef: "extract/x",
         url: "https://github.com/o/r/pull/7",
+        createdAt: "2026-08-18T18:05:00Z", // 滞留リマインドの担当固定・経過日数に使う(㉞ A3)
       },
     ]);
     expect(oct.rest.pulls.list).toHaveBeenCalledWith({

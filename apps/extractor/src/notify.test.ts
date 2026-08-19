@@ -109,4 +109,39 @@ describe("createWebhookNotifier", () => {
     expect(body).toContain("<@67890>");
     expect(body).toContain("レビューをお願いします");
   });
+
+  it("skip 通知は経過日数を表示する(㉞ A3)", async () => {
+    let body = "";
+    const fetchFn: FetchFn = async (_url, init) => {
+      body = init.body;
+      return { ok: true, status: 204 };
+    };
+    await createWebhookNotifier("https://hook", fetchFn).notifySkipped({
+      prUrl: "https://pr",
+      reviewer: "67890",
+      daysOpen: 1,
+    });
+    expect(body).toContain("1 日経過");
+    expect(body).toContain("<@67890>");
+  });
+
+  it("エスカレーション時は担当 1 名でなく全員をメンションする(㉞ A3)", async () => {
+    let body = "";
+    const fetchFn: FetchFn = async (_url, init) => {
+      body = init.body;
+      return { ok: true, status: 204 };
+    };
+    await createWebhookNotifier("https://hook", fetchFn).notifySkipped({
+      prUrl: "https://pr",
+      reviewer: "67890",
+      daysOpen: 3,
+      escalationMentions: ["aaa", "bbb"],
+    });
+    expect(body).toContain("<@aaa>");
+    expect(body).toContain("<@bbb>");
+    expect(body).toContain("3 日経過");
+    expect(body).toContain("滞留");
+    // 全員メンション行が担当 1 名の依頼行を置き換える(二重メンションしない)
+    expect(body).not.toContain("<@67890>");
+  });
 });

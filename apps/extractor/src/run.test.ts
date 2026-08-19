@@ -25,6 +25,7 @@ const config: ExtractorConfig = {
   base_branch: "main",
   participants_exclude: ["QB", "Recorder"],
   review_mentions: [],
+  review_escalate_after_days: 2,
 };
 
 /** 決定的な連番スタブ(実装は kb-core newId の乱数採番・ADR-0026)。suffix は base36 6文字。 */
@@ -752,6 +753,50 @@ describe("runExtractor", () => {
     );
     expect(notifier2.notifyPrCreated).toHaveBeenCalledWith(
       expect.objectContaining({ reviewer: "bbb" }),
+    );
+  });
+
+  it("滞留リマインドの宛先は PR 作成日の担当に固定される(㉞ A3)", async () => {
+    const withReviewers: ExtractorConfig = { ...config, review_mentions: ["aaa", "bbb"] };
+    const day = 86_400_000;
+    const existing: PrSummary = {
+      number: 7,
+      title: "extract: sources 0000000+1111111 ナレッジ抽出",
+      headRef: "extract/0000000+1111111",
+      url: "https://stale-pr",
+      createdAt: new Date(day * 20001).toISOString(), // 奇数日 = "bbb" の日に作成
+    };
+    // 翌日(偶数日 = 今日の担当なら "aaa")でも、宛先は作成日の "bbb" のまま。
+    const notifier = makeNotifier();
+    const gh = makeGh({ listPullRequests: vi.fn(async () => [existing]) });
+    await runExtractor(
+      makeDeps({ config: withReviewers, notifier, gh, now: () => new Date(day * 20002) }),
+    );
+    // 完全一致で検証 = 閾値(既定 2 日)未満なので escalationMentions が付かないことも保証。
+    expect(notifier.notifySkipped).toHaveBeenCalledWith({
+      prUrl: "https://stale-pr",
+      reviewer: "bbb",
+      daysOpen: 1,
+    });
+  });
+
+  it("作成から閾値日数以上 open なら全員メンションへエスカレーション(㉞ A3)", async () => {
+    const withReviewers: ExtractorConfig = { ...config, review_mentions: ["aaa", "bbb"] };
+    const day = 86_400_000;
+    const existing: PrSummary = {
+      number: 7,
+      title: "extract: sources 0000000+1111111 ナレッジ抽出",
+      headRef: "extract/0000000+1111111",
+      url: "https://stale-pr",
+      createdAt: new Date(day * 20000).toISOString(),
+    };
+    const notifier = makeNotifier();
+    const gh = makeGh({ listPullRequests: vi.fn(async () => [existing]) });
+    await runExtractor(
+      makeDeps({ config: withReviewers, notifier, gh, now: () => new Date(day * 20002) }),
+    );
+    expect(notifier.notifySkipped).toHaveBeenCalledWith(
+      expect.objectContaining({ daysOpen: 2, escalationMentions: ["aaa", "bbb"] }),
     );
   });
 

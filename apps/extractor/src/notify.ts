@@ -28,7 +28,17 @@ export interface Notifier {
    * 未マージの抽出 PR があるため今回の run を見送ったことを知らせる(冪等ガード)。
    * 通知しないと「毎晩静かに skip」が続き、レビュー滞留に誰も気づけない。
    */
-  notifySkipped(msg: { prUrl: string; reviewer?: string }): Promise<void>;
+  notifySkipped(msg: SkipNotice): Promise<void>;
+}
+
+export interface SkipNotice {
+  prUrl: string;
+  /** リマインド宛先(PR 作成日の担当に固定・㉞ A3。createdAt が取れないときは当日の担当)。 */
+  reviewer?: string;
+  /** PR 作成からの経過日数(gh-client が createdAt を返せたときのみ)。 */
+  daysOpen?: number;
+  /** 滞留エスカレーション(作成から N 日以上)時に全員へメンションする ID 一覧。 */
+  escalationMentions?: readonly string[];
 }
 
 /** 使用する fetch の最小契約(実 fetch を構造的に満たす)。 */
@@ -81,13 +91,17 @@ export function createWebhookNotifier(
       );
     },
     async notifySkipped(msg) {
+      const escalation = msg.escalationMentions ?? [];
       await post(
         [
           "⏸ 未マージの抽出 PR があるため、今回の抽出を見送りました。",
           msg.prUrl,
-          msg.reviewer !== undefined
-            ? `<@${msg.reviewer}> さん、上記 PR のレビューをお願いします(マージ/クローズで次回から再開します)。`
-            : "この PR をマージ(またはクローズ)すると次回から再開します。",
+          msg.daysOpen !== undefined ? `📅 PR 作成から ${msg.daysOpen} 日経過しています。` : "",
+          escalation.length > 0
+            ? `⏰ 滞留しています: ${escalation.map((id) => `<@${id}>`).join(" ")} どなたかマージ/クローズをお願いします(それまで毎晩の抽出が止まります)。`
+            : msg.reviewer !== undefined
+              ? `<@${msg.reviewer}> さん、上記 PR のレビューをお願いします(マージ/クローズで次回から再開します)。`
+              : "この PR をマージ(またはクローズ)すると次回から再開します。",
         ]
           .filter((l) => l.length > 0)
           .join("\n"),

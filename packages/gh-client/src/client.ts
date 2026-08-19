@@ -33,6 +33,8 @@ export interface PrSummary {
   title: string;
   headRef: string;
   url: string;
+  /** PR 作成日時(ISO 8601)。古い fake との互換のため optional(消費側は欠落にフォールバックを持つ)。 */
+  createdAt?: string;
 }
 
 export interface ListPrOptions {
@@ -250,6 +252,7 @@ export interface OctokitLike {
           html_url: string;
           body?: string | null;
           merged_at?: string | null;
+          created_at?: string;
           updated_at?: string;
           user?: { login: string } | null;
         }>;
@@ -472,6 +475,7 @@ export function createGhClient(octokit: OctokitLike): GhClient {
           title: p.title,
           headRef: p.head.ref,
           url: p.html_url,
+          ...(p.created_at !== undefined ? { createdAt: p.created_at } : {}),
         }));
       } catch (e) {
         throw new GhClientError("API_ERROR", `PR 一覧の取得に失敗しました(${repo})`, { cause: e });
