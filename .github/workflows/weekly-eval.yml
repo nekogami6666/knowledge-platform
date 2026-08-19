@@ -13,6 +13,9 @@ on:
 jobs:
   golden-eval:
     runs-on: ubuntu-latest
+    # 10 問 ×(QA 120s + judge 120s)+ セットアップ。golden を 50 問へ増やすときはここも上げる。
+    # 無いと GH 既定 360 分まで burn しうる(2026-08-16 expertise の教訓)。
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v5
 
@@ -53,8 +56,18 @@ jobs:
             exit 0
           fi
           ALERT=$(jq -r '.alert' "$RESULT")
+          RATES=$(jq -r '"citation \(.current.citationMatchRate) / validity \(.current.validityRate)"' "$RESULT")
           if [ "$ALERT" != "true" ]; then
-            echo "回帰なし。通知しない。"
+            # 回帰なしでも 1 行だけ流す(ハートビート)。「実行されて異常なし」と「そもそも
+            # 実行されていない」を外形で区別するため — 2026-06/07 に 3 週無音だった教訓と、
+            # GitHub が 60 日無活動で scheduled workflow を自動無効化する仕様への防御。
+            # 毎週月曜 09:00 JST にこの ✅ が来なければ、cron 系全体を疑うこと。
+            if [ -z "${DISCORD_OPS_WEBHOOK:-}" ]; then
+              echo "回帰なし(webhook 未設定のためハートビート省略): $RATES"
+              exit 0
+            fi
+            jq -n --arg c "✅ weekly-eval 完走(回帰なし・$RATES)" '{content: $c}' \
+              | curl -fsS -X POST -H "Content-Type: application/json" -d @- "$DISCORD_OPS_WEBHOOK"
             exit 0
           fi
           SUMMARY=$(jq -c '{passCount: .citation.passCount, current, comparison: .comparison.drops}' "$RESULT")

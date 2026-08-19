@@ -26,8 +26,10 @@ on:
 jobs:
   map:
     runs-on: ubuntu-latest
-    # LLM タイムアウト(既定 900s)× リトライ経路でも収まる上限。無いと GH 既定 360 分まで burn しうる。
-    timeout-minutes: 30
+    # LLM 900s + 是正フィードバック再試行(別経路・もう 1 回 900s)+ setup を収容する上限。
+    # 30 分だと是正リトライ週(900s×2=30 分 + setup)が必ず超過して原因が job-timeout に化ける。
+    # EXPERTISE_TIMEOUT_MS を var で上げるときは**ここも一緒に**上げること。
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v5
         with:
@@ -112,6 +114,18 @@ jobs:
           # EXPERTISE_FULL_RECLUSTER: "1"
         run: pnpm --filter @stratum/expertise-mapper start
 
+
+      # vars 未設定だと全ステップ skip で job は緑になる(無音 no-op)。設定消失に気づけるよう 1 行流す。
+      - name: Notify skipped (vars 未設定)
+        if: vars.EXPERTISE_KB_REPO == ''
+        env:
+          DISCORD_OPS_WEBHOOK: ${{ secrets.DISCORD_OPS_WEBHOOK }}
+        run: |
+          set -euo pipefail
+          echo "vars.EXPERTISE_KB_REPO 未設定のため何も実行されませんでした。"
+          if [ -z "${DISCORD_OPS_WEBHOOK:-}" ]; then exit 0; fi
+          jq -n --arg c "⚠️ expertise-weekly: vars(EXPERTISE_KB_REPO)未設定のため何も実行されませんでした" '{content: $c}' \
+            | curl -fsS -X POST -H "Content-Type: application/json" -d @- "$DISCORD_OPS_WEBHOOK"
       # job 失敗を #stratum-ops へ通知(weekly-eval が 3 週黙って失敗していた 2026-06/07 の反省)。
       # 成功時の通知(risk:high)はアプリ内 webhook が担うため、ここは failure() のみ。
       - name: Notify job failure

@@ -40,6 +40,9 @@ on:
 jobs:
   mine:
     runs-on: ubuntu-latest
+    # 上限が無いと GH 既定 360 分まで burn しうる(2026-08-16 expertise の教訓)。
+    # max_prs=15 × (extract 600s + reconcile) を収容する上限。
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v5
         with:
@@ -118,12 +121,26 @@ jobs:
           CONFIG_DIR: ${{ github.workspace }}/apps/pr-miner/config
           PROMPTS_DIR: ${{ github.workspace }}/prompts
           KB_ROOT: ${{ github.workspace }}/.clones/knowledge-base
+          # LLM 1 呼び出しの上限 ms(コード既定 300000)。大きな PR で伸びたら var で調整(PR 不要)。
+          PR_MINER_TIMEOUT_MS: ${{ vars.PR_MINER_TIMEOUT_MS || '600000' }}
           # 実 PR 有効化(2026-07-24 人間 GO・ADR-0013 D1(d))。初回は監督付き dispatch でカーソルを立てる
           # (runbook §3)。real 化でカーソルが main に反映され、以後は増分処理(dry-run の窓再処理を解消)。
           # cap は PR_MINER_MAX_PRS(既定 5 → var で 15)で有界化。dry-run に戻すときは再コメント化。
           PR_MINER_REAL: "1"
         run: pnpm --filter @stratum/pr-miner start
 
+
+      # vars 未設定だと全ステップ skip で job は緑になる(無音 no-op)。設定消失に気づけるよう 1 行流す。
+      - name: Notify skipped (vars 未設定)
+        if: vars.PR_MINER_KB_REPO == ''
+        env:
+          DISCORD_OPS_WEBHOOK: ${{ secrets.DISCORD_OPS_WEBHOOK }}
+        run: |
+          set -euo pipefail
+          echo "vars.PR_MINER_KB_REPO 未設定のため何も実行されませんでした。"
+          if [ -z "${DISCORD_OPS_WEBHOOK:-}" ]; then exit 0; fi
+          jq -n --arg c "⚠️ pr-miner-weekly: vars(PR_MINER_KB_REPO)未設定のため何も実行されませんでした" '{content: $c}' \
+            | curl -fsS -X POST -H "Content-Type: application/json" -d @- "$DISCORD_OPS_WEBHOOK"
       # job 失敗を #stratum-ops へ通知(weekly-eval が 3 週黙って失敗していた 2026-06/07 の反省)。
       # 同一週の 2 回目実 run はブランチ名衝突(pr-miner/<週キー>)で失敗するため、その検知もここが担う。
       - name: Notify job failure

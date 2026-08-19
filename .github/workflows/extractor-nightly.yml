@@ -92,6 +92,18 @@ jobs:
           EXTRACTOR_REAL_PR: "1"
         run: pnpm --filter @stratum/extractor start
 
+
+      # vars 未設定だと全ステップ skip で job は緑になる(無音 no-op)。設定消失に気づけるよう 1 行流す。
+      - name: Notify skipped (vars 未設定)
+        if: vars.EXTRACTOR_MINUTES_REPO == '' || vars.EXTRACTOR_KB_REPO == ''
+        env:
+          DISCORD_OPS_WEBHOOK: ${{ secrets.DISCORD_OPS_WEBHOOK }}
+        run: |
+          set -euo pipefail
+          echo "vars(EXTRACTOR_MINUTES_REPO / EXTRACTOR_KB_REPO)未設定のため何も実行されませんでした。"
+          if [ -z "${DISCORD_OPS_WEBHOOK:-}" ]; then exit 0; fi
+          jq -n --arg c "⚠️ extractor-nightly: vars 未設定のため何も実行されませんでした" '{content: $c}' \
+            | curl -fsS -X POST -H "Content-Type: application/json" -d @- "$DISCORD_OPS_WEBHOOK"
       # job 失敗を #stratum-ops へ通知(weekly-eval が 3 週黙って失敗していた 2026-06/07 の反省)。
       # 成功時の通知はアプリ内 webhook(notify.ts)が担うため、ここは failure() のみ。未設定なら静かに skip。
       - name: Notify job failure
