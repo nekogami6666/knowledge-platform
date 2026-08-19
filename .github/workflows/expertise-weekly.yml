@@ -107,6 +107,9 @@ jobs:
           # 実 commit するときのみ設定(既定は dry-run)。初回 GO は人間判断(ADR-0013 D1(d)・runbook 参照)。
           # 実 commit ON(2026-07-16 有効化。dry-run 目視済み — runbook 手順 3)。
           EXPERTISE_REAL: "1"
+          # 割当キャッシュ(ADR-0032)を無視して全件を再クラスタしたいとき(四半期の棚卸し・
+          # トピック統廃合後)は、この行を一時的に有効化して workflow_dispatch する。
+          # EXPERTISE_FULL_RECLUSTER: "1"
         run: pnpm --filter @stratum/expertise-mapper start
 
       # job 失敗を #stratum-ops へ通知(weekly-eval が 3 週黙って失敗していた 2026-06/07 の反省)。

@@ -16,6 +16,13 @@ import {
   sameExpertiseContent,
   serializeExpertiseMap,
 } from "@stratum/kb-core";
+import {
+  ASSIGNMENTS_PATH,
+  mergeAssignments,
+  partitionMaterials,
+  readAssignmentsCache,
+  serializeAssignments,
+} from "./assignments-cache.js";
 import { buildClusterPrompt, type ClusterDeps, runClustering, type TopicRef } from "./cluster.js";
 import { collectCommitEvidence } from "./commit-collector.js";
 import type { ExpertiseMapperConfig } from "./config.js";
@@ -48,6 +55,8 @@ export interface RunDeps {
   logger: Logger;
   /** 実 commit するか(既定 false = dry-run)。 */
   real: boolean;
+  /** 割当キャッシュを無視して全 material を再クラスタする(ADR-0032 D4。既定 false)。 */
+  fullRecluster?: boolean;
 }
 
 export interface RunSummary {
@@ -102,45 +111,75 @@ export async function runExpertiseMapper(deps: RunDeps): Promise<RunSummary> {
     label: t.label,
   }));
 
-  // 3) クラスタリング(deep・是正リトライ 1 回 → fail-loud)→ 指標(決定的)
-  // 所要時間 ≈ 2.1s × material 件数(実測)。タイムアウトで落ちるとログが残らないため、
-  // 件数・プロンプト長・上限は**呼び出し前に**出す(2026-08-16 の失敗 run は件数すら分からなかった)。
+  // 3) 割当キャッシュ(ADR-0032)→ クラスタリング(deep・是正リトライ 1 回 → fail-loud)→ 指標(決定的)
+  // LLM へは新規・未割当の material だけを送る。所要時間 ≈ 2.1s/件(実測)が KB 総量比例 →
+  // 週次差分比例になる。キャッシュは派生物: 破損は warn + 全再クラスタで自己修復。
   const materialList = pool.materials.map((m) => m.material);
   const timeoutMs = deps.clusterDeps.timeoutMs ?? 300_000;
-  logger.info("クラスタリング開始", {
-    materials: materialList.length,
-    existingTopics: existingRefs.length,
-    promptChars: buildClusterPrompt(existingRefs, materialList).length,
-    timeoutMs,
-  });
-  const startedAt = performance.now();
-  const { value: outcome, usage } = await runClustering(existingRefs, materialList, {
-    ...deps.clusterDeps,
-    cwd: kbRoot,
-  });
-  const elapsedMs = Math.round(performance.now() - startedAt);
-  logger.info("クラスタリング完了", {
-    materials: materialList.length,
-    unassigned: outcome.unassigned.length,
-    inputTokens: usage.inputTokens,
-    outputTokens: usage.outputTokens,
-    elapsedMs,
-  });
-  if (elapsedMs > timeoutMs * 0.6) {
-    logger.warn("クラスタリング所要時間がタイムアウトの 6 割を超えました(予兆)", {
-      elapsedMs,
-      timeoutMs,
+  const cacheRaw = await deps.readFile(join(kbRoot, ASSIGNMENTS_PATH)).catch(() => null);
+  const fullRecluster = deps.fullRecluster === true;
+  if (fullRecluster) {
+    logger.info(
+      "EXPERTISE_FULL_RECLUSTER: キャッシュを無視して全件を再クラスタします(ADR-0032 D4)",
+    );
+  }
+  const cache = fullRecluster ? {} : readAssignmentsCache(cacheRaw, logger);
+  const validTopics = new Set(existingRefs.map((t) => t.topic));
+  const { cachedAssignments, uncached } = partitionMaterials(materialList, cache, validTopics);
+
+  let assignments: ReadonlyMap<string, string>;
+  let topicLabels: ReadonlyMap<string, string>;
+  let unassigned: readonly string[];
+  if (uncached.length === 0) {
+    logger.info("全 material が割当キャッシュ済みのため LLM を呼びません(ADR-0032 D2)", {
       materials: materialList.length,
     });
+    assignments = cachedAssignments;
+    topicLabels = new Map(existingRefs.map((t) => [t.topic, t.label]));
+    unassigned = [];
+  } else {
+    // タイムアウトで落ちるとログが残らないため、件数・プロンプト長・上限は**呼び出し前に**出す
+    // (2026-08-16 の失敗 run は件数すら分からなかった)。
+    logger.info("クラスタリング開始", {
+      materials: materialList.length,
+      cached: cachedAssignments.size,
+      uncached: uncached.length,
+      existingTopics: existingRefs.length,
+      promptChars: buildClusterPrompt(existingRefs, uncached).length,
+      timeoutMs,
+    });
+    const startedAt = performance.now();
+    const { value: outcome, usage } = await runClustering(existingRefs, uncached, {
+      ...deps.clusterDeps,
+      cwd: kbRoot,
+    });
+    const elapsedMs = Math.round(performance.now() - startedAt);
+    logger.info("クラスタリング完了", {
+      materials: uncached.length,
+      unassigned: outcome.unassigned.length,
+      inputTokens: usage.inputTokens,
+      outputTokens: usage.outputTokens,
+      elapsedMs,
+    });
+    if (elapsedMs > timeoutMs * 0.6) {
+      logger.warn("クラスタリング所要時間がタイムアウトの 6 割を超えました(予兆)", {
+        elapsedMs,
+        timeoutMs,
+        materials: uncached.length,
+      });
+    }
+    assignments = mergeAssignments(cachedAssignments, outcome.assignments);
+    topicLabels = outcome.topicLabels;
+    unassigned = outcome.unassigned;
   }
-  const topics = computeTopics(pool, outcome.assignments, outcome.topicLabels);
+  const topics = computeTopics(pool, assignments, topicLabels);
   const next = buildExpertiseMap(topics, toJstIso(now));
   const highRisk = topics.filter((t) => t.risk === "high");
   const base = {
     topics: topics.length,
     highRisk: highRisk.length,
     materials: pool.materials.length,
-    unassigned: outcome.unassigned.length,
+    unassigned: unassigned.length,
   };
 
   // 4) 変化判定(generated_at 除外)と当日レポートの有無 → commit するファイル集合
@@ -170,7 +209,7 @@ export async function runExpertiseMapper(deps: RunDeps): Promise<RunSummary> {
         prev,
         next,
         mapChanged,
-        unassigned: outcome.unassigned,
+        unassigned,
         unattributedCommits: pool.unattributedCommits,
         failedRepos: commits.failedRepos,
         kbMaterials: kbMaterials.length,
@@ -179,8 +218,16 @@ export async function runExpertiseMapper(deps: RunDeps): Promise<RunSummary> {
       }),
     });
   }
+  // 割当キャッシュの更新(ADR-0032)。内容が変わったときだけ commit 対象に足す
+  // (evicted id の脱落・新規割当の追加・全再クラスタでの組み替えを含む)。
+  const nextCacheContent = serializeAssignments(assignments);
+  if (nextCacheContent !== cacheRaw) {
+    files.push({ path: ASSIGNMENTS_PATH, content: nextCacheContent });
+  }
   if (files.length === 0) {
-    logger.info("内容に変化がなく当日レポートも存在するため commit しません(再実行安全・§7.1)。");
+    logger.info(
+      "内容・割当キャッシュに変化がなく当日レポートも存在するため commit しません(再実行安全・§7.1)。",
+    );
     return { committed: false, reason: "no-change", ...base };
   }
 

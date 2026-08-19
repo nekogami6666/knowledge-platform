@@ -31,6 +31,8 @@ const envSchema = z
     EXPERTISE_REAL: z.string().optional(),
     /** LLM 1 呼び出しのタイムアウト(ms・正の整数)。不正値/未設定は既定 300_000。 */
     EXPERTISE_TIMEOUT_MS: z.string().optional(),
+    /** "1"/"true" で割当キャッシュを無視して全 material を再クラスタ(ADR-0032 D4)。 */
+    EXPERTISE_FULL_RECLUSTER: z.string().optional(),
     CONFIG_DIR: z.string().default("./config"),
     PROMPTS_DIR: z.string().default("./prompts"),
   })
@@ -54,6 +56,11 @@ export function parseEnv(source: Record<string, string | undefined> = process.en
 /** 実 commit してよいか(既定 false = dry-run)。 */
 export function isReal(env: Env): boolean {
   return env.EXPERTISE_REAL === "1" || env.EXPERTISE_REAL === "true";
+}
+
+/** 割当キャッシュを無視して全再クラスタするか(既定 false・ADR-0032 D4)。 */
+export function isFullRecluster(env: Env): boolean {
+  return env.EXPERTISE_FULL_RECLUSTER === "1" || env.EXPERTISE_FULL_RECLUSTER === "true";
 }
 
 /**

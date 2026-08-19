@@ -62,12 +62,17 @@ commit evidence は **fine-grained PAT** で読む(read = PAT / write = App・AD
   (無意味な週次 diff を作らない・ADR-0017 D5)。レポートは毎週 1 枚(同日再実行は再 commit しない)。
 - **クラスタリングの fail-loud**: LLM 出力の参照整合が是正リトライ 1 回でも直らない場合は run ごと失敗する
   (部分出力で expertise.yaml を汚さない)。Actions の失敗通知で気づける。
-- **タイムアウト**: クラスタリングは全 material を 1 プロンプトに載せる deep 単発のため、KB エントリ数に
-  比例して所要時間が伸びる(実測 ≈2.1 秒/件。2026-08-16 に 210 件で旧既定 300s を超過して失敗 →
-  workflow 既定を 900s に延長)。再発したら var `EXPERTISE_TIMEOUT_MS` を引き上げる。
-  恒久策は割当キャッシュ(ADR-0032・新規 material のみを LLM に投入)。なお `window_days` は
-  commit evidence の人物活動窓にのみ効き、material 件数には無関係なので短縮しても時間は縮まない。
-  ログの「クラスタリング開始/完了」行(materials・promptChars・elapsedMs)で伸びを監視できる。
+- **タイムアウト**: クラスタリングは material を 1 プロンプトに載せる deep 単発で、所要時間は
+  LLM に送る件数に比例する(実測 ≈2.1 秒/件。2026-08-16 に全件 210 件で旧既定 300s を超過して失敗 →
+  workflow 既定を 900s に延長)。再発したら var `EXPERTISE_TIMEOUT_MS` を引き上げる。なお
+  `window_days` は commit evidence の人物活動窓にのみ効き、material 件数には無関係なので短縮しても
+  時間は縮まない。ログの「クラスタリング開始/完了」行(cached/uncached・promptChars・elapsedMs)で監視できる。
+- **割当キャッシュ(ADR-0032)**: material → topic の割当は KB の `_meta/expertise-assignments.json`
+  に永続化され、**LLM へは新規・未割当の分だけ**送られる(定常時は週次差分の数件〜数十件)。
+  自動生成・手編集禁止。壊れていても warn + その週だけ全再クラスタで自己修復する。
+  一度割り当てた material は見直されないため、**四半期に 1 回程度**、workflow の
+  `EXPERTISE_FULL_RECLUSTER: "1"` を一時有効化して workflow_dispatch し、全件を再クラスタする
+  (トピックの統廃合・命名見直しをしたいときも同じ手順)。
 - **author 不明 commit**: GitHub アカウント未紐付けの commit は evidence から除外され、レポートに件数が
   出る。多い場合は本人に GitHub のメール設定を確認してもらう。
 - **gap-tracker との接続**: expertise.yaml が生成されると、gap の担当選定が「質問文にトピックの

@@ -16,7 +16,7 @@ import { createGhClientFromAuth, createGhClientFromEnv, type GhClient } from "@s
 import { validateRepo } from "@stratum/kb-core";
 import { createFsPromptStore, nullUsageRecorder } from "@stratum/llm";
 import { createFsConfigReader, loadExpertiseMapperConfig } from "./config.js";
-import { isReal, parseEnv, parsePositiveInt } from "./env.js";
+import { isFullRecluster, isReal, parseEnv, parsePositiveInt } from "./env.js";
 import { createLogger } from "./logger.js";
 import { createWebhookNotifier } from "./notify.js";
 import { type RunDeps, runExpertiseMapper } from "./run.js";
@@ -104,6 +104,7 @@ async function main(): Promise<void> {
     now: () => new Date(),
     logger,
     real: isReal(env),
+    fullRecluster: isFullRecluster(env),
   };
 
   const summary = await runExpertiseMapper(deps);

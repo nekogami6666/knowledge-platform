@@ -106,6 +106,7 @@ describe("runExpertiseMapper(§6.6 ⑤-a / ADR-0017 D5)", () => {
     expect(call.repo).toBe("org/knowledge-base");
     expect(call.branch).toBe("main");
     expect(call.files.map((f) => f.path).sort()).toEqual([
+      "_meta/expertise-assignments.json", // 割当キャッシュ(ADR-0032)
       "expertise/expertise.yaml",
       "expertise/reports/2026-07-20.md", // JST 日付(UTC だと 07-19)
     ]);
@@ -116,27 +117,27 @@ describe("runExpertiseMapper(§6.6 ⑤-a / ADR-0017 D5)", () => {
     expect(notified).toHaveLength(1);
   });
 
-  it("no-change: 内容が同一 + 当日レポート済みなら gh を呼ばない(再実行安全)", async () => {
+  it("no-change: 内容が同一 + 当日レポート済みなら gh も LLM も呼ばない(再実行安全)", async () => {
     const first = makeDeps();
     await runExpertiseMapper(first.deps);
     const prevYaml = first.written["/kb/expertise/expertise.yaml"] as string;
     const prevReport = first.written["/kb/expertise/reports/2026-07-20.md"] as string;
+    const prevCache = first.written["/kb/_meta/expertise-assignments.json"] as string;
 
+    // 全 material がキャッシュ済み → search は呼ばれないはず(ADR-0032 D2)。
+    const search = vi.fn();
     const second = makeDeps({
       clusterDeps: {
         promptStore: { read: async () => "---\nrole: deep\n---\n分類器" },
-        // 2 回目は既存トピックを再利用する(new_topics を出さない)— 検証が正しく通る形
-        search: async () => ({
-          value: { assignments: clusterOk.assignments, new_topics: [] },
-          usage: { inputTokens: 1, outputTokens: 1 },
-        }),
+        search,
       },
     });
-    // 前回の生成物を fixture として注入
+    // 前回の生成物(yaml・レポート・割当キャッシュ)を fixture として注入
     const files: Record<string, string> = {
       "/kb/knowledge/hardware/kb-2026-0142-x.md": KNOWLEDGE,
       "/kb/expertise/expertise.yaml": prevYaml,
       "/kb/expertise/reports/2026-07-20.md": prevReport,
+      "/kb/_meta/expertise-assignments.json": prevCache,
     };
     second.deps.readFile = async (p) => {
       const v = files[p];
@@ -146,6 +147,7 @@ describe("runExpertiseMapper(§6.6 ⑤-a / ADR-0017 D5)", () => {
     const summary = await runExpertiseMapper(second.deps);
     expect(summary.reason).toBe("no-change");
     expect(second.gh.commitFiles).not.toHaveBeenCalled();
+    expect(search).not.toHaveBeenCalled();
   });
 
   it("dry-run(既定): 実書き + validate はするが commit しない", async () => {
@@ -202,6 +204,158 @@ describe("runExpertiseMapper(§6.6 ⑤-a / ADR-0017 D5)", () => {
     deps.readFile = async (p) =>
       p === "/kb/expertise/expertise.yaml" ? "generated_at: broken\ntopics: []" : orig(p);
     await expect(runExpertiseMapper(deps)).rejects.toThrow();
+  });
+
+  it("キャッシュ命中分は LLM に送らない(uncached のみ・ADR-0032 D2)", async () => {
+    const prevYaml = serializeExpertiseMap({
+      generated_at: "2026-07-13T02:00:00+09:00",
+      topics: [
+        {
+          topic: "dispenser-x-firmware",
+          label: "分注 X FW",
+          people: [{ name: "yamada", evidence_count: 2, last_active: "2026-07-05" }],
+          bus_factor: 1,
+          documented_kb_count: 1,
+          risk: "high",
+        },
+      ],
+    });
+    const cacheJson = JSON.stringify({
+      version: 1,
+      assignments: { "kb:kb-2026-0142": "dispenser-x-firmware" },
+    });
+    let captured = "";
+    const { deps } = makeDeps({
+      clusterDeps: {
+        promptStore: { read: async () => "---\nrole: deep\n---\n分類器" },
+        search: async (opts) => {
+          captured = opts.prompt;
+          return {
+            value: {
+              assignments: [{ material_id: "repo:o/fw", topic: "dispenser-x-firmware" }],
+              new_topics: [],
+            },
+            usage: { inputTokens: 1, outputTokens: 1 },
+          };
+        },
+      },
+    });
+    const orig = deps.readFile;
+    deps.readFile = async (p) => {
+      if (p === "/kb/expertise/expertise.yaml") return prevYaml;
+      if (p === "/kb/_meta/expertise-assignments.json") return cacheJson;
+      return orig(p);
+    };
+    const summary = await runExpertiseMapper(deps);
+    expect(captured).toContain("repo:o/fw"); // 未割当分だけが LLM 入力に載る
+    expect(captured).not.toContain("kb:kb-2026-0142"); // キャッシュ命中分は送らない
+    expect(summary.topics).toBe(1); // 指標はキャッシュ ∪ LLM 結果の全 material で算出
+  });
+
+  it("消滅した topic への割当は無効化して再クラスタへ回す", async () => {
+    // キャッシュは ghost-topic を指すが、既存マップに無い → 命中扱いにしない。
+    const cacheJson = JSON.stringify({
+      version: 1,
+      assignments: { "kb:kb-2026-0142": "ghost-topic" },
+    });
+    let captured = "";
+    const { deps } = makeDeps({
+      clusterDeps: {
+        promptStore: { read: async () => "---\nrole: deep\n---\n分類器" },
+        search: async (opts) => {
+          captured = opts.prompt;
+          return { value: clusterOk, usage: { inputTokens: 1, outputTokens: 1 } };
+        },
+      },
+    });
+    const orig = deps.readFile;
+    deps.readFile = async (p) =>
+      p === "/kb/_meta/expertise-assignments.json" ? cacheJson : orig(p);
+    await runExpertiseMapper(deps);
+    expect(captured).toContain("kb:kb-2026-0142");
+  });
+
+  it("破損したキャッシュは warn して全件再クラスタ(自己修復・ADR-0032 D3)", async () => {
+    const logs: string[] = [];
+    let captured = "";
+    const { deps } = makeDeps({
+      logger: createLogger([], (l) => logs.push(l)),
+      clusterDeps: {
+        promptStore: { read: async () => "---\nrole: deep\n---\n分類器" },
+        search: async (opts) => {
+          captured = opts.prompt;
+          return { value: clusterOk, usage: { inputTokens: 1, outputTokens: 1 } };
+        },
+      },
+    });
+    const orig = deps.readFile;
+    deps.readFile = async (p) =>
+      p === "/kb/_meta/expertise-assignments.json" ? "not json" : orig(p);
+    const summary = await runExpertiseMapper(deps);
+    expect(logs.some((l) => l.includes("全再クラスタ"))).toBe(true);
+    expect(captured).toContain("kb:kb-2026-0142");
+    expect(summary.committed).toBe(true); // 完走する(fail-loud しない)
+  });
+
+  it("fullRecluster はキャッシュを無視して全件を LLM へ(ADR-0032 D4)", async () => {
+    const prevYaml = serializeExpertiseMap({
+      generated_at: "2026-07-13T02:00:00+09:00",
+      topics: [
+        {
+          topic: "dispenser-x-firmware",
+          label: "分注 X FW",
+          people: [{ name: "yamada", evidence_count: 2, last_active: "2026-07-05" }],
+          bus_factor: 1,
+          documented_kb_count: 1,
+          risk: "high",
+        },
+      ],
+    });
+    const cacheJson = JSON.stringify({
+      version: 1,
+      assignments: {
+        "kb:kb-2026-0142": "dispenser-x-firmware",
+        "repo:o/fw": "dispenser-x-firmware",
+      },
+    });
+    let captured = "";
+    const { deps } = makeDeps({
+      fullRecluster: true,
+      clusterDeps: {
+        promptStore: { read: async () => "---\nrole: deep\n---\n分類器" },
+        search: async (opts) => {
+          captured = opts.prompt;
+          return {
+            value: { assignments: clusterOk.assignments, new_topics: [] },
+            usage: { inputTokens: 1, outputTokens: 1 },
+          };
+        },
+      },
+    });
+    const orig = deps.readFile;
+    deps.readFile = async (p) => {
+      if (p === "/kb/expertise/expertise.yaml") return prevYaml;
+      if (p === "/kb/_meta/expertise-assignments.json") return cacheJson;
+      return orig(p);
+    };
+    await runExpertiseMapper(deps);
+    expect(captured).toContain("kb:kb-2026-0142");
+    expect(captured).toContain("repo:o/fw");
+  });
+
+  it("KB から消えた material の割当は次回キャッシュから脱落する(eviction)", async () => {
+    const cacheJson = JSON.stringify({
+      version: 1,
+      assignments: { "kb:kb-9999-zzzzzz": "dispenser-x-firmware" }, // もう存在しない material
+    });
+    const { deps, written } = makeDeps();
+    const orig = deps.readFile;
+    deps.readFile = async (p) =>
+      p === "/kb/_meta/expertise-assignments.json" ? cacheJson : orig(p);
+    await runExpertiseMapper(deps);
+    const nextCache = written["/kb/_meta/expertise-assignments.json"] as string;
+    expect(nextCache).not.toContain("kb-9999-zzzzzz");
+    expect(nextCache).toContain("kb:kb-2026-0142");
   });
 
   it("2 回目の実行で既存トピックが増分入力される(名前安定の配線確認)", async () => {
