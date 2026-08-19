@@ -3,8 +3,14 @@
 # (ADR-0014 / ADR-0019)。README の「手で __PLACEHOLDER__ を置換」を自動化する。冪等。
 #
 # 使い方(VM 上・リポジトリのどこからでも):
-#   ./docs/deploy/install-timers.sh          # dry-run のまま設置(初回検証向け・GAP/FRESHNESS_REAL 無し)
-#   ./docs/deploy/install-timers.sh --real    # GAP_TRACKER_REAL / FRESHNESS_REAL を有効化して設置
+#   ./docs/deploy/install-timers.sh            # dry-run のまま設置(初回検証向け・*_REAL 無し)
+#   ./docs/deploy/install-timers.sh --real      # FRESHNESS_REAL 等を有効化して設置
+#   ./docs/deploy/install-timers.sh --real --with-gap  # gap-tracker も enable する(既定では設置のみ・enable しない)
+#
+# ⚠️ 再実行時の注意(㉞ 調査 S2): このスクリプトは毎回テンプレから描画し直す。**--real を
+#    付け忘れると稼働中の REAL ゲートが黙って dry-run に戻る**(freshness が pending を積まなく
+#    なる等)。運用中の再実行は必ず前回と同じフラグで。gap-tracker は 2026-08-13 の判断で
+#    無効化中のため、既定では enable しない(--with-gap で明示)。
 #
 # 前提:
 #   - bot デプロイ(deploy.sh)で ~/stratum/stratum.env を用意済み
@@ -14,7 +20,14 @@
 set -euo pipefail
 
 REAL=0
-[ "${1:-}" = "--real" ] && REAL=1
+WITH_GAP=0
+for arg in "$@"; do
+  case "$arg" in
+    --real) REAL=1 ;;
+    --with-gap) WITH_GAP=1 ;;
+    *) echo "ERROR: 不明な引数 $arg(--real / --with-gap)" >&2; exit 1 ;;
+  esac
+done
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
@@ -53,19 +66,34 @@ render() {
   echo "  installed: $dst  ($label)"
 }
 
-echo "REPO_DIR=$REPO_DIR  DATA_DIR=$DATA_DIR  ENV_FILE=$ENV_FILE  NODE=$NODE_BIN  REAL=$REAL"
+echo "REPO_DIR=$REPO_DIR  DATA_DIR=$DATA_DIR  ENV_FILE=$ENV_FILE  NODE=$NODE_BIN  REAL=$REAL  WITH_GAP=$WITH_GAP"
+if [ "$REAL" != "1" ]; then
+  echo "⚠️  --real 無し: 全 unit を dry-run ゲートで描画します。運用中の VM でこれを実行すると" >&2
+  echo "⚠️  REAL 稼働中のタイマーが黙って dry-run に戻ります(意図しない場合は --real を付けて再実行)。" >&2
+fi
 render stratum-gap-tracker GAP_TRACKER_REAL
 render stratum-freshness FRESHNESS_REAL
 render stratum-stats # read-only 集計(REAL ゲート無し。DISCORD_OPS_WEBHOOK 有無が実質ゲート)
 render stratum-recordings-cleanup RECORDINGS_CLEANUP_REAL
+render stratum-image-prune # 月次 docker image prune(REAL ゲート無し・未使用画像のみ削除)
+# 失敗通知の受け皿(template unit・timer 無し)。各 service の OnFailure= から呼ばれる。
+sed -e "s|__ENV_FILE__|$ENV_FILE|g" "$SCRIPT_DIR/stratum-notify-failure@.service" \
+  >"$UNIT_DIR/stratum-notify-failure@.service"
+echo "  installed: $UNIT_DIR/stratum-notify-failure@.service"
 
 systemctl --user daemon-reload
-systemctl --user enable --now stratum-gap-tracker.timer stratum-freshness.timer stratum-stats.timer stratum-recordings-cleanup.timer
+systemctl --user enable --now stratum-freshness.timer stratum-stats.timer stratum-recordings-cleanup.timer stratum-image-prune.timer
+# gap-tracker は 2026-08-13 の判断で無効化中 → 既定では enable しない(unit の設置だけ行う)。
+if [ "$WITH_GAP" = "1" ]; then
+  systemctl --user enable --now stratum-gap-tracker.timer
+else
+  echo "  gap-tracker.timer は enable していません(有効化するときは --with-gap)。"
+fi
 loginctl enable-linger "$USER" >/dev/null 2>&1 || echo "WARN: enable-linger に失敗(polkit 制限)。IT に一度だけ依頼してください(母艦再起動後の自動起動に必要)。"
 
 echo ""
-echo "完了。次回タイマーで自動起動します(gap=平日10:00 / freshness=平日11:00 / stats=月09:00 / recordings-cleanup=毎日04:30 JST):"
-systemctl --user list-timers stratum-gap-tracker.timer stratum-freshness.timer stratum-stats.timer stratum-recordings-cleanup.timer --no-pager || true
+echo "完了。次回タイマーで自動起動します(freshness=平日11:00 / stats=月09:00 / recordings-cleanup=毎日04:30 / image-prune=毎月1日05:00 JST):"
+systemctl --user list-timers 'stratum-*' --no-pager || true
 echo ""
 echo "初回は手動起動で検証してください(まず --real 無しの dry-run 推奨):"
 echo "  systemctl --user start stratum-gap-tracker.service && journalctl --user -u stratum-gap-tracker -n 40 --no-pager"

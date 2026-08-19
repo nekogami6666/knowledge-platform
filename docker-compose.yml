@@ -7,6 +7,13 @@ services:
     image: stratum-bot
     init: true # node を PID 1 にしない(シグナル処理・ゾンビ回収)
     restart: unless-stopped # 自動復帰は rootless docker.service(systemd --user)+ linger と合わせて成立
+    # ログ肥大の防御(㉞ 調査 S3)。無指定の json-file は無制限で、crash loop 時にディスクを
+    # 食い潰す(bot.db と同じディスク)。適用には再作成が要る: docker compose up -d
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     # rootless では uid 0 = ホストユーザ(特権昇格なし・ADR-0016 D2)。bind mount(data/clones)の
     # 所有をホストユーザに保ち、gap-tracker(ホスト側 systemd・ADR-0014)と bot.db を共有するため。
     # イメージ既定の USER node は rootful/K8s 向けにそのまま残している。
@@ -45,6 +52,11 @@ services:
     image: stratum-recorder
     init: true
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     # rootless では uid 0 = ホストユーザ(ADR-0016 D2)。録音ファイルをホスト所有に保ち bot と共有する。
     user: "0"
     read_only: true

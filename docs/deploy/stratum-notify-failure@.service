@@ -1,0 +1,13 @@
+# systemd "user" template unit — stratum タイマーの失敗を #stratum-ops へ配達する(㉞ 調査 S1)。
+# 各 stratum-*.service の [Unit] に `OnFailure=stratum-notify-failure@%n.service` を張って使う。
+# exit 1 は journal に「記録」されるだけで誰にも「配達」されない問題への 1 行の受け皿。
+# VM ごと死ぬケースはこの unit でも拾えない(通知する側が死ぬ)— それは外形監視の領分(README)。
+[Unit]
+Description=stratum failure notifier for %i
+
+[Service]
+Type=oneshot
+# DISCORD_OPS_WEBHOOK を stratum.env から読む(chmod 600・§9.1)。未設定なら静かに成功終了。
+EnvironmentFile=__ENV_FILE__
+ExecStart=/bin/bash -c 'u="$1"; if [ -z "${DISCORD_OPS_WEBHOOK:-}" ]; then echo "DISCORD_OPS_WEBHOOK 未設定。通知スキップ。"; exit 0; fi; curl -fsS -X POST -H "Content-Type: application/json" -d "{\"content\": \"❌ VM タイマーが失敗しました: ${u}(journalctl --user -u ${u} -n 40 で確認)\"}" "$DISCORD_OPS_WEBHOOK"' notify %i
+SyslogIdentifier=stratum-notify-failure

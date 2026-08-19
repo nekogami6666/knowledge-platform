@@ -1,0 +1,11 @@
+# 月次 docker image prune の起動タイマー(毎月 1 日 05:00 JST — db-backup 04:00 /
+# recordings-cleanup 04:30 の後)。配置と有効化は install-timers.sh。
+[Unit]
+Description=Run stratum docker image prune monthly (JST)
+
+[Timer]
+OnCalendar=*-*-01 05:00 Asia/Tokyo
+Persistent=true
+
+[Install]
+WantedBy=timers.target

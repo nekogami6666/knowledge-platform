@@ -1,0 +1,14 @@
+# 未使用 docker 画像の月次掃除(㉞ 調査)。毎回の `--build` デプロイが古い画像を残し、
+# 2026-08-20 に 35 画像 21.85GB(85% が未使用)まで蓄積してディスク 97% に達した再発防止。
+# 稼働中コンテナの画像は消えない(prune は未使用のみ)。rootless docker のため bash -lc で
+# ユーザ環境(DOCKER_HOST 等)を読み込む。
+[Unit]
+Description=stratum monthly docker image prune
+After=network-online.target
+OnFailure=stratum-notify-failure@%n.service
+
+[Service]
+Type=oneshot
+EnvironmentFile=__ENV_FILE__
+ExecStart=/bin/bash -lc 'docker image prune -f && df -h / | tail -1'
+SyslogIdentifier=stratum-image-prune

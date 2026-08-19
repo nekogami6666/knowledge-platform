@@ -8,6 +8,8 @@
 Description=stratum freshness-checker (knowledge freshness batch)
 Documentation=https://github.com/queeenb-com/knowledge-platform/blob/main/docs/deploy/README.md
 After=network-online.target
+# 失敗を #stratum-ops へ配達する(㉞ 調査 S1: exit 1 は記録されるだけで誰にも届かなかった)。
+OnFailure=stratum-notify-failure@%n.service
 Wants=network-online.target
 
 [Service]

@@ -117,10 +117,18 @@ cd ~/stratum/knowledge-platform && ./docs/deploy/update.sh
 
 ## 運用(ADR-0010 D4 / ADR-0016 D5)
 
-- **死活監視**: 当面は `docker compose ps` を定期確認(heartbeat は将来 follow-up)。
+- **タイマー失敗の通知**: 各 stratum-*.service は失敗時に `stratum-notify-failure@` 経由で
+  #stratum-ops へ 1 行飛ぶ(install-timers.sh が設置・㉞)。**VM ごと死ぬケースはこれでも
+  拾えない**(通知する側が死ぬ)— 外形監視(healthchecks.io 等)は引き続き follow-up。
+  週次の外形シグナルとしては weekly-eval のハートビート(月曜 09:00 JST の ✅)が使える。
+  ※ db-backup unit はリポ管理外(VM 手書き)。`OnFailure=stratum-notify-failure@%n.service` を
+  手で追記しておくこと。
+- **死活監視**: 当面は `docker compose ps` を定期確認。
 - **再起動テスト**: 一度 VM を再起動し、`docker compose ps` で自動復帰を確認(linger 必須)。
-- **ログ**: `docker compose logs --tail 200 bot`。肥大したら `docker system prune -f`(停止中コンテナ・
-  未使用イメージ・ビルドキャッシュの掃除。月 1 目安)。
+- **ログ**: `docker compose logs --tail 200 bot`。ローテーションは compose 側で設定済み
+  (json-file 10MB×3。適用には `docker compose up -d` の再作成が必要)。
+- **ディスク**: 毎回の `--build` が古い画像を残す(実測: 3 週間で 21.85GB・ディスク 97% に到達)。
+  `stratum-image-prune.timer`(毎月 1 日 05:00 JST)が `docker image prune -f` で自動回収する。
 - **単一インスタンス厳守**: 同じ Discord トークンで bot を二重起動しない(SQLite + 直列キュー前提)。
   切替時は旧 systemd サービスの停止を必ず先に。
 
