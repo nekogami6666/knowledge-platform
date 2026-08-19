@@ -17,7 +17,7 @@ import { createFsPromptStore, nullUsageRecorder } from "@stratum/llm";
 import { createFsConfigReader, loadExtractorConfig } from "./config.js";
 import type { GitExec } from "./diff.js";
 import { isRealPr, parseEnv, parsePositiveInt } from "./env.js";
-import { createLogger } from "./logger.js";
+import { createLogger, type Logger } from "./logger.js";
 import { createWebhookNotifier } from "./notify.js";
 import { createGitRepoSyncer } from "./repos.js";
 import { runExtractor } from "./run.js";
@@ -47,6 +47,19 @@ function nullGhClient(): GhClient {
   };
 }
 
+/** 処理上限 env の解釈。未設定は無制限(undefined)、不正値は無制限へフォールバック + warn(ADR-0023 D3)。 */
+function parseOptionalCap(
+  raw: string | undefined,
+  envName: string,
+  logger: Logger,
+): number | undefined {
+  if (raw === undefined || raw.trim() === "") return undefined;
+  const parsed = parsePositiveInt(raw, 0);
+  if (parsed.value > 0) return parsed.value;
+  logger.warn(`不正な ${envName} "${raw}" のため無制限で実行します`, { env: envName });
+  return undefined;
+}
+
 async function main(): Promise<void> {
   const env = parseEnv();
   const secrets = [
@@ -64,19 +77,12 @@ async function main(): Promise<void> {
   const concurrency = parsePositiveInt(env.EXTRACTOR_RECONCILE_CONCURRENCY, 4);
   if (concurrency.warning !== undefined)
     logger.warn(concurrency.warning, { env: "EXTRACTOR_RECONCILE_CONCURRENCY" });
-  // 未設定は無制限(undefined)。設定時のみ正の整数として解釈し、不正値は無制限へフォールバック(ADR-0023 D3)。
-  let maxFilesPerRun: number | undefined;
-  if (env.EXTRACTOR_MAX_FILES !== undefined && env.EXTRACTOR_MAX_FILES.trim() !== "") {
-    const parsed = parsePositiveInt(env.EXTRACTOR_MAX_FILES, 0);
-    if (parsed.value > 0) maxFilesPerRun = parsed.value;
-    else
-      logger.warn(
-        `不正な EXTRACTOR_MAX_FILES "${env.EXTRACTOR_MAX_FILES}" のため無制限で実行します`,
-        {
-          env: "EXTRACTOR_MAX_FILES",
-        },
-      );
-  }
+  const maxFilesPerRun = parseOptionalCap(env.EXTRACTOR_MAX_FILES, "EXTRACTOR_MAX_FILES", logger);
+  const maxEntriesPerRun = parseOptionalCap(
+    env.EXTRACTOR_MAX_ENTRIES,
+    "EXTRACTOR_MAX_ENTRIES",
+    logger,
+  );
 
   const summary = await runExtractor({
     config,
@@ -99,6 +105,7 @@ async function main(): Promise<void> {
     realPr,
     reconcileConcurrency: concurrency.value,
     maxFilesPerRun,
+    maxEntriesPerRun,
   });
   logger.info("extractor 完了", {
     created: summary.created,

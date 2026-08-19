@@ -51,6 +51,12 @@ export interface RunDeps {
   reconcileConcurrency: number;
   /** 1 run で処理する最大ファイル数(ADR-0023 D3。既定=無制限。index.ts の EXTRACTOR_MAX_FILES)。 */
   maxFilesPerRun?: number;
+  /**
+   * 1 run で materialize するエントリ数(new+append+supersede+問い)の上限(㉞ A2。既定=無制限。
+   * index.ts の EXTRACTOR_MAX_ENTRIES)。ファイル境界でのみ判定 = 1 ファイルは不可分に処理し
+   * 多少の超過を許す(pr-miner の cap と同じ思想)。PR を 1 晩でレビューし切れる大きさに保つ。
+   */
+  maxEntriesPerRun?: number;
   /** 単調増加ミリ秒(段階別所要時間の計測。既定 performance.now。テストで注入)。 */
   monotonicMs?: () => number;
 }
@@ -357,6 +363,7 @@ export async function runExtractor(deps: RunDeps): Promise<RunSummary> {
   const timings: StageTimings = { extractMs: 0, reconcileMs: 0, materializeMs: 0 };
   // 1 run の処理上限(ADR-0023 D3)。既定=無制限。抽出に入った件数(read/抽出失敗も 1 件)で数える。
   const maxFiles = deps.maxFilesPerRun ?? Number.POSITIVE_INFINITY;
+  const maxEntries = deps.maxEntriesPerRun ?? Number.POSITIVE_INFINITY;
   let attempted = 0;
   const skippedFiles: string[] = []; // 抽出失敗で今回 skip(次回持ち越し)。
   // 同一 run 内で同じ title の問いを二重起票しない(ADR-0027 D3。既存 KB との突合はしない)。
@@ -368,8 +375,17 @@ export async function runExtractor(deps: RunDeps): Promise<RunSummary> {
   for (const batch of batches) {
     const pendingOut: string[] = []; // このソースで次回に持ち越すファイル(deferred + 失敗)。
     for (const path of batch.workList) {
-      // 上限に達したら残りは処理せず持ち越す(ADR-0023 D3)。
-      if (attempted >= maxFiles) {
+      // 上限に達したら残りは処理せず持ち越す(ADR-0023 D3 / ㉞ A2)。エントリ上限はファイル境界
+      // でのみ判定する(直前のファイルで超過していても、そのファイル自体は分割しない)。
+      const entriesSoFar = counts.new + counts.append + counts.supersede + counts.openQuestions;
+      if (attempted >= maxFiles || entriesSoFar >= maxEntries) {
+        if (deferredCount === 0) {
+          logger.info("処理上限に達したため残りを次回へ持ち越します", {
+            reason: attempted >= maxFiles ? "max-files" : "max-entries",
+            attempted,
+            entries: entriesSoFar,
+          });
+        }
         pendingOut.push(path);
         deferredCount += 1;
         continue;

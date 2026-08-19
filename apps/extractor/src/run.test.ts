@@ -475,6 +475,98 @@ describe("runExtractor", () => {
     expect(paths.some((p) => p.includes("/dc/"))).toBe(false);
   });
 
+  it("maxEntriesPerRun 超過で残りファイルを持ち越す(ファイル境界で判定・㉞ A2)", async () => {
+    const gh = makeGh();
+    const r = await runExtractor(
+      makeDeps({
+        gh,
+        maxEntriesPerRun: 2, // 1 ファイル 1 entry の既定 fixture → 2 ファイル処理で上限
+        exec: async (args: readonly string[]) =>
+          args.includes("interviews/*.md") ? { stdout: "" } : { stdout: "a.md\nb.md\nc.md\n" },
+        readFile: async (p) => {
+          if (p.startsWith("/m/")) return "# 会議\n参加者: yamada\n湿度しきい値。";
+          throw new Error(`ENOENT ${p}`);
+        },
+      }),
+    );
+    expect(r.created).toBe(true);
+    expect(r.counts.new).toBe(2);
+    expect(r.deferredCount).toBe(1);
+    const arg = vi.mocked(gh.createPullRequest).mock.calls[0]?.[0];
+    const state = JSON.parse(arg?.files.find((f) => f.path === "_meta/state.json")?.content ?? "");
+    expect(state.sources.minutes).toEqual({ last_processed_sha: HEAD, pending: ["c.md"] });
+  });
+
+  it("エントリ上限は 1 ファイル内では打ち切らない(不可分・多少の超過を許す)", async () => {
+    const gh = makeGh();
+    const prompt = { read: async () => "---\nrole: standard\n---\nR" };
+    const threeLearnings: ExtractionResult = {
+      decisions: [],
+      learnings: ["a", "b", "c"].map((t) => ({
+        kind: "learning" as const,
+        title: `学び${t}`,
+        body: "b",
+        entryType: "fact" as const,
+        domain: "hardware",
+        people: ["yamada"],
+        tags: [],
+        confidence: "high" as const,
+        slug: t,
+      })),
+      openQuestions: [],
+    };
+    const r = await runExtractor(
+      makeDeps({
+        gh,
+        maxEntriesPerRun: 2,
+        exec: async (args: readonly string[]) =>
+          args.includes("interviews/*.md") ? { stdout: "" } : { stdout: "a.md\nb.md\n" },
+        readFile: async (p) => {
+          if (p.startsWith("/m/")) return "# 会議\n参加者: yamada\n本文";
+          throw new Error(`ENOENT ${p}`);
+        },
+        extractDeps: {
+          promptStore: prompt,
+          search: async () => ({
+            value: threeLearnings,
+            usage: { inputTokens: 1, outputTokens: 1 },
+          }),
+        },
+      }),
+    );
+    // a.md は 3 entries を丸ごと materialize(分割しない)→ b.md は上限超過で持ち越し。
+    expect(r.counts.new).toBe(3);
+    expect(r.deferredCount).toBe(1);
+    const arg = vi.mocked(gh.createPullRequest).mock.calls[0]?.[0];
+    const state = JSON.parse(arg?.files.find((f) => f.path === "_meta/state.json")?.content ?? "");
+    expect(state.sources.minutes).toEqual({ last_processed_sha: HEAD, pending: ["b.md"] });
+  });
+
+  it("maxFiles と maxEntries は先に達した方で打ち切る(併用)", async () => {
+    const gh = makeGh();
+    const r = await runExtractor(
+      makeDeps({
+        gh,
+        maxFilesPerRun: 2,
+        maxEntriesPerRun: 1, // entries が先に達する
+        exec: async (args: readonly string[]) =>
+          args.includes("interviews/*.md") ? { stdout: "" } : { stdout: "a.md\nb.md\nc.md\n" },
+        readFile: async (p) => {
+          if (p.startsWith("/m/")) return "# 会議\n参加者: yamada\n本文";
+          throw new Error(`ENOENT ${p}`);
+        },
+      }),
+    );
+    expect(r.counts.new).toBe(1);
+    expect(r.deferredCount).toBe(2);
+    const arg = vi.mocked(gh.createPullRequest).mock.calls[0]?.[0];
+    const state = JSON.parse(arg?.files.find((f) => f.path === "_meta/state.json")?.content ?? "");
+    expect(state.sources.minutes).toEqual({
+      last_processed_sha: HEAD,
+      pending: ["b.md", "c.md"],
+    });
+  });
+
   it("前回 pending は work list 先頭で処理する(diff が空でも no-changes にしない・ADR-0023 D2)", async () => {
     const gh = makeGh();
     const r = await runExtractor(

@@ -26,6 +26,8 @@ const envSchema = z
     EXTRACTOR_RECONCILE_CONCURRENCY: z.string().optional(),
     /** 1 run で処理する最大ファイル数(正の整数)。未設定/不正値は無制限(index.ts で解釈・ADR-0023 D3)。 */
     EXTRACTOR_MAX_FILES: z.string().optional(),
+    /** 1 run で materialize するエントリ数の上限(ファイル境界で判定・㉞ A2)。未設定 = 無制限。 */
+    EXTRACTOR_MAX_ENTRIES: z.string().optional(),
     CLONES_DIR: z.string().default("./.clones"),
     CONFIG_DIR: z.string().default("./config"),
     PROMPTS_DIR: z.string().default("./prompts"),

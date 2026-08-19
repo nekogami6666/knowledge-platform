@@ -84,6 +84,9 @@ jobs:
           EXTRACTOR_TIMEOUT_MS: "600000"
           # 夜間 1 回あたりの処理ファイル上限。バックログを少量ずつ・有界コストで消化する(ADR-0023 D3)。
           EXTRACTOR_MAX_FILES: "5"
+          # 1 PR あたりのエントリ数上限(㉞ A2)。5 ファイルでも新規 24〜45 件が出てレビューが
+          # 滞留したため、1 晩でレビューし切れる量に制限。残りは pending 持ち越し。
+          EXTRACTOR_MAX_ENTRIES: "20"
           # 実 PR 有効化(2026-07-23 人間 GO・ADR-0013 D1(d))。ローカル dry-run で実 dev-minutes を検証済み
           # (ナレッジ4件・既存 domain 再利用)。nightly + workflow_dispatch とも実 PR を出す。
           EXTRACTOR_REAL_PR: "1"
