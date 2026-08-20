@@ -48,3 +48,13 @@ export async function loadFreshnessConfig(reader: ConfigReader): Promise<Freshne
   }
   return freshnessConfigSchema.parse(yaml.load(text));
 }
+
+/**
+ * clone/fetch 認証の実行時注入(㉞。discord-bot repos.ts と同一実装のコピー)。トークンは env
+ * (GIT_CLONE_TOKEN)から合成し、config(kb_url)に平文で置かない(§9.1)。
+ */
+export function withCloneToken(url: string, token: string | undefined): string {
+  if (token === undefined || token.length === 0) return url;
+  if (/^https:\/\/[^@/]+@/.test(url)) return url;
+  return url.replace(/^https:\/\//, `https://x-access-token:${token}@`);
+}

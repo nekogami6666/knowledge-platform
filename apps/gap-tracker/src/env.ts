@@ -20,6 +20,8 @@ const envSchema = z.object({
   GITHUB_APP_INSTALLATION_ID: z.string().optional(),
   GITHUB_TOKEN: z.string().optional(),
   /** "1"/"true" で実 commit + 実依頼送信。既定は dry-run(計画をログするだけ)。 */
+  /** kb_url に注入する clone 用トークン(config に平文で置かない・㉞)。 */
+  GIT_CLONE_TOKEN: z.string().optional(),
   GAP_TRACKER_REAL: z.string().optional(),
   CLONES_DIR: z.string().default("./.clones"),
   CONFIG_DIR: z.string().default("./config"),

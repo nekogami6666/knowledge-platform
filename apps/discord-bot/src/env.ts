@@ -28,6 +28,8 @@ const envSchema = z
     GITHUB_TOKEN: z.string().optional(),
     /** voice-memo の STT 用 OpenAI キー(ADR-0015 D3)。未設定なら voice-memo OFF。ログに出さない。 */
     OPENAI_API_KEY: z.string().optional(),
+    /** repos.yaml の url に注入する clone 用トークン(config に平文で置かない・㉞)。 */
+    GIT_CLONE_TOKEN: z.string().optional(),
     /** /ask の agentic search 上限 ms(既定 120000)。KB 成長で伸びたら env で調整(㉞ 調査)。 */
     ASK_TIMEOUT_MS: z.string().optional(),
     /** VC 録音 sidecar の URL(ADR-0020。compose 内部ネットワーク・例 http://recorder:9488)。未設定なら VC 入口 OFF。 */

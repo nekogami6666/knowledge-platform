@@ -41,7 +41,7 @@ import { loadInterviewTopics } from "./interview-topics.js";
 import { createLogger, withCorrelation } from "./logger.js";
 import { createCloneMembersLoader, DEFAULT_KB_DIR } from "./members.js";
 import { createQaSearch } from "./qa-search.js";
-import { createGitRepoSyncer } from "./repos.js";
+import { createGitRepoSyncer, withCloneToken } from "./repos.js";
 import { createSqliteStore } from "./sqlite-store.js";
 import { isoJst } from "./time.js";
 import {
@@ -62,6 +62,7 @@ async function main(): Promise<void> {
     env.GITHUB_TOKEN,
     env.GITHUB_APP_PRIVATE_KEY,
     env.OPENAI_API_KEY,
+    env.GIT_CLONE_TOKEN,
   ].filter((v): v is string => typeof v === "string" && v.length > 0);
   const logger = createLogger("info", undefined, secrets);
   // Discord 送信もログと同じ秘密値で伏字化する(ADR-0030。例外文言の混入対策・§9.1)。
@@ -70,12 +71,21 @@ async function main(): Promise<void> {
   const reader = createFsConfigReader(env.CONFIG_DIR);
   const channels = await loadChannels(reader);
   const reposConfig = await loadRepos(reader);
+  // clone 認証は env から実行時注入(㉞: /config はエージェント可視 — 平文トークンを置かない)。
+  if (reposConfig.repos.some((r) => r.url !== undefined && /^https:\/\/[^@/]+@/.test(r.url))) {
+    logger.warn(
+      "repos.yaml の url に認証情報が埋め込まれています。トークンを GIT_CLONE_TOKEN(env)へ移し、URL から外してください(§9.1)。",
+    );
+  }
+  const repos = reposConfig.repos.map((r) =>
+    r.url !== undefined ? { ...r, url: withCloneToken(r.url, env.GIT_CLONE_TOKEN) } : r,
+  );
   const ops = await loadOps(reader);
   const voice = await loadVoice(reader);
 
   // members 対応表は KB clone の _meta/members.yaml が唯一の正(ADR-0017 D3)。
   // clone 先 dir は repos.yaml の ops.kb_repo 該当エントリから引く(無ければ既定名)。
-  const kbDir = reposConfig.repos.find((r) => r.repo === ops.kb_repo)?.dir ?? DEFAULT_KB_DIR;
+  const kbDir = repos.find((r) => r.repo === ops.kb_repo)?.dir ?? DEFAULT_KB_DIR;
   const getMembers = createCloneMembersLoader({ clonesDir: env.CLONES_DIR, kbDir, logger });
 
   // 👍 代理マージ(§6.3): ops.yaml と GitHub 認証が両方揃ったときだけ有効(既定 OFF)。
@@ -94,7 +104,7 @@ async function main(): Promise<void> {
     {
       permanentExclude: channels.permanent_exclude.length,
       membersSource: `${kbDir}/_meta/members.yaml`,
-      repos: reposConfig.repos.length,
+      repos: repos.length,
       proxyMerge: gh !== undefined,
       voiceMemo: voice.channel_id !== null,
     },
@@ -105,7 +115,7 @@ async function main(): Promise<void> {
       "channels.allow は廃止されました(ADR-0018: bot が見えるチャンネルを読みます)。行を削除してください(無視されます)。",
     );
   }
-  if (reposConfig.repos.length === 0) {
+  if (repos.length === 0) {
     logger.warn("repos.yaml が空です。検索対象リポがありません(§14 #5)。");
   }
   if (voice.max_recording_minutes > 22) {
@@ -124,7 +134,7 @@ async function main(): Promise<void> {
   let freshness: FreshnessApplyDeps | undefined;
   if (gh !== undefined && ops.kb_repo !== null) {
     const kbRepo = ops.kb_repo;
-    const kbSpec = reposConfig.repos.find((r) => r.repo === kbRepo) ?? { repo: kbRepo, dir: kbDir };
+    const kbSpec = repos.find((r) => r.repo === kbRepo) ?? { repo: kbRepo, dir: kbDir };
     freshness = {
       store,
       gh,
@@ -173,7 +183,7 @@ async function main(): Promise<void> {
 
   const onAsk: AskHandler = (question, ctx) => {
     const deps: AskDeps = {
-      repos: reposConfig.repos,
+      repos,
       syncer,
       promptStore,
       store,

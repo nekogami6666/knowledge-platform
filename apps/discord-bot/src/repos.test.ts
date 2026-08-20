@@ -4,7 +4,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, it } from "vitest";
-import { createGitRepoSyncer, type GitExec, type RepoSpec, stripCredentials } from "./repos.js";
+import {
+  createGitRepoSyncer,
+  type GitExec,
+  type RepoSpec,
+  stripCredentials,
+  withCloneToken,
+} from "./repos.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -169,5 +175,21 @@ describe("createGitRepoSyncer 実 git 統合(scrub + URL 引数 fetch)", () => {
     expect(second?.resolvedCommit).not.toBe(first?.resolvedCommit);
     expect(await exists(join(kbDir, "litter.md"))).toBe(false);
     expect(await exists(join(kbDir, "tracked.md"))).toBe(true);
+  });
+});
+
+describe("withCloneToken(clone 認証の実行時注入・㉞)", () => {
+  it("トークンを https URL へ注入する", () => {
+    expect(withCloneToken("https://github.com/o/r.git", "tok123")).toBe(
+      "https://x-access-token:tok123@github.com/o/r.git",
+    );
+  });
+  it("既に認証入りの URL・トークン未設定はそのまま(後方互換)", () => {
+    expect(withCloneToken("https://x:old@github.com/o/r.git", "tok123")).toBe(
+      "https://x:old@github.com/o/r.git",
+    );
+    expect(withCloneToken("https://github.com/o/r.git", undefined)).toBe(
+      "https://github.com/o/r.git",
+    );
   });
 });

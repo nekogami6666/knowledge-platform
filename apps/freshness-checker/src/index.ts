@@ -13,7 +13,7 @@ import { promisify } from "node:util";
 import { createSqliteStore } from "@stratum/discord-bot/sqlite-store";
 import { createGhClientFromEnv, type GhClient } from "@stratum/gh-client";
 import { validateRepo } from "@stratum/kb-core";
-import { createFsConfigReader, loadFreshnessConfig } from "./config.js";
+import { createFsConfigReader, loadFreshnessConfig, withCloneToken } from "./config.js";
 import { isReal, parseEnv } from "./env.js";
 import { type GitExec, syncKb } from "./kb-sync.js";
 import { createLogger } from "./logger.js";
@@ -75,9 +75,12 @@ async function listKnowledgeFiles(kbRoot: string): Promise<KbFile[]> {
 
 async function main(): Promise<void> {
   const env = parseEnv();
-  const secrets = [env.GITHUB_TOKEN, env.GITHUB_APP_PRIVATE_KEY, env.DISCORD_OPS_WEBHOOK].filter(
-    (v): v is string => typeof v === "string" && v.length > 0,
-  );
+  const secrets = [
+    env.GITHUB_TOKEN,
+    env.GITHUB_APP_PRIVATE_KEY,
+    env.DISCORD_OPS_WEBHOOK,
+    env.GIT_CLONE_TOKEN,
+  ].filter((v): v is string => typeof v === "string" && v.length > 0);
   const logger = createLogger(secrets);
   const real = isReal(env);
   const config = await loadFreshnessConfig(createFsConfigReader(env.CONFIG_DIR));
@@ -124,7 +127,7 @@ async function main(): Promise<void> {
           {
             dir: config.kb_dir,
             baseBranch: config.base_branch,
-            ...(config.kb_url ? { url: config.kb_url } : {}),
+            ...(config.kb_url ? { url: withCloneToken(config.kb_url, env.GIT_CLONE_TOKEN) } : {}),
           },
           env.CLONES_DIR,
           gitExec,

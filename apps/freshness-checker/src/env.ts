@@ -17,6 +17,8 @@ const envSchema = z.object({
   GITHUB_APP_INSTALLATION_ID: z.string().optional(),
   GITHUB_TOKEN: z.string().optional(),
   /** "1"/"true" でキュー投入 + stale 降格 commit を実行。既定は dry-run(計画をログするだけ)。 */
+  /** kb_url に注入する clone 用トークン(config に平文で置かない・㉞)。 */
+  GIT_CLONE_TOKEN: z.string().optional(),
   FRESHNESS_REAL: z.string().optional(),
   CLONES_DIR: z.string().default("./.clones"),
   CONFIG_DIR: z.string().default("./config"),

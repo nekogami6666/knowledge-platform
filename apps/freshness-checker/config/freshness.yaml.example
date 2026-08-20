@@ -8,6 +8,7 @@ kb_repo: "your-org/knowledge-base"
 kb_dir: "knowledge-base"
 # git remote URL(省略時は checkout 済みの kb_dir をそのまま使う。本番は設定を推奨)。
 # kb_url: "https://github.com/your-org/knowledge-base.git"
+#   ⚠️ URL にトークンを書かない(㉞)。clone 用 PAT は env の GIT_CLONE_TOKEN へ。
 base_branch: "main"
 
 # 1 人 1 日あたりの確認 DM 上限(ADR-0019 D2)。

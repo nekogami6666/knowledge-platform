@@ -42,8 +42,11 @@ git clone https://github.com/queeenb-com/knowledge-platform.git && cd knowledge-
 - **`repos.yaml`(実リポ・/ask の検索対象)** — 推奨初期セット:
   ```yaml
   repos:
-    - { repo: queeenb-com/knowledge-base, dir: knowledge-base, url: "https://x-access-token:<PAT>@github.com/queeenb-com/knowledge-base.git" }
-    - { repo: queeenb-com/dev-minutes,    dir: dev-minutes,    url: "https://x-access-token:<PAT>@github.com/queeenb-com/dev-minutes.git" }
+    - { repo: queeenb-com/knowledge-base, dir: knowledge-base, url: "https://github.com/queeenb-com/knowledge-base.git" }
+    - { repo: queeenb-com/dev-minutes,    dir: dev-minutes,    url: "https://github.com/queeenb-com/dev-minutes.git" }
+  # ⚠️ URL にトークンを埋め込まない(㉞ セキュリティ修正)。/config は /ask エージェントから
+  # 読めるため、平文 PAT が LLM に露出する。clone 用 PAT は stratum.env の GIT_CLONE_TOKEN へ
+  # (gap.yaml / freshness.yaml の kb_url も同様にトークン無しで書く)。
   ```
   `<PAT>` = KB/minutes を Contents:Read できる fine-grained PAT(Actions の EXTRACTOR_PAT と同等でよい)。
 - **`ops.yaml`**: `channel_id: <#stratum-ops>` / `kb_repo: queeenb-com/knowledge-base`(👍 代理マージ)。

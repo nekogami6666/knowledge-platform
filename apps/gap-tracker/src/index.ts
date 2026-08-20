@@ -18,7 +18,7 @@ import { createGhClientFromEnv, type GhClient } from "@stratum/gh-client";
 import { newId, parseEntry, type QuestionLog, validateRepo } from "@stratum/kb-core";
 import { createFsPromptStore, nullUsageRecorder } from "@stratum/llm";
 import { runFlywheelClose } from "./close.js";
-import { createFsConfigReader, loadGapConfig } from "./config.js";
+import { createFsConfigReader, loadGapConfig, withCloneToken } from "./config.js";
 import { draftEntry } from "./draft.js";
 import { isReal, parseEnv } from "./env.js";
 import { runAnswerIngestion } from "./ingest.js";
@@ -123,6 +123,7 @@ async function main(): Promise<void> {
     env.GITHUB_TOKEN,
     env.GITHUB_APP_PRIVATE_KEY,
     env.DISCORD_GAP_WEBHOOK,
+    env.GIT_CLONE_TOKEN,
     env.DISCORD_OPS_WEBHOOK,
   ].filter((v): v is string => typeof v === "string" && v.length > 0);
   const logger = createLogger(secrets);
@@ -138,7 +139,7 @@ async function main(): Promise<void> {
       {
         dir: config.kb_dir,
         baseBranch: config.base_branch,
-        ...(config.kb_url ? { url: config.kb_url } : {}),
+        ...(config.kb_url ? { url: withCloneToken(config.kb_url, env.GIT_CLONE_TOKEN) } : {}),
       },
       env.CLONES_DIR,
       gitExec,
