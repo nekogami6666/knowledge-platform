@@ -22,6 +22,8 @@ import type { SyncedKb } from "./kb-sync.js";
 import type { Logger } from "./logger.js";
 
 export interface IngestDeps {
+  /** 1 run で LLM 化する回答数の上限(㉞。既定=無制限。index.ts の GAP_MAX_DRAFTS・既定 5)。 */
+  maxDraftsPerRun?: number;
   config: GapConfig;
   store: BotStore;
   syncKb: () => Promise<SyncedKb>;
@@ -62,6 +64,8 @@ export interface IngestItem {
 }
 
 export interface IngestSummary {
+  /** 1 run 上限(maxDraftsPerRun)超過で今回は処理しなかった数(pending のまま次回へ)。 */
+  deferred: number;
   /** ナレッジ化した回答数(dry-run では予定数)。 */
   drafted: number;
   /** 作成した PR 数(0 または 1)。 */
@@ -95,7 +99,14 @@ function safeJsonParse(s: string | null): unknown {
 export async function runAnswerIngestion(deps: IngestDeps): Promise<IngestSummary> {
   const { store, logger } = deps;
   const pending = store.listPendingActions("gap_answer").filter((a) => a.state === "pending");
-  const summary: IngestSummary = { drafted: 0, prCreated: 0, skipped: 0, dryRun: !deps.real };
+  const summary: IngestSummary = {
+    drafted: 0,
+    prCreated: 0,
+    skipped: 0,
+    deferred: 0,
+    dryRun: !deps.real,
+  };
+  const maxDrafts = deps.maxDraftsPerRun ?? Number.POSITIVE_INFINITY;
   if (pending.length === 0) {
     logger.info("未処理の gap 回答はありません。");
     return summary;
@@ -127,6 +138,16 @@ export async function runAnswerIngestion(deps: IngestDeps): Promise<IngestSummar
       continue;
     }
     const question = parseEntry(found.raw, "question", found.openPath);
+    // 1 run の LLM 化上限(㉞ gap 事前修正)。超過分は pending のまま次回へ(コスト有界)。
+    if (items.length + (deps.real ? 0 : summary.drafted) >= maxDrafts) {
+      summary.deferred += 1;
+      continue;
+    }
+    // dry-run は LLM を呼ばない(旧実装は real 判定が draft の**後**にあり、様子見でも課金していた)。
+    if (!deps.real) {
+      summary.drafted += 1;
+      continue;
+    }
     const candidate = await deps.draft({
       question: question.frontmatter.question,
       answer: payload.content,
@@ -148,6 +169,14 @@ export async function runAnswerIngestion(deps: IngestDeps): Promise<IngestSummar
     notifyLines.push(`- ${payload.questionId} → ${id}(${built.frontmatter.domain})`);
   }
 
+  if (!deps.real) {
+    logger.info("dry-run: LLM も PR も呼びません(GAP_TRACKER_REAL 未設定)。", {
+      wouldDraft: summary.drafted,
+      deferred: summary.deferred,
+      skipped: summary.skipped,
+    });
+    return summary;
+  }
   if (files.length === 0) {
     logger.info("PR 対象の回答がありません(全件スキップ)。", { skipped: summary.skipped });
     return summary;
@@ -164,13 +193,6 @@ export async function runAnswerIngestion(deps: IngestDeps): Promise<IngestSummar
   }
 
   summary.drafted = items.length;
-  if (!deps.real) {
-    logger.info("dry-run: PR も通知もしません(GAP_TRACKER_REAL 未設定)。", {
-      entries: items.map((i) => i.entryId),
-      files: files.length,
-    });
-    return summary;
-  }
 
   const head = answersBranch(items.map((i) => i.questionId));
   const title = `docs(kb): ${items.length} 件の gap 回答をナレッジ化`;

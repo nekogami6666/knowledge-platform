@@ -73,6 +73,8 @@ export function buildSweepRequestMessage(
 }
 
 export interface SweepDeps {
+  /** 1 run で送る依頼数の上限(㉞。既定=無制限。index.ts の GAP_MAX_REQUESTS・既定 5)。 */
+  maxRequestsPerRun?: number;
   config: GapConfig;
   syncKb: () => Promise<SyncedKb>;
   gh: GhClient;
@@ -106,6 +108,8 @@ export interface SweepSummary {
   unassigned: number;
   /** parse 不能で読み飛ばした数。 */
   skipped: number;
+  /** 1 run 上限(maxRequestsPerRun)超過で今回は依頼しなかった数(次回スイープが再挑戦)。 */
+  deferred: number;
   dryRun: boolean;
 }
 
@@ -116,8 +120,10 @@ export async function runOpenSweep(deps: SweepDeps): Promise<SweepSummary> {
     fallbackAssigned: 0,
     unassigned: 0,
     skipped: 0,
+    deferred: 0,
     dryRun: !deps.real,
   };
+  const maxRequests = deps.maxRequestsPerRun ?? Number.POSITIVE_INFINITY;
   const kb = await deps.syncKb();
 
   // 対象 = status: open かつ assignee 未設定。asked 済みは対象外(= 二重依頼防止)。
@@ -161,6 +167,12 @@ export async function runOpenSweep(deps: SweepDeps): Promise<SweepSummary> {
 
   for (const t of targets) {
     const q = t.frontmatter;
+    // 1 run の依頼送信上限(㉞ gap 事前修正)。再有効化初回に滞留全件へ一斉送信しない。
+    // 上限チェックは担当選定より**前** = 週予算(reserveAssignee)を deferred 分には消費しない。
+    if (ids.length >= maxRequests) {
+      summary.deferred += 1;
+      continue;
+    }
     const preferred =
       expertise === null
         ? []
@@ -232,6 +244,7 @@ export async function runOpenSweep(deps: SweepDeps): Promise<SweepSummary> {
     assigned: summary.assigned,
     fallbackAssigned: summary.fallbackAssigned,
     unassigned: summary.unassigned,
+    deferred: summary.deferred,
   });
   return summary;
 }

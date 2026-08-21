@@ -154,17 +154,50 @@ describe("runAnswerIngestion", () => {
     expect(pendingAnswers(deps.store)).toHaveLength(0);
   });
 
-  it("dry-run は PR も通知も markActionDone もしない(staging + validate まで)", async () => {
+  it("dry-run は LLM も PR も呼ばず件数だけ報告する(㉞: 旧実装は draft 後に real 判定 = 課金)", async () => {
     const { gh, prs } = makeGh();
     const posts: string[] = [];
-    const deps = makeDeps({ gh, real: false, postOps: async (c) => void posts.push(c) });
+    const deps = makeDeps({
+      gh,
+      real: false,
+      postOps: async (c) => void posts.push(c),
+      draft: async () => {
+        throw new Error("dry-run で draft(LLM)が呼ばれてはならない");
+      },
+    });
     const r = await runAnswerIngestion(deps);
     expect(r).toMatchObject({ drafted: 1, prCreated: 0, dryRun: true });
     expect(prs).toHaveLength(0);
     expect(posts).toHaveLength(0);
-    expect(pendingAnswers(deps.store)).toHaveLength(1);
-    expect(deps.written.size).toBeGreaterThan(0);
+    expect(pendingAnswers(deps.store)).toHaveLength(1); // pending は温存(real 化後に処理)
+    expect(deps.written.size).toBe(0); // staging もしない(LLM を呼ばないので書くものが無い)
     expect(deps.store.listPendingActions("gap_pr")).toHaveLength(0);
+  });
+
+  it("maxDraftsPerRun 超過分は pending のまま次回へ(1 run のコスト有界・㉞)", async () => {
+    const { gh, prs } = makeGh();
+    const store = createMemoryStore();
+    seedAnswer(store, "a1", "q-2026-0007");
+    seedAnswer(store, "a2", "q-2026-0008");
+    const draftCalls: string[] = [];
+    const deps = makeDeps({
+      gh,
+      store,
+      maxDraftsPerRun: 1,
+      findOpenQuestion: async (_root: string, qid: string) => ({
+        raw: questionRaw(qid, "質問?"),
+        openPath: `questions/open/${qid}.md`,
+      }),
+      draft: async (input) => {
+        draftCalls.push(input.question);
+        return candidate;
+      },
+    });
+    const r = await runAnswerIngestion(deps);
+    expect(draftCalls).toHaveLength(1); // LLM は上限まで
+    expect(r).toMatchObject({ drafted: 1, prCreated: 1, deferred: 1 });
+    expect(prs).toHaveLength(1);
+    expect(pendingAnswers(deps.store)).toHaveLength(1); // 超過分は pending 温存
   });
 
   it("questions/open に無い回答はスキップして消費(PR 対象にしない)", async () => {

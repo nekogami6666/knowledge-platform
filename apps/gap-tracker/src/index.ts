@@ -20,7 +20,7 @@ import { createFsPromptStore, nullUsageRecorder } from "@stratum/llm";
 import { runFlywheelClose } from "./close.js";
 import { createFsConfigReader, loadGapConfig, withCloneToken } from "./config.js";
 import { draftEntry } from "./draft.js";
-import { isReal, parseEnv } from "./env.js";
+import { isReal, parseCap, parseEnv } from "./env.js";
 import { runAnswerIngestion } from "./ingest.js";
 import { type GitExec, syncKb } from "./kb-sync.js";
 import { createLogger } from "./logger.js";
@@ -128,6 +128,12 @@ async function main(): Promise<void> {
   ].filter((v): v is string => typeof v === "string" && v.length > 0);
   const logger = createLogger(secrets);
   const real = isReal(env);
+  // 1 run の上限(㉞ gap 事前修正・既定 5)。再有効化初回に滞留全件へ一斉送信/一斉 LLM 化しない。
+  const maxRequests = parseCap(env.GAP_MAX_REQUESTS);
+  if (maxRequests.warning !== undefined)
+    logger.warn(maxRequests.warning, { env: "GAP_MAX_REQUESTS" });
+  const maxDrafts = parseCap(env.GAP_MAX_DRAFTS);
+  if (maxDrafts.warning !== undefined) logger.warn(maxDrafts.warning, { env: "GAP_MAX_DRAFTS" });
   const config = await loadGapConfig(createFsConfigReader(env.CONFIG_DIR));
   const store = createSqliteStore(env.DB_PATH);
   const promptStore = createFsPromptStore(env.PROMPTS_DIR);
@@ -238,6 +244,7 @@ async function main(): Promise<void> {
     const ingestSummary = await runAnswerIngestion({
       config,
       store,
+      maxDraftsPerRun: maxDrafts.value,
       syncKb: syncKbThunk,
       gh,
       makeId: (kind) => newId(kind),
@@ -269,6 +276,7 @@ async function main(): Promise<void> {
     // 1 run = ingest → sweep → close の順(close のリマインド走査より前に依頼を出す)。
     const sweepSummary = await runOpenSweep({
       config: { ...config, assignees },
+      maxRequestsPerRun: maxRequests.value,
       syncKb: syncKbThunk,
       gh,
       validate: (kbRoot) => validateRepo(kbRoot),

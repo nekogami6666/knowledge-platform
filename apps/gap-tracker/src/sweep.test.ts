@@ -76,6 +76,29 @@ function makeDeps(
   return Object.assign(deps, { posts, written });
 }
 
+describe("runOpenSweep — 1 run 上限(㉞ gap 事前修正)", () => {
+  it("maxRequestsPerRun 超過分は依頼せず deferred(週予算も消費しない)", async () => {
+    const reserveCalls: string[] = [];
+    const deps = makeDeps({
+      maxRequestsPerRun: 1,
+      listOpenQuestionFiles: async () => [
+        { path: "questions/open/q-2026-t00001-entry.md", raw: raw("q-2026-t00001") },
+        { path: "questions/open/q-2026-t00002-entry.md", raw: raw("q-2026-t00002") },
+        { path: "questions/open/q-2026-t00003-entry.md", raw: raw("q-2026-t00003") },
+      ],
+      reserveAssignee: (d) => {
+        reserveCalls.push(d);
+        return true;
+      },
+    });
+    const r = await runOpenSweep(deps);
+    expect(r).toMatchObject({ assigned: 1, deferred: 2, unassigned: 0 });
+    expect(deps.posts).toHaveLength(1); // 依頼は 1 通だけ
+    // 上限チェックは担当選定より前 = deferred の 2 件ぶんの週予算を消費しない。
+    expect(reserveCalls).toHaveLength(1);
+  });
+});
+
 describe("selectFallback", () => {
   it("日替わりローテーションで交代する(run.ts の rr と同じ日数基準)", () => {
     const fallbacks = config.fallback_assignees;

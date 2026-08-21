@@ -23,6 +23,10 @@ const envSchema = z.object({
   /** kb_url に注入する clone 用トークン(config に平文で置かない・㉞)。 */
   GIT_CLONE_TOKEN: z.string().optional(),
   GAP_TRACKER_REAL: z.string().optional(),
+  /** 1 run で送る依頼数の上限(open スイープ・㉞ gap 事前修正)。不正値/未設定は既定 5。 */
+  GAP_MAX_REQUESTS: z.string().optional(),
+  /** 1 run で LLM 化する回答数の上限(ingest)。不正値/未設定は既定 5。 */
+  GAP_MAX_DRAFTS: z.string().optional(),
   CLONES_DIR: z.string().default("./.clones"),
   CONFIG_DIR: z.string().default("./config"),
   /** gap/entry.md 等のプロンプト置き場(§8.1)。回答のナレッジ化(PR-D3a)で使う。 */
@@ -38,4 +42,23 @@ export function parseEnv(source: Record<string, string | undefined> = process.en
 /** 実 commit / 実依頼を行ってよいか(既定 false=dry-run)。 */
 export function isReal(env: Env): boolean {
   return env.GAP_TRACKER_REAL === "1" || env.GAP_TRACKER_REAL === "true";
+}
+
+/**
+ * 上限 env の解釈(既定 5・保守的)。正の整数のみ受理、不正値は既定 + warning。
+ * 再有効化初回に questions/open の滞留(実測 79 件)へ一斉送信しないための安全弁。
+ */
+export function parseCap(
+  raw: string | undefined,
+  fallback = 5,
+): { value: number; warning?: string } {
+  if (raw === undefined || raw.trim() === "") return { value: fallback };
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n <= 0) {
+    return {
+      value: fallback,
+      warning: `不正な上限値 "${raw}" のため既定 ${fallback} を使用します`,
+    };
+  }
+  return { value: n };
 }
