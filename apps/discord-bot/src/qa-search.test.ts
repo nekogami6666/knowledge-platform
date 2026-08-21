@@ -1,6 +1,6 @@
 import { LlmError } from "@stratum/llm";
 import { describe, expect, it } from "vitest";
-import { type AgentSearchFn, createQaSearch } from "./qa-search.js";
+import { type AgentSearchFn, createQaSearch, DEFAULT_ASK_TIMEOUT_MS } from "./qa-search.js";
 
 const INPUT = { systemPrompt: "SYS", question: "Q", cwd: "/clones" };
 const ANSWER = {
@@ -18,6 +18,7 @@ describe("createQaSearch(タイムアウトの明示・㉞ 失敗耐性)", () =>
     await createQaSearch({ runSearch })(INPUT);
     await createQaSearch({ runSearch, timeoutMs: 300_000 })(INPUT);
     expect(seen).toEqual([120_000, 300_000]);
+    expect(DEFAULT_ASK_TIMEOUT_MS).toBe(120_000); // §6.2「上限 120 秒」の正典値ピン
   });
 
   it("TIMEOUT はリトライしない(再送は 15 分の interaction 期限内の待ち時間を倍にするだけ)", async () => {

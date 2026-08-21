@@ -10,7 +10,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join, normalize } from "node:path";
 import { parseLineRange, safeParseEntry } from "@stratum/kb-core";
-import { loadPrompt, type PromptStore, type Usage } from "@stratum/llm";
+import { LlmError, loadPrompt, type PromptStore, type Usage } from "@stratum/llm";
 import { z } from "zod";
 import type { AnswerStatus, BotStore } from "./db.js";
 import { formatAnswer } from "./format.js";
@@ -235,6 +235,8 @@ export interface AskDeps {
   logError?: (err: unknown) => void;
   /** 警告観測フック(§7.4。既定 no-op。「回答はあるのに全 citation が検証で破棄」等の診断用)。 */
   logWarn?: (data: Record<string, unknown>, msg: string) => void;
+  /** 実効の検索タイムアウト(ms)。タイムアウト文面の秒数表示に使う(既定 DEFAULT_ASK_TIMEOUT_MS)。 */
+  searchTimeoutMs?: number;
 }
 
 export interface AskResult {
@@ -248,6 +250,22 @@ export const NOT_FOUND_MESSAGE =
   "根拠が見つからなかったため、推測での回答は控えます。質問は記録し、詳しい人に確認を依頼します(§6.2 / P6)。";
 export const ERROR_MESSAGE =
   "すみません、回答中にエラーが発生しました。時間をおいて再度お試しください。";
+
+/** §6.2 失敗時挙動の「上限 120 秒」の正典値。env ASK_TIMEOUT_MS による上書きは index.ts。 */
+export const DEFAULT_ASK_TIMEOUT_MS = 120_000;
+
+/**
+ * タイムアウト時のユーザー向け文面(§6.2 失敗時挙動 / ADR-0030 D3)。所要時間は検索対象サイズに
+ * 比例するため「質問を絞る」ことを案内する。/ask は TIMEOUT 非リトライ設計(qa-search.ts)なので
+ * 「自動的に再試行します」とは書かない。
+ */
+export function timeoutMessage(timeoutMs: number): string {
+  const seconds = Math.round(timeoutMs / 1000);
+  return (
+    `すみません、検索がタイムアウトしました(制限時間 ${seconds} 秒)。` +
+    "質問の対象や期間を絞ると時間内に回答しやすくなります。少し時間をおいて再度お試しください。"
+  );
+}
 
 /** 既定の単調クロック(§6.2 step5 の所要時間計測)。壁時計でなく monotonic を使う。 */
 const defaultMonotonicMs = (): number => performance.now();
@@ -334,17 +352,27 @@ export async function handleAskRequest(req: AskRequest, deps: AskDeps): Promise<
     return { answerText, status: "answered", queryId };
   } catch (err) {
     // §6.2 失敗時: エラーを記録(unanswered とは区別=キューに積まない)。観測フックへ通知(§7.4)。
+    // タイムアウトは文面と answerStatus で明示する(§6.2 失敗時挙動 / ADR-0030 D3)。ナレッジ欠落
+    // ではないので error 同様キューには積まない。code 直判定にするのは、isTransient だと withRetry
+    // 済みの 429/529 まで拾ってしまい ERROR_MESSAGE(時間をおいて再度)のままが適切なため。
+    const timedOut = err instanceof LlmError && err.code === "TIMEOUT";
     deps.logError?.(err);
     deps.store.recordQuery({
       ...base,
       answer: null,
       sourcesJson: null,
-      answerStatus: "error",
+      answerStatus: timedOut ? "timeout" : "error",
       feedback: null,
       inputTokens: null,
       outputTokens: null,
       elapsedMs: Math.round(monoNow() - startedAt),
     });
-    return { answerText: ERROR_MESSAGE, status: "error", queryId };
+    return {
+      answerText: timedOut
+        ? timeoutMessage(deps.searchTimeoutMs ?? DEFAULT_ASK_TIMEOUT_MS)
+        : ERROR_MESSAGE,
+      status: timedOut ? "timeout" : "error",
+      queryId,
+    };
   }
 }

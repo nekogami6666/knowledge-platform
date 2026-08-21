@@ -114,9 +114,9 @@ describe("createMemoryStore: feedback / answerStatus", () => {
     s.setFeedback("nope", "up"); // throw しない
   });
 
-  it("answered / unanswered / delivery_failed が round-trip する", () => {
+  it("answered / unanswered / delivery_failed / timeout が round-trip する", () => {
     const s = createMemoryStore();
-    for (const status of ["answered", "unanswered", "delivery_failed"] as const) {
+    for (const status of ["answered", "unanswered", "delivery_failed", "timeout"] as const) {
       s.recordQuery(sampleQuery({ id: status, answerStatus: status }));
       expect(s.getQuery(status)?.answerStatus).toBe(status);
     }

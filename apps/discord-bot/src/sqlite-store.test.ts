@@ -74,9 +74,9 @@ describe.skipIf(!sqliteAvailable())("createSqliteStore(:memory:)", () => {
     s.close();
   });
 
-  it("answered / unanswered / delivery_failed が round-trip する", () => {
+  it("answered / unanswered / delivery_failed / timeout が round-trip する", () => {
     const s = createStore(":memory:");
-    for (const status of ["answered", "unanswered", "delivery_failed"] as const) {
+    for (const status of ["answered", "unanswered", "delivery_failed", "timeout"] as const) {
       s.recordQuery(sampleQuery({ id: status, answerStatus: status }));
       expect(s.getQuery(status)?.answerStatus).toBe(status);
     }

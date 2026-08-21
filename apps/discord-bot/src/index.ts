@@ -16,7 +16,7 @@ import {
 } from "@stratum/llm";
 import { type Client, Events } from "discord.js";
 import { setNotifySecrets } from "./ack.js";
-import { type AskDeps, handleAskRequest } from "./ask.js";
+import { type AskDeps, DEFAULT_ASK_TIMEOUT_MS, handleAskRequest } from "./ask.js";
 import { createFsConfigReader, loadChannels, loadOps, loadRepos, loadVoice } from "./config.js";
 import {
   type AskHandler,
@@ -176,10 +176,9 @@ async function main(): Promise<void> {
       "不正な ASK_TIMEOUT_MS のため既定(120s)で実行します",
     );
   }
-  const search = createQaSearch({
-    usage: nullUsageRecorder,
-    ...(askTimeoutMs !== undefined ? { timeoutMs: askTimeoutMs } : {}),
-  });
+  // 検索の実挙動とタイムアウト文面の秒数表示が単一値を共有する(表示だけズレる事故を防ぐ)。
+  const effectiveAskTimeoutMs = askTimeoutMs ?? DEFAULT_ASK_TIMEOUT_MS;
+  const search = createQaSearch({ usage: nullUsageRecorder, timeoutMs: effectiveAskTimeoutMs });
 
   const onAsk: AskHandler = (question, ctx) => {
     const deps: AskDeps = {
@@ -194,6 +193,7 @@ async function main(): Promise<void> {
       logError: (err) =>
         withCorrelation(logger, ctx.correlationId).error({ err }, "/ask pipeline error"),
       logWarn: (data, msg) => withCorrelation(logger, ctx.correlationId).warn(data, msg),
+      searchTimeoutMs: effectiveAskTimeoutMs,
     };
     return handleAskRequest(
       {

@@ -1,14 +1,17 @@
-import type { PromptStore, Usage } from "@stratum/llm";
+import { LlmError, type PromptStore, type Usage } from "@stratum/llm";
 import { describe, expect, it } from "vitest";
 import {
   type AskDeps,
   type AskRequest,
   buildRepoManifest,
+  DEFAULT_ASK_TIMEOUT_MS,
+  ERROR_MESSAGE,
   handleAskRequest,
   NOT_FOUND_MESSAGE,
   normalizeLineRange,
   type QaAnswer,
   type QaCitation,
+  timeoutMessage,
   validateCitations,
 } from "./ask.js";
 import { SerialQueue } from "./concurrency.js";
@@ -379,9 +382,50 @@ describe("handleAskRequest synthetic 統合(§6.2 受け入れ条件)", () => {
     });
     const res = await handleAskRequest(req, deps);
     expect(res.status).toBe("error");
+    expect(res.answerText).toBe(ERROR_MESSAGE);
     expect(store.getQuery(res.queryId)?.answerStatus).toBe("error");
     expect(store.listPendingActions()).toHaveLength(0);
     expect(errors).toHaveLength(1); // §7.4: エラーは握りつぶさず観測フックへ
+  });
+
+  it("TIMEOUT はタイムアウトを文面で明示し timeout として記録(§6.2 失敗時挙動 / ADR-0030 D3)", async () => {
+    const errors: unknown[] = [];
+    const { deps, store } = makeDeps({
+      search: async () => {
+        throw new LlmError("TIMEOUT", "Agent SDK query が 120000ms でタイムアウトしました");
+      },
+      logError: (e) => errors.push(e),
+    });
+    const res = await handleAskRequest(req, deps);
+    expect(res.status).toBe("timeout");
+    expect(res.answerText).toBe(timeoutMessage(DEFAULT_ASK_TIMEOUT_MS));
+    expect(res.answerText).toContain("120 秒");
+    expect(store.getQuery(res.queryId)?.answerStatus).toBe("timeout");
+    expect(store.listPendingActions()).toHaveLength(0); // ナレッジ欠落ではないのでキューに積まない
+    expect(errors).toHaveLength(1);
+  });
+
+  it("タイムアウト文面の秒数は searchTimeoutMs(実効値)に追随する", async () => {
+    const { deps } = makeDeps({
+      search: async () => {
+        throw new LlmError("TIMEOUT", "timeout");
+      },
+      searchTimeoutMs: 300_000,
+    });
+    const res = await handleAskRequest(req, deps);
+    expect(res.answerText).toContain("300 秒");
+  });
+
+  it("TIMEOUT 以外の LlmError は従来どおり ERROR_MESSAGE + error のまま", async () => {
+    const { deps, store } = makeDeps({
+      search: async () => {
+        throw new LlmError("API_ERROR", "api down");
+      },
+    });
+    const res = await handleAskRequest(req, deps);
+    expect(res.status).toBe("error");
+    expect(res.answerText).toBe(ERROR_MESSAGE);
+    expect(store.getQuery(res.queryId)?.answerStatus).toBe("error");
   });
 
   it("§6.2 step5: elapsedMs を monotonic 差分で記録する(常に null ではない)", async () => {

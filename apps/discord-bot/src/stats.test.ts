@@ -85,6 +85,19 @@ describe("aggregateStats", () => {
     expect(s.window.answerRate).toBeCloseTo(0.25); // answered/asks = 1/4
   });
 
+  it("timeout は errors と別に timeouts に数える(ASK_TIMEOUT_MS 調整の判断材料・§6.2)", () => {
+    const s = aggregateStats(
+      [
+        q({ id: "1", createdAt: IN, answerStatus: "timeout" }),
+        q({ id: "2", createdAt: IN, answerStatus: "timeout" }),
+        q({ id: "3", createdAt: IN, answerStatus: "error" }),
+      ],
+      NOW,
+    );
+    expect(s.window.timeouts).toBe(2);
+    expect(s.window.errors).toBe(1);
+  });
+
   it("avgElapsedMs は elapsedMs 非 null の平均(null は無視)", () => {
     const s = aggregateStats(
       [
@@ -139,6 +152,15 @@ describe("formatStatsMessage", () => {
     const msg = formatStatsMessage(aggregateStats([q({ createdAt: IN })], NOW));
     expect(msg).toContain("有用率 —");
     expect(msg).not.toMatch(/有用率 — ⚠️/); // 有用率行には警告なし(null は未達扱いしない)
+  });
+
+  it("タイムアウトはエラーと同様、非ゼロのときだけ平均応答行に表示する", () => {
+    const withTimeout = formatStatsMessage(
+      aggregateStats([q({ createdAt: IN, answerStatus: "timeout" })], NOW),
+    );
+    expect(withTimeout).toContain("タイムアウト 1");
+    const without = formatStatsMessage(aggregateStats([q({ createdAt: IN })], NOW));
+    expect(without).not.toContain("タイムアウト");
   });
 });
 

@@ -18,11 +18,12 @@ import {
   type UsageRecorder,
   withRetry,
 } from "@stratum/llm";
-import { type QaAnswer, type QaSearch, qaAnswerSchema } from "./ask.js";
+import { DEFAULT_ASK_TIMEOUT_MS, type QaAnswer, type QaSearch, qaAnswerSchema } from "./ask.js";
 
 // QA 契約を再 export(評価ハーネス等の外部消費者向け。型は ask.ts が正)。
 export {
   buildRepoManifest,
+  DEFAULT_ASK_TIMEOUT_MS,
   type QaAnswer,
   type QaCitation,
   type QaSearch,
@@ -47,8 +48,8 @@ export interface QaSearchFactoryDeps {
   /** §6.2: 失敗時のリトライ回数(既定 1)。 */
   maxRetries?: number;
   /**
-   * agentic search の上限 ms(既定 120_000)。検索対象(実 KB + minutes clone)の成長とともに
-   * 所要時間が伸びるため、env(ASK_TIMEOUT_MS)からコード変更なしに調整できるようにする。
+   * agentic search の上限 ms(既定 DEFAULT_ASK_TIMEOUT_MS)。検索対象(実 KB + minutes clone)の
+   * 成長とともに所要時間が伸びるため、env(ASK_TIMEOUT_MS)からコード変更なしに調整できるようにする。
    */
   timeoutMs?: number;
 }
@@ -63,7 +64,7 @@ export function createQaSearch(deps: QaSearchFactoryDeps = {}): QaSearch {
   const runSearch = deps.runSearch ?? runAgentSearch;
   const usage = deps.usage ?? nullUsageRecorder;
   const maxRetries = deps.maxRetries ?? 1;
-  const timeoutMs = deps.timeoutMs ?? 120_000;
+  const timeoutMs = deps.timeoutMs ?? DEFAULT_ASK_TIMEOUT_MS;
   return (input) =>
     withRetry(
       () =>

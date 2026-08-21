@@ -9,9 +9,10 @@
 
 /**
  * 回答状態。unanswered=NOT_FOUND(出典なし)、delivery_failed=Discord 送信失敗、
- * error=検索/同期などの内部エラー(いずれも未回答とは区別。error はキューに積まない)。
+ * timeout=検索タイムアウト(§6.2 失敗時挙動。ASK_TIMEOUT_MS 調整の判断材料として error と区別)、
+ * error=検索/同期などの内部エラー(いずれも未回答とは区別。timeout/error はキューに積まない)。
  */
-export type AnswerStatus = "answered" | "unanswered" | "delivery_failed" | "error";
+export type AnswerStatus = "answered" | "unanswered" | "delivery_failed" | "timeout" | "error";
 
 /** 回答への評価(👍👎、§4.6 queries)。未評価は null。 */
 export type Feedback = "up" | "down" | null;

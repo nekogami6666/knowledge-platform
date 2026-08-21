@@ -20,6 +20,7 @@ import {
   commandsToRegister,
   createBot,
   DENY_MESSAGE,
+  deliverAnswer,
   denyReason,
   extractQuestionId,
   feedbackButtons,
@@ -37,6 +38,8 @@ import {
   parseGithubPrUrl,
   proxyMergeDecision,
   proxyMergeRejectMessage,
+  SEND_FAILED_MESSAGE,
+  SEND_PARTIAL_FAILED_MESSAGE,
   shouldExplainProxyMergeReject,
   statsCommand,
   warmDmChannels,
@@ -975,6 +978,149 @@ describe("InteractionCreate の面談パネル分岐(ADR-0028 UI の配線)", ()
     await new Promise((resolve) => setImmediate(resolve));
     expect(replies[0]?.content).toBe("進行中のセッションはありません。");
     expect(replies[0]?.ephemeral).toBe(true);
+    await client.destroy();
+  });
+});
+
+describe("deliverAnswer (§6.2 分割配送)", () => {
+  type Sent = { via: "editReply" | "followUp"; content: string; components: number };
+
+  /** 配列に積む fake seam。failOn で n 回目(1 始まり)の送信だけを失敗させる。 */
+  function fakeDelivery(failOn: number[] = []): {
+    delivery: Parameters<typeof deliverAnswer>[0];
+    sends: Sent[];
+  } {
+    const sends: Sent[] = [];
+    let calls = 0;
+    const record = (via: Sent["via"]) => {
+      return async (m: { content: string; components: unknown[] }) => {
+        calls += 1;
+        if (failOn.includes(calls)) throw new Error(`send failure #${calls}`);
+        sends.push({ via, content: m.content, components: m.components.length });
+      };
+    };
+    return { delivery: { editReply: record("editReply"), followUp: record("followUp") }, sends };
+  }
+
+  const buttons = [feedbackButtons("q1")];
+
+  it("単一チャンクは editReply 1 回で components 付き", async () => {
+    const { delivery, sends } = fakeDelivery();
+    const outcome = await deliverAnswer(delivery, ["回答"], buttons);
+    expect(outcome).toEqual({ sentChunks: 1 });
+    expect(sends).toEqual([{ via: "editReply", content: "回答", components: 1 }]);
+  });
+
+  it("3 チャンクは editReply → followUp → followUp の順で、components は末尾のみ", async () => {
+    const { delivery, sends } = fakeDelivery();
+    const outcome = await deliverAnswer(delivery, ["a", "b", "c"], buttons);
+    expect(outcome).toEqual({ sentChunks: 3 });
+    expect(sends).toEqual([
+      { via: "editReply", content: "a", components: 0 },
+      { via: "followUp", content: "b", components: 0 },
+      { via: "followUp", content: "c", components: 1 },
+    ]);
+  });
+
+  it("先頭 editReply の失敗は editReply で SEND_FAILED を通知(何も配送していないので安全)", async () => {
+    const { delivery, sends } = fakeDelivery([1]);
+    const outcome = await deliverAnswer(delivery, ["a", "b"], buttons);
+    expect(outcome.sentChunks).toBe(0);
+    expect(outcome.error).toBeInstanceOf(Error);
+    expect(outcome.noticeError).toBeUndefined();
+    expect(sends).toEqual([{ via: "editReply", content: SEND_FAILED_MESSAGE, components: 0 }]);
+  });
+
+  it("途中の followUp 失敗は followUp で部分失敗を通知し、editReply は使わない(上書き防止)+ components 付き", async () => {
+    const { delivery, sends } = fakeDelivery([3]); // 3 チャンク中 2 つ目の followUp で失敗
+    const outcome = await deliverAnswer(delivery, ["a", "b", "c"], buttons);
+    expect(outcome.sentChunks).toBe(2);
+    expect(outcome.error).toBeInstanceOf(Error);
+    expect(sends.filter((s) => s.via === "editReply")).toHaveLength(1); // 上書き回帰ピン
+    expect(sends.at(-1)).toEqual({
+      via: "followUp",
+      content: SEND_PARTIAL_FAILED_MESSAGE,
+      components: 1,
+    });
+  });
+
+  it("通知の送信も失敗したら noticeError に格納して resolve する(throw しない)", async () => {
+    const { delivery, sends } = fakeDelivery([1, 2]);
+    const outcome = await deliverAnswer(delivery, ["a"], buttons);
+    expect(outcome.sentChunks).toBe(0);
+    expect(outcome.error).toBeInstanceOf(Error);
+    expect(outcome.noticeError).toBeInstanceOf(Error);
+    expect(sends).toEqual([]);
+  });
+
+  it("チャンク 0 件なら何も送らない", async () => {
+    const { delivery, sends } = fakeDelivery();
+    const outcome = await deliverAnswer(delivery, [], buttons);
+    expect(outcome).toEqual({ sentChunks: 0 });
+    expect(sends).toEqual([]);
+  });
+});
+
+describe("InteractionCreate /ask の分割配送結線(§6.2)", () => {
+  function fakeAskInteraction(question: string): {
+    interaction: Interaction;
+    sends: { via: "editReply" | "followUp"; content: string; components: number }[];
+    defers: () => number;
+  } {
+    const sends: { via: "editReply" | "followUp"; content: string; components: number }[] = [];
+    let deferCount = 0;
+    const push = (via: "editReply" | "followUp") => {
+      return async (o: string | { content: string; components?: unknown[] }) => {
+        if (typeof o === "string") sends.push({ via, content: o, components: 0 });
+        else sends.push({ via, content: o.content, components: o.components?.length ?? 0 });
+      };
+    };
+    const interaction = {
+      isChatInputCommand: () => true,
+      isButton: () => false,
+      isUserSelectMenu: () => false,
+      isStringSelectMenu: () => false,
+      isModalSubmit: () => false,
+      commandName: "ask",
+      inGuild: () => true,
+      channel: null,
+      channelId: "111",
+      appPermissions: { has: () => true },
+      user: { id: "u1" },
+      options: { getString: () => question },
+      deferReply: async () => {
+        deferCount += 1;
+      },
+      editReply: push("editReply"),
+      followUp: push("followUp"),
+    };
+    return {
+      interaction: interaction as unknown as Interaction,
+      sends,
+      defers: () => deferCount,
+    };
+  }
+
+  it("2000 字超の回答は defer 1 回 + editReply 1 回 + followUp に分割され、ボタンは最終メッセージのみ", async () => {
+    const { logger } = fakeLogger();
+    const first = "あ".repeat(1500);
+    const second = "い".repeat(1500);
+    const client = createBot({
+      logger,
+      channels: channels(),
+      store: createMemoryStore(),
+      onAsk: async () => ({
+        answerText: `${first}\n\n${second}`,
+        status: "answered",
+        queryId: "q1",
+      }),
+    });
+    const { interaction, sends, defers } = fakeAskInteraction("長い質問");
+    client.emit(Events.InteractionCreate, interaction);
+    await vi.waitFor(() => expect(sends).toHaveLength(2));
+    expect(defers()).toBe(1);
+    expect(sends[0]).toEqual({ via: "editReply", content: first, components: 0 });
+    expect(sends[1]).toEqual({ via: "followUp", content: second, components: 1 });
     await client.destroy();
   });
 });

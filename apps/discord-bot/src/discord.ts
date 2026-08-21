@@ -30,7 +30,7 @@ import {
 } from "discord.js";
 import type { Logger } from "pino";
 import { ackReaction, noticeAllowedOnce } from "./ack.js";
-import type { AskResult } from "./ask.js";
+import { type AskResult, ERROR_MESSAGE } from "./ask.js";
 import { handleLightbulb, jstDayKey } from "./capture.js";
 import { SerialQueue } from "./concurrency.js";
 import {
@@ -41,6 +41,7 @@ import {
   type VoiceConfig,
 } from "./config.js";
 import type { BotStore } from "./db.js";
+import { splitForDiscord } from "./format.js";
 import { type FreshnessApplyDeps, handleFreshnessReaction } from "./freshness-flow.js";
 import { handleInterviewCommand, type InterviewCommandDeps } from "./interview-commands.js";
 import {
@@ -372,6 +373,73 @@ export function createBot(deps: BotDeps): Client {
   return client;
 }
 
+/** 回答の送信自体に失敗したときの通知(何も配送できていない場合)。 */
+export const SEND_FAILED_MESSAGE = "すみません、回答の送信に失敗しました。";
+/** 分割送信が途中で失敗したときの通知(先頭チャンクは配送済みの場合)。 */
+export const SEND_PARTIAL_FAILED_MESSAGE =
+  "(回答の続きを送信できませんでした。上の回答は途中までです)";
+
+/**
+ * 配送 seam(§6.2)。ack.ts の流儀: 必要な形だけを構造的に宣言し、テストは配列に積む fake を渡す。
+ * editReply は deferReply 済みプレースホルダへの本返信、followUp は追加メッセージ。
+ */
+export interface AnswerDelivery {
+  editReply(msg: {
+    content: string;
+    components: ActionRowBuilder<ButtonBuilder>[];
+  }): Promise<unknown>;
+  followUp(msg: {
+    content: string;
+    components: ActionRowBuilder<ButtonBuilder>[];
+  }): Promise<unknown>;
+}
+
+export interface DeliveryOutcome {
+  /** 送達できた本文チャンク数。 */
+  sentChunks: number;
+  /** 最初に失敗した本文送信の例外(全チャンク送達なら undefined)。 */
+  error?: unknown;
+  /** 失敗通知の送信も失敗した場合の例外(interaction 失効の可能性)。 */
+  noticeError?: unknown;
+}
+
+/**
+ * 分割済み回答チャンクを順に配送する(チャンク 1 = editReply、2 以降 = followUp。§6.2)。
+ * 👍👎 components は最終チャンクにのみ付す。失敗時の通知も本関数が送る: 1 チャンクでも配送済みなら
+ * editReply は使わない(配送済み本文を上書きしてしまうため followUp で追記し、途中切れ回答にも
+ * 👍👎 を残して評価を受けられるようにする)。本関数は throw しない。
+ */
+export async function deliverAnswer(
+  delivery: AnswerDelivery,
+  chunks: readonly string[],
+  components: readonly ActionRowBuilder<ButtonBuilder>[],
+): Promise<DeliveryOutcome> {
+  let sentChunks = 0;
+  try {
+    for (const [i, chunk] of chunks.entries()) {
+      const msg = { content: chunk, components: i === chunks.length - 1 ? [...components] : [] };
+      if (i === 0) await delivery.editReply(msg);
+      else await delivery.followUp(msg);
+      sentChunks += 1;
+    }
+    return { sentChunks };
+  } catch (err) {
+    try {
+      if (sentChunks === 0) {
+        await delivery.editReply({ content: SEND_FAILED_MESSAGE, components: [] });
+      } else {
+        await delivery.followUp({
+          content: SEND_PARTIAL_FAILED_MESSAGE,
+          components: [...components],
+        });
+      }
+      return { sentChunks, error: err };
+    } catch (noticeErr) {
+      return { sentChunks, error: err, noticeError: noticeErr };
+    }
+  }
+}
+
 async function handleAsk(
   interaction: ChatInputCommandInteraction,
   onAsk: AskHandler,
@@ -408,30 +476,48 @@ async function handleAsk(
   const question = interaction.options.getString("question", true);
   // §6.2: エフェメラルにせず全員が後から参照できる公開返信にする。
   await interaction.deferReply();
+  let result: AskResult;
   try {
-    const result = await queue.enqueue(() =>
+    result = await queue.enqueue(() =>
       onAsk(question, {
         userId: interaction.user.id,
         channelId: interaction.channelId,
         correlationId,
       }),
     );
-    // 出典付き回答にのみ 👍👎 を付ける(未回答/エラーには付けない)。
-    const components =
-      result.status === "answered" && result.queryId !== ""
-        ? [feedbackButtons(result.queryId)]
-        : [];
-    await interaction.editReply({ content: result.answerText, components });
   } catch (err) {
-    // パイプライン内部エラーは AskResult で返るため、ここに来るのは主に Discord 送信失敗。
-    log.error({ err }, "/ask reply failed");
-    // interaction token は 15 分で失効する(直列キューで長く待つと本返信もここも失敗しうる)。
+    // handleAskRequest は内部エラーを AskResult に畳んで返すため、ここに来るのは dispatch/infra 異常のみ。
+    log.error({ err }, "/ask pipeline dispatch failed");
+    // interaction token は 15 分で失効する(直列キューで長く待つとここも失敗しうる)。
     // 二次失敗でハンドラごと落とさない(async リスナの unhandled rejection 防止)。
     try {
-      await interaction.editReply("すみません、回答の送信に失敗しました。");
+      await interaction.editReply(ERROR_MESSAGE);
     } catch (err2) {
       log.error({ err: err2 }, "/ask のエラー通知も送信できませんでした(interaction 失効の可能性)");
     }
+    return;
+  }
+
+  // 出典付き回答にのみ 👍👎 を付ける(未回答/エラーには付けない)。
+  const components =
+    result.status === "answered" && result.queryId !== "" ? [feedbackButtons(result.queryId)] : [];
+  // Discord の 2000 字制限を超える回答は分割配送する。送信失敗の封じ込めは deliverAnswer 側。
+  const outcome = await deliverAnswer(
+    {
+      editReply: (m) => interaction.editReply(m),
+      followUp: (m) => interaction.followUp(m),
+    },
+    splitForDiscord(result.answerText),
+    components,
+  );
+  if (outcome.error !== undefined) {
+    log.error({ err: outcome.error, sentChunks: outcome.sentChunks }, "/ask reply failed");
+  }
+  if (outcome.noticeError !== undefined) {
+    log.error(
+      { err: outcome.noticeError },
+      "/ask のエラー通知も送信できませんでした(interaction 失効の可能性)",
+    );
   }
 }
 

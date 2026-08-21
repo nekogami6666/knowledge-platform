@@ -59,3 +59,46 @@ export function formatAnswer(answer: string, citations: readonly ResolvedCitatio
     .join("\n");
   return `${body}\n\n出典:\n${notes}`;
 }
+
+/** Discord の 1 メッセージ上限(コードポイント数)。 */
+export const DISCORD_MESSAGE_LIMIT = 2000;
+
+/**
+ * Discord の 1 メッセージ上限を超えるテキストを送信可能なチャンク列に分割する(§6.2 配送)。
+ *
+ * 分割点の優先順位: 段落境界 "\n\n" → 行境界 "\n" → 強制カット。段落・行分割では境界の改行を
+ * チャンクに残さず捨てる(メッセージ境界自体が視覚的な区切りになり、残すと末尾空白で予算を食うだけ)。
+ * formatAnswer の "\n\n出典:\n" 境界は段落規則が自然に拾い、"[n] url" 行は行規則で行単位に保たれる
+ * ため、出典ブロックの特別扱いは不要。
+ *
+ * 長さは .length(UTF-16 コード単位)で数える。Discord の上限はコードポイント数で、単位数 ≥
+ * ポイント数のため常に保守側に倒れる。強制カットではサロゲートペアの分断だけ回避する(ZWJ 絵文字
+ * 等の書記素クラスタ跨ぎは最終手段として許容)。
+ *
+ * 不変条件: 各チャンクは非空かつ length <= limit。空文字列は []。
+ */
+export function splitForDiscord(text: string, limit = DISCORD_MESSAGE_LIMIT): string[] {
+  const chunks: string[] = [];
+  let rest = text;
+  while (rest.length > limit) {
+    // p >= 1 で空チャンクを弾く(先頭が区切りの場合は次の優先度へ落とす)。
+    const para = rest.lastIndexOf("\n\n", limit);
+    if (para >= 1) {
+      chunks.push(rest.slice(0, para));
+      rest = rest.slice(para + 2);
+      continue;
+    }
+    const line = rest.lastIndexOf("\n", limit);
+    if (line >= 1) {
+      chunks.push(rest.slice(0, line));
+      rest = rest.slice(line + 1);
+      continue;
+    }
+    const code = rest.charCodeAt(limit - 1);
+    const cut = code >= 0xd800 && code <= 0xdbff && limit >= 2 ? limit - 1 : limit;
+    chunks.push(rest.slice(0, cut));
+    rest = rest.slice(cut);
+  }
+  if (rest !== "") chunks.push(rest);
+  return chunks;
+}
