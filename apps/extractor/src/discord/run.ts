@@ -189,8 +189,8 @@ export async function runDiscordSource(deps: DiscordRunDeps): Promise<DiscordRun
     stateCommitted: false,
   };
 
-  if (config.targets.length === 0) {
-    logger.info("discord ソースは無効です(targets が空・ADR-0033 D9)。");
+  if (!config.all_visible && config.targets.length === 0) {
+    logger.info("discord ソースは無効です(targets が空・all_visible も false・ADR-0033 D9)。");
     return { created: false, reason: "disabled", ...base };
   }
 
@@ -234,14 +234,25 @@ export async function runDiscordSource(deps: DiscordRunDeps): Promise<DiscordRun
   const nextChannels: DiscordState["channels"] = { ...(state?.channels ?? {}) };
   try {
     const readable = new Map(session.listReadableTextChannels().map((c) => [c.id, c]));
-    const eligible = rotateChannels(config.targets, now).filter((id) => {
+    // 対象の母集団: all_visible なら可視テキストチャンネル全部(ID 昇順 = ローテーションが決定的)、
+    // でなければ targets の明示リスト。どちらも exclude(本ソース専用)と permanent_exclude(bot 全体)で絞る。
+    const excluded = new Set(config.exclude);
+    const universe = config.all_visible ? [...readable.keys()].sort() : config.targets;
+    const eligible = rotateChannels(universe, now).filter((id) => {
       const ch = readable.get(id);
       if (ch === undefined) return false; // bot 不可視 or 不存在
+      if (excluded.has(id)) return false;
       return isChannelAllowed(deps.channelsConfig, {
         channelId: id,
         parentId: ch.parentId,
         botCanView: true,
       });
+    });
+    logger.info("対象チャンネル", {
+      mode: config.all_visible ? "all_visible" : "targets",
+      readable: readable.size,
+      eligible: eligible.length,
+      maxChannels: config.max_channels,
     });
     for (const channelId of eligible) {
       if (base.channelsProcessed >= config.max_channels) break;

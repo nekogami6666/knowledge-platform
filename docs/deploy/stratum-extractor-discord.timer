@@ -1,13 +1,14 @@
-# extractor Discord ソースの起動タイマー(ADR-0033・週次)。
-# 火曜 09:00 JST(月 09:00 stats / 平日 10:00 gap / 平日 11:00 freshness と重ならない枠)。
+# extractor Discord ソースの起動タイマー(ADR-0033)。
+# 火・金 09:00 JST(月 09:00 stats / 平日 10:00 gap / 平日 11:00 freshness と重ならない枠)。
+# 週 2 回 × max_channels 5 で 20 チャンネル前後を約 2 週間で一巡(2026-08-26 の運用決定)。
 # caps(max_channels / max_extract_calls)+ カーソル前進でバックログを漸進消化する(D7)。
 # VM のタイムゾーンが UTC の場合も動くよう Asia/Tokyo を明示する。
 # 配置: ~/.config/systemd/user/stratum-extractor-discord.timer → `systemctl --user enable --now` で有効化。
 [Unit]
-Description=Run stratum extractor Discord source weekly (Tue morning JST)
+Description=Run stratum extractor Discord source twice a week (Tue/Fri morning JST)
 
 [Timer]
-OnCalendar=Tue 09:00 Asia/Tokyo
+OnCalendar=Tue,Fri 09:00 Asia/Tokyo
 Persistent=true
 
 [Install]

@@ -78,6 +78,8 @@ function makeHarness(
     stateRaw?: string;
     real?: boolean;
     conflictTimes?: number;
+    /** listReadableTextChannels の返り値(既定: "200" のみ)。 */
+    readable?: { id: string; name: string; parentId: string | null }[];
   } = {},
 ): Harness {
   const calls: Harness["calls"] = {
@@ -113,7 +115,7 @@ function makeHarness(
     usage: { inputTokens: 1, outputTokens: 1 },
   });
   const session: CollectorSessionLike = {
-    listReadableTextChannels: () => [{ id: "200", name: "dev", parentId: null }],
+    listReadableTextChannels: () => over.readable ?? [{ id: "200", name: "dev", parentId: null }],
     fetchMessagesAfter: async (channelId, afterId, cap) => {
       calls.fetches.push({ channelId, afterId, cap });
       return messages;
@@ -208,6 +210,37 @@ describe("runDiscordSource", () => {
     expect(r).toMatchObject({ created: false, reason: "disabled" });
     expect(h.calls.listPr).toBe(0);
     expect(h.calls.sessionsOpened).toBe(0);
+  });
+
+  it("all_visible: targets が空でも可視チャンネル全部が対象になり、exclude で本ソースだけ除外できる", async () => {
+    const h = makeHarness({
+      config: { targets: [], all_visible: true, exclude: ["300"], max_channels: 5 },
+      readable: [
+        { id: "300", name: "zatsudan", parentId: null },
+        { id: "200", name: "dev", parentId: null },
+        { id: "400", name: "pj", parentId: null },
+      ],
+      extractions: [emptyExtraction],
+    });
+    const r = await runDiscordSource(h.deps);
+    expect(r.reason).not.toBe("disabled");
+    // 200 と 400 が対象(ID 昇順ローテーション)。300 は exclude で対象外。
+    expect(h.calls.fetches.map((f) => f.channelId).sort()).toEqual(["200", "400"]);
+    expect(r.channelsProcessed).toBe(2);
+  });
+
+  it("all_visible でも channels.yaml の permanent_exclude は効く(bot 全体のゲート)", async () => {
+    const h = makeHarness({
+      config: { targets: [], all_visible: true, max_channels: 5 },
+      readable: [
+        { id: "200", name: "dev", parentId: null },
+        { id: "400", name: "pj", parentId: null },
+      ],
+      extractions: [emptyExtraction],
+    });
+    h.deps.channelsConfig = { permanent_exclude: ["400"] };
+    await runDiscordSource(h.deps);
+    expect(h.calls.fetches.map((f) => f.channelId)).toEqual(["200"]);
   });
 
   it("open な extract-discord/* PR があれば skip し、label 付きで notifySkipped する(カーソル不動)", async () => {

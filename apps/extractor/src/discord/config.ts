@@ -8,8 +8,16 @@ import { z } from "zod";
 
 export const discordSourceConfigSchema = z
   .object({
-    /** 収集対象チャンネル ID の allowlist。空 = 機能 OFF(deploy 済みでも安全な既定)。 */
+    /** 収集対象チャンネル ID の allowlist。空 = 機能 OFF(deploy 済みでも安全な既定・all_visible が false のとき)。 */
     targets: z.array(z.string()).default([]),
+    /**
+     * true で bot が閲覧できるテキストチャンネル**全部**を対象にする(targets は無視。2026-08-26 の運用決定・
+     * ADR-0033 D9 追記)。新設チャンネルも自動で対象に入る。除外は exclude(本ソース専用)と
+     * channels.yaml の permanent_exclude(bot 全体・ADR-0018)。
+     */
+    all_visible: z.boolean().default(false),
+    /** 本ソースだけ対象外にするチャンネル ID(雑談等。/ask・💡 のゲートには影響しない)。 */
+    exclude: z.array(z.string()).default([]),
     kb: z
       .object({
         repo: z.string().min(1),

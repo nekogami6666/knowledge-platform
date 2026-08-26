@@ -95,7 +95,7 @@ fi
 loginctl enable-linger "$USER" >/dev/null 2>&1 || echo "WARN: enable-linger に失敗(polkit 制限)。IT に一度だけ依頼してください(母艦再起動後の自動起動に必要)。"
 
 echo ""
-echo "完了。次回タイマーで自動起動します(freshness=平日11:00 / stats=月09:00 / recordings-cleanup=毎日04:30 / image-prune=毎月1日05:00 / extractor-discord=火09:00 JST):"
+echo "完了。次回タイマーで自動起動します(freshness=平日11:00 / stats=月09:00 / recordings-cleanup=毎日04:30 / image-prune=毎月1日05:00 / extractor-discord=火・金09:00 JST):"
 systemctl --user list-timers 'stratum-*' --no-pager || true
 echo ""
 echo "初回は手動起動で検証してください(まず --real 無しの dry-run 推奨):"

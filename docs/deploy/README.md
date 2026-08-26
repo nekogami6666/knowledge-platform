@@ -161,14 +161,16 @@ bot.db は bind mount + uid 0 によりホストユーザ所有のままなの�
 ## extractor Discord ソース(systemd user timer・ADR-0033)
 
 チャンネル会話履歴を cap 付き・カーソル前進型で KB へ抽出する第 3 の extractor 経路です
-(`stratum-extractor-discord.{service,timer}`・**火曜 09:00 JST 週次**・`apps/extractor/dist/discord/index.js`)。
+(`stratum-extractor-discord.{service,timer}`・**火・金 09:00 JST 週 2 回**・`apps/extractor/dist/discord/index.js`)。
 `DISCORD_TOKEN` が stratum.env にのみ存在するため VM timer で動かします(Actions への token 複製は
 ADR-0017 D7 の却下を維持)。**新規シークレットは不要**(DISCORD_TOKEN / GIT_CLONE_TOKEN /
 Claude on AWS 4 変数 / DISCORD_OPS_WEBHOOK は全て stratum.env に既存)。
 
 - **設定**: `apps/extractor/config/discord.yaml`(`discord.yaml.example` をコピー・gitignore 済み)。
-  `targets`(チャンネル ID の明示オプトイン)が**空のままなら no-op** なので、unit は既定で enable
-  して安全です。channels.yaml の `permanent_exclude` は bot と共有します(ADR-0018)。
+  `targets`(チャンネル ID の明示オプトイン)が**空で `all_visible: false` のままなら no-op** なので、unit は
+  既定で enable して安全です。**`all_visible: true`** で bot が閲覧できるテキストチャンネル全部が対象
+  (新設チャンネルも自動)。本ソースだけ外すチャンネルは `exclude`、bot 全体で読ませないチャンネルは
+  channels.yaml の `permanent_exclude`(bot と共有・ADR-0018)。
 - **dry-run 検証**(初回は targets 1 チャンネル・小さい cap を推奨):
   ```sh
   systemctl --user start stratum-extractor-discord.service

@@ -4,6 +4,12 @@
 targets: []
 #  - "123456789012345678"   # 例: #dev-hardware
 
+# true にすると bot が閲覧できるテキストチャンネル全部を対象にする(targets は無視・新設チャンネルも自動で対象)。
+# 除外は下の exclude(本ソース専用)か channels.yaml の permanent_exclude(bot 全体・/ask や 💡 にも効く)。
+all_visible: false
+# 本ソースだけ対象外にするチャンネル ID(雑談・購買依頼・日程調整など、ナレッジ化の価値が低いもの)
+exclude: []
+
 kb:
   repo: queeenb-com/knowledge-base
   dir: knowledge-base
@@ -15,7 +21,8 @@ base_branch: main
 # 初回(カーソル未保存)チャンネルの開始点: now − backfill_days から前方のみ(過去への遡行なし)
 backfill_days: 90
 
-# per-run caps(コスト有界・D7)。max_channels 超過分は日替わりローテーションで巡回。
+# per-run caps(コスト有界・D7)。max_channels 超過分は日替わりローテーションで巡回
+# (all_visible で 20 チャンネル前後なら 5 × 週 2 回 ≒ 2 週間で一巡)。
 max_channels: 2
 max_messages_per_channel: 200
 max_extract_calls: 8

@@ -14,6 +14,18 @@ describe("discordSourceConfigSchema", () => {
     expect(c.window_gap_minutes).toBe(30);
     expect(c.window_max_messages).toBe(50);
     expect(c.review_mentions).toEqual([]);
+    expect(c.all_visible).toBe(false);
+    expect(c.exclude).toEqual([]);
+  });
+
+  it("all_visible と exclude を受け付ける", () => {
+    const c = discordSourceConfigSchema.parse({
+      kb: { repo: "org/kb" },
+      all_visible: true,
+      exclude: ["999"],
+    });
+    expect(c.all_visible).toBe(true);
+    expect(c.exclude).toEqual(["999"]);
   });
 
   it("未知キーは strict で拒否する", () => {
