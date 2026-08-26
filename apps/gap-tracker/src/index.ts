@@ -17,12 +17,12 @@ import { createSqliteStore } from "@stratum/discord-bot/sqlite-store";
 import { createGhClientFromEnv, type GhClient } from "@stratum/gh-client";
 import { newId, parseEntry, type QuestionLog, validateRepo } from "@stratum/kb-core";
 import { createFsPromptStore, nullUsageRecorder } from "@stratum/llm";
+import { type GitExec, syncKb, withCloneToken } from "@stratum/shared";
 import { runFlywheelClose } from "./close.js";
-import { createFsConfigReader, loadGapConfig, withCloneToken } from "./config.js";
+import { createFsConfigReader, loadGapConfig } from "./config.js";
 import { draftEntry } from "./draft.js";
 import { isReal, parseCap, parseEnv } from "./env.js";
 import { runAnswerIngestion } from "./ingest.js";
-import { type GitExec, syncKb } from "./kb-sync.js";
 import { createLogger } from "./logger.js";
 import { loadMembers } from "./members.js";
 import {

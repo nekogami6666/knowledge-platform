@@ -1,8 +1,9 @@
 /**
- * knowledge-base clone の同期(1 リポ版)。extractor/src/repos.ts・gap-tracker/src/kb-sync.ts と
- * 同じ流儀: トークンを .git/config に永続化しない(clone 後 set-url scrub・fetch は URL 引数・
- * ADR-0013 D1(b))。これで 3 つ目の consumer になったため共有パッケージへの統合が必要 —
- * 独立 PR で行う(この PR では複製で進める・§2-F 方針)。
+ * knowledge-base clone の同期(1 リポ版)。extractor/src/repos.ts の syncOne と同じ流儀:
+ * トークンを .git/config に永続化しない(clone 後 set-url scrub・fetch は URL 引数・ADR-0013 D1(b))。
+ * gap-tracker → freshness-checker → extractor discord ソースで 3 消費者に達したため
+ * 共有パッケージへ統合した(§2-F 方針・ADR-0033 B1。旧: 各 app の kb-sync.ts 複製)。
+ * rev-parse ガード(VM 実害 2026-07-17)・clean -fd(同 2026-07-22)を含む。
  */
 import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
@@ -46,8 +47,8 @@ export async function syncKb(
     if (opts.url !== undefined) {
       await exec(["fetch", opts.url, opts.baseBranch], absDir);
       await exec(["reset", "--hard", "FETCH_HEAD"], absDir);
-      // reset --hard は追跡ファイルしか戻さず、未追跡ファイルは残る(gap-tracker の VM 実害
-      // 2026-07-22 と同根)。validateRepo 用 staging の残骸を clean で除去する。
+      // reset --hard は追跡ファイルしか戻さず、未追跡ファイルは残る。dry-run の staging 残骸が
+      // 残ると冪等スキャンが「commit 済み」と誤認して queue だけ消費する(VM 実害 2026-07-22)。
       await exec(["clean", "-fd"], absDir);
     }
   } else {

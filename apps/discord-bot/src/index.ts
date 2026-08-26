@@ -14,6 +14,7 @@ import {
   nullUsageRecorder,
   type Transcriber,
 } from "@stratum/llm";
+import { withCloneToken } from "@stratum/shared";
 import { type Client, Events } from "discord.js";
 import { setNotifySecrets } from "./ack.js";
 import { type AskDeps, DEFAULT_ASK_TIMEOUT_MS, handleAskRequest } from "./ask.js";
@@ -41,7 +42,7 @@ import { loadInterviewTopics } from "./interview-topics.js";
 import { createLogger, withCorrelation } from "./logger.js";
 import { createCloneMembersLoader, DEFAULT_KB_DIR } from "./members.js";
 import { createQaSearch } from "./qa-search.js";
-import { createGitRepoSyncer, withCloneToken } from "./repos.js";
+import { createGitRepoSyncer } from "./repos.js";
 import { createSqliteStore } from "./sqlite-store.js";
 import { isoJst } from "./time.js";
 import {

@@ -19,6 +19,14 @@
     "./freshness": {
       "types": "./dist/freshness.d.ts",
       "default": "./dist/freshness.js"
+    },
+    "./config": {
+      "types": "./dist/config.d.ts",
+      "default": "./dist/config.js"
+    },
+    "./collector": {
+      "types": "./dist/collector-session.d.ts",
+      "default": "./dist/collector-session.js"
     }
   },
   "scripts": {
@@ -30,6 +38,7 @@
     "@stratum/gh-client": "workspace:*",
     "@stratum/kb-core": "workspace:*",
     "@stratum/llm": "workspace:*",
+    "@stratum/shared": "workspace:*",
     "better-sqlite3": "^12.11.1",
     "discord.js": "^14.26.4",
     "js-yaml": "^4.2.0",

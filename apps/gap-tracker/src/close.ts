@@ -12,9 +12,9 @@ import { join } from "node:path";
 import type { BotStore } from "@stratum/discord-bot/store";
 import type { FileChange, GhClient } from "@stratum/gh-client";
 import { parseEntry, type QuestionLog, serializeEntry } from "@stratum/kb-core";
+import type { SyncedKb } from "@stratum/shared";
 import { z } from "zod";
 import type { GapConfig } from "./config.js";
-import type { SyncedKb } from "./kb-sync.js";
 import type { Logger } from "./logger.js";
 
 /** gap_pr 台帳(PR-D3a runAnswerIngestion が記録)。 */

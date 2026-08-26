@@ -20,9 +20,9 @@ import {
   parseExpertiseMap,
   serializeEntry,
 } from "@stratum/kb-core";
+import type { SyncedKb } from "@stratum/shared";
 import type { Assignee, GapConfig } from "./config.js";
 import { rankByExpertise } from "./expertise.js";
-import type { SyncedKb } from "./kb-sync.js";
 import type { Logger } from "./logger.js";
 import { buildQuestion, buildRequestMessage, containsQueryId, selectAssignee } from "./question.js";
 

@@ -19,10 +19,10 @@ import {
   type QuestionLog,
   serializeEntry,
 } from "@stratum/kb-core";
+import type { SyncedKb } from "@stratum/shared";
 import { resolveAskerMention } from "./close.js";
 import type { Assignee, GapConfig } from "./config.js";
 import { rankByExpertise } from "./expertise.js";
-import type { SyncedKb } from "./kb-sync.js";
 import type { Logger } from "./logger.js";
 import { buildRequestMessage, selectAssignee } from "./question.js";
 

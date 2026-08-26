@@ -27,8 +27,8 @@ import {
   safeParseEntry,
   serializeEntry,
 } from "@stratum/kb-core";
+import type { SyncedKb } from "@stratum/shared";
 import type { FreshnessConfig } from "./config.js";
-import type { SyncedKb } from "./kb-sync.js";
 import type { Logger } from "./logger.js";
 import { collectOverdue, type KbFile } from "./overdue.js";
 

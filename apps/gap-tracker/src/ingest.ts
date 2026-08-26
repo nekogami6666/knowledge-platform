@@ -15,10 +15,10 @@ import { join } from "node:path";
 import type { BotStore } from "@stratum/discord-bot/store";
 import type { FileChange, GhClient } from "@stratum/gh-client";
 import { type IdKind, parseEntry, serializeEntry } from "@stratum/kb-core";
+import type { SyncedKb } from "@stratum/shared";
 import { type AnswerEntryCandidate, buildAnswerEntry, gapAnswerPayloadSchema } from "./answer.js";
 import type { GapConfig } from "./config.js";
 import type { DraftInput } from "./draft.js";
-import type { SyncedKb } from "./kb-sync.js";
 import type { Logger } from "./logger.js";
 
 export interface IngestDeps {

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { withCloneToken } from "./config.js";
+import { withCloneToken } from "./git-auth.js";
 
-describe("withCloneToken(clone 認証の実行時注入・㉞)", () => {
+describe("withCloneToken(clone 認証の実行時注入・#139)", () => {
   it("トークンを https URL へ注入する", () => {
     expect(withCloneToken("https://github.com/o/r.git", "tok123")).toBe(
       "https://x-access-token:tok123@github.com/o/r.git",
