@@ -1,0 +1,28 @@
+# extractor Discord ソース設定(ADR-0033)。実値は discord.yaml(gitignore 済み)に置く。
+# 対象チャンネルの明示オプトイン。空 = 機能 OFF(run は disabled で即終了)。
+# bot が閲覧でき、channels.yaml の permanent_exclude に無いチャンネルのみ実際に読まれる。
+targets: []
+#  - "123456789012345678"   # 例: #dev-hardware
+
+kb:
+  repo: queeenb-com/knowledge-base
+  dir: knowledge-base
+  # クローン URL(トークンは書かない。認証は env GIT_CLONE_TOKEN・#139)
+  url: https://github.com/queeenb-com/knowledge-base.git
+
+base_branch: main
+
+# 初回(カーソル未保存)チャンネルの開始点: now − backfill_days から前方のみ(過去への遡行なし)
+backfill_days: 90
+
+# per-run caps(コスト有界・D7)。max_channels 超過分は日替わりローテーションで巡回。
+max_channels: 2
+max_messages_per_channel: 200
+max_extract_calls: 8
+
+# 会話ウィンドウ分割(D2): この分数以上空いたら別ウィンドウ / 1 ウィンドウの最大メッセージ数
+window_gap_minutes: 30
+window_max_messages: 50
+
+# 抽出 PR 通知のレビュー担当メンション(Discord ユーザ ID・日替わり。空 = メンション無し)
+review_mentions: []

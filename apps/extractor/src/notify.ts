@@ -16,6 +16,8 @@ export interface NotifyCounts {
 
 export interface NotifyMessage {
   prUrl: string;
+  /** 通知に出すソース種別のラベル(既定「抽出」。discord ソースは「Discord 抽出」・ADR-0033)。 */
+  label?: string;
   counts: NotifyCounts;
   people: readonly string[];
   /** レビュー担当の Discord ユーザ ID(config review_mentions の日替わりローテーション)。 */
@@ -33,6 +35,8 @@ export interface Notifier {
 
 export interface SkipNotice {
   prUrl: string;
+  /** 通知に出すソース種別のラベル(既定「抽出」)。 */
+  label?: string;
   /** リマインド宛先(PR 作成日の担当に固定・㉞ A3。createdAt が取れないときは当日の担当)。 */
   reviewer?: string;
   /** PR 作成からの経過日数(gh-client が createdAt を返せたときのみ)。 */
@@ -78,7 +82,7 @@ export function createWebhookNotifier(
       const c = msg.counts;
       await post(
         [
-          `📥 抽出 PR を作成しました: ${msg.prUrl}`,
+          `📥 ${msg.label ?? "抽出"} PR を作成しました: ${msg.prUrl}`,
           `新規 ${c.new} / 追記 ${c.append} / 矛盾 ${c.supersede} / skip ${c.skip} / 未解決の問い(questions/open に起票) ${c.openQuestions}`,
           msg.people.length > 0 ? `関係者: ${msg.people.join(", ")}` : "",
           msg.reviewer !== undefined
@@ -94,7 +98,7 @@ export function createWebhookNotifier(
       const escalation = msg.escalationMentions ?? [];
       await post(
         [
-          "⏸ 未マージの抽出 PR があるため、今回の抽出を見送りました。",
+          `⏸ 未マージの${msg.label ?? "抽出"} PR があるため、今回の抽出を見送りました。`,
           msg.prUrl,
           msg.daysOpen !== undefined ? `📅 PR 作成から ${msg.daysOpen} 日経過しています。` : "",
           escalation.length > 0
