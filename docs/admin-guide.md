@@ -1,7 +1,7 @@
 # ナレッジ共有 bot 管理ガイド(管理者向け)
 
 システムの全体像・日々見るもの・よくある設定変更・障害時の対応をまとめた、管理者の入口です。
-ユーザー向けの操作説明は [user-guide.md](user-guide.md)、個別の詳細手順は [runbooks/](runbooks/) にあります。
+ユーザー向けの操作説明の正典は knowledge-base の [ナレッジ共有エージェント利用ガイド](https://github.com/queeenb-com/knowledge-base/blob/main/knowledge/ops/kb-2026-yscyrt-knowledge-sharing-agent-user-guide.md)(`/ask` の検索対象)、個別の詳細手順は [runbooks/](runbooks/) にあります。
 
 ---
 
@@ -28,10 +28,10 @@
 | 毎日 03:00 | extractor(議事録→抽出PR) | Actions |
 | 毎日 04:00 | bot.db バックアップ | VM |
 | 毎日 04:30 | 録音データの掃除(14日保持) | VM |
-| 平日 10:00 | gap-tracker(質問の起票・依頼・回答のナレッジ化・リマインド) | VM |
+| 平日 10:00 | gap-tracker(質問の起票・依頼・回答のナレッジ化・リマインド)— **2026-08-13 から timer 停止中**(再開は `install-timers.sh --real --with-gap`) | VM |
 | 平日 11:00 | freshness(鮮度確認 DM) | VM |
 | 月曜 09:00 | 利用統計レポート | VM |
-| 週次(月曜) | pr-miner / expertise-mapper / weekly-eval | Actions |
+| 月曜 02:00 / 07:00 / 09:00 | expertise-mapper / pr-miner / weekly-eval | Actions |
 
 ## 2. 日常の運用 — 基本は「通知を見て 👍」
 

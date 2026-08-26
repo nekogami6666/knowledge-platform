@@ -13,9 +13,9 @@ on:
 jobs:
   golden-eval:
     runs-on: ubuntu-latest
-    # 10 問 ×(QA 120s + judge 120s)+ セットアップ。golden を 50 問へ増やすときはここも上げる。
+    # 13 問 ×(QA 120s + judge 120s)+ セットアップ。golden を増やすときはここも上げる。
     # 無いと GH 既定 360 分まで burn しうる(2026-08-16 expertise の教訓)。
-    timeout-minutes: 60
+    timeout-minutes: 75
     steps:
       - uses: actions/checkout@v5
 

@@ -30,7 +30,7 @@ const REPOS = [
 ];
 
 describe.skipIf(!HAS_LLM_AUTH)("golden eval (real Claude, synthetic corpus)", () => {
-  it("出典一致 >= 8/10(§6.2 AC1)+ NOT_FOUND ケース成立 + 妥当性 soft", async () => {
+  it("出典一致率 >= 0.8(§6.2 AC1・率で判定)+ NOT_FOUND ケース成立 + 妥当性 soft", async () => {
     const { citation, validity, results } = await runGoldenEval({
       goldenYaml: GOLDEN,
       promptsDir: PROMPTS_DIR,
@@ -41,7 +41,8 @@ describe.skipIf(!HAS_LLM_AUTH)("golden eval (real Claude, synthetic corpus)", ()
     console.log("citation:", JSON.stringify(citation, null, 2));
     console.log("validity:", JSON.stringify(validity, null, 2));
 
-    expect(citation.passCount).toBeGreaterThanOrEqual(8);
+    // 率で判定する(run-qa-cli.ts の床と同じ。絶対数だと golden を増やした瞬間に床が緩む)。
+    expect(citation.citationMatchRate).toBeGreaterThanOrEqual(0.8);
     expect(results.find((r) => r.id === "gq-010")?.answer.notFound).toBe(true);
 
     // §10.2(b): judge も Claude on AWS で動く(ADR-0009)。soft: deep 判定のばらつきで suite を flake させない。

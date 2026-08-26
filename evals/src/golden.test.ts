@@ -9,10 +9,11 @@ const goldenYaml = readFileSync(
 );
 
 describe("loadGoldenQa", () => {
-  it("golden-qa.yaml を読み 10 件を zod で検証して返す", () => {
+  it("golden-qa.yaml を読み 13 件(初版 10 + 利用ガイド回帰 3)を zod で検証して返す", () => {
     const golden = loadGoldenQa(goldenYaml);
-    expect(golden).toHaveLength(10);
+    expect(golden).toHaveLength(13);
     expect(golden.map((g) => g.id)).toContain("gq-001");
+    expect(golden.map((g) => g.id)).toEqual(expect.arrayContaining(["gq-011", "gq-012", "gq-013"]));
   });
 
   it("NOT_FOUND ケース(gq-010)は not_found:true / expected_sources:[]", () => {

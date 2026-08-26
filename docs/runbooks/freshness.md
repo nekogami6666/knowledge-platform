@@ -56,6 +56,9 @@ journalctl --user -u stratum-freshness.service -n 50
 
 ## 運用ノート
 
+> owner 向けの操作説明(👍 ✏️ 🗑 の意味・14 日で自動 stale)は正典の
+> [ナレッジ共有エージェント利用ガイド §6](https://github.com/queeenb-com/knowledge-base/blob/main/knowledge/ops/kb-2026-yscyrt-knowledge-sharing-agent-user-guide.md) を参照(重複記載しない)。
+
 - **14 日無応答** → checker が自動で stale へ降格し #stratum-ops に報告する(安全側の既定)
 - **DM 不達**(受信拒否設定)→ pending のまま温存され、上記の自動 stale に倒れる
 - 二重リアクション・bot 再起動後の再配送は冪等(2 回目は「処理済み」の案内のみ)

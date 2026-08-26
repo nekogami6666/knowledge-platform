@@ -641,3 +641,4 @@ flowchart TB
 - 判断の経緯: [adr/](./adr/)(特に 0003 スキーマ / 0006 封じ込め / 0009 Claude on AWS / 0011 auth-agnostic / 0013 実行境界 / 0014・0019 VM timer / 0016 Docker / 0017 expertise / 0018 可視性ゲート / 0020 VC 録音)
 - 有効化手順: [runbooks/](./runbooks/)、配置: [deploy/README.md](./deploy/README.md)
 - 非エンジニア向け概要: [system-overview.md](./system-overview.md)
+- 利用者向けの操作説明(正典・knowledge-base): [ナレッジ共有エージェント利用ガイド](https://github.com/queeenb-com/knowledge-base/blob/main/knowledge/ops/kb-2026-yscyrt-knowledge-sharing-agent-user-guide.md)

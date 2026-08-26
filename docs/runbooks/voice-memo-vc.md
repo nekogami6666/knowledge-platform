@@ -52,6 +52,9 @@ curl -s http://127.0.0.1:9488/health 2>/dev/null || docker compose exec bot sh -
 
 ## 5. E2E(受け入れ確認)
 
+> 利用者向けの操作説明(録音の始め方・DM 👍・音声の保持期間)は正典の
+> [ナレッジ共有エージェント利用ガイド §3](https://github.com/queeenb-com/knowledge-base/blob/main/knowledge/ops/kb-2026-yscyrt-knowledge-sharing-agent-user-guide.md) を参照。ここは受け入れチェックのみ。
+
 1. 専用 VC に 1 人で入って 20〜30 秒喋る → 退室
 2. 数十秒後、本人に DM: 「🎙️ VC 録音をナレッジ化する PR を作成しました」+ 冒頭抜粋 + 原本パス
 3. PR に原本(`interviews/voice-memos/…`)+ 記事 + 採番が同梱されている(validate CI 緑)

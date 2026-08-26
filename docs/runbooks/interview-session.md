@@ -13,25 +13,22 @@
 
 ## 通常フロー
 
+利用者側の操作(パネル / `/interview start` → VC で面談 → DM 👍)は正典の
+[ナレッジ共有エージェント利用ガイド §4](https://github.com/queeenb-com/knowledge-base/blob/main/knowledge/ops/kb-2026-yscyrt-knowledge-sharing-agent-user-guide.md) を参照(ここには重複記載しない)。運用側の要点のみ:
+
 1. **質問キットを作る(任意・推奨)**: GitHub Actions → `interview-kit` → Run workflow
    (`person` / `topic`、まず `real: false` でログ確認 → `real: true` で PR)→ マージ。
-2. **セッション開始**: Discord で `/interview start person:<対象者> topic:<テーマ>`。
-   - `kit:` で質問キットのパス(`interviews/kits/...`)を明示できる。省略時は
-     `person`×`topic` の規約パスを自動発見。見つからなければキット無しで開始(reply に明示)。
-   - 進行中の別セッション・通常録音がある間は開始できない(先に終わらせる)。
-3. **VC で面談**: 録音 VC に入ると自動で録音開始。**15 分ごとに自動分割**されるので
-   退室・再入室は不要(チャンク境界で数秒の録音欠落あり — 大事な発言の途中で切れたら
-   言い直す程度でよい)。途中経過は `/interview status`。
-4. **終了**: 全員が VC から退室すると録音終了 → 文字起こし → セッション原本
-   (`interviews/sessions/<年>/<日付>-<対象者>-<テーマ>-<ID>.md`)の PR が作られ、
-   `/interview start` した人に DM が届く。
-5. **承認**: DM の PR リンクを確認し、**DM に 👍** でマージ(bot が代理マージ)。
-6. **記事化(自動)**: マージ後、夜間の extractor がセッション原本から複数のナレッジ記事・
+   `/interview start` の `kit:` でパス(`interviews/kits/...`)を明示できる。省略時は
+   `person`×`topic` の規約パスを自動発見(パネル経由は自動発見のみ)。
+2. 進行中の別セッション・通常録音がある間は開始できない(先に終わらせる)。
+3. **記事化(自動)**: マージ後、夜間の extractor がセッション原本
+   (`interviews/sessions/<年>/<日付>-<対象者>-<テーマ>-<ID>.md`)から複数のナレッジ記事・
    決定・未解決の問いを抽出して PR にする(通常の抽出 PR と同じレビュー導線)。
 
 ## 中止したいとき
 
-- `/interview cancel` — armed(録音前)なら即キャンセル。録音中なら録音を破棄してキャンセル。
+- 利用者は パネルの **[✖ 中止]** または `/interview cancel`(armed なら即キャンセル・録音中なら
+  録音を破棄してキャンセル)。詳細は利用ガイド §4。
 
 ## 障害対応
 

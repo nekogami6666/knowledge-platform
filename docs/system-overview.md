@@ -253,7 +253,7 @@ diff(コードの差分)そのものは知識化せず、**判断と理由だけ
 flowchart TB
     subgraph IN2["入口"]
       A1["#voice-memo に<br/>音声を投稿"]
-      A2["専用VCに1人で入室<br/>→ 自動録音"]
+      A2["専用VCに入室(複数人可)<br/>→ 自動録音"]
     end
     A1 --> T["文字起こし(OpenAI)"]
     A2 --> R["録音sidecarが録る"] --> T
@@ -266,8 +266,8 @@ flowchart TB
     class A1,A2,T,R,O,DR,DM,RE n
 ```
 
-> 🎙️ **VC録音**(ADR-0020)は最近追加された第 2 の入口。専用ボイスチャンネルに **1 人で入ると録音開始、
-> 出ると終了**。録音は専用の録音 Bot と sidecar(補助コンテナ)が担当します。
+> 🎙️ **VC録音**(ADR-0020)は最近追加された第 2 の入口。専用ボイスチャンネルに **入ると録音開始(複数人可)、
+> 全員が出ると終了**(15 分ごとに自動分割・ADR-0028)。録音は専用の録音 Bot と sidecar(補助コンテナ)が担当します。
 
 ### C5 gap-tracker — フライホイール(穴埋めの循環)
 
@@ -485,6 +485,7 @@ flowchart LR
 ---
 
 ### もっと詳しく知りたい人へ
+- 利用者向けの操作説明(正典): [ナレッジ共有エージェント利用ガイド](https://github.com/queeenb-com/knowledge-base/blob/main/knowledge/ops/kb-2026-yscyrt-knowledge-sharing-agent-user-guide.md)(knowledge-base)
 - 設計の全体・受け入れ条件: [docs/design.md](./design.md)
 - 個別の設計判断の経緯: [docs/adr/](./adr/)(ADR-0001〜0020)
 - 各機能の有効化手順: [docs/runbooks/](./runbooks/)

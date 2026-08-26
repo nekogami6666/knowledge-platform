@@ -1,6 +1,6 @@
-# ゴールデン質問セット(design.md §10.2)。初版 10 件。
+# ゴールデン質問セット(design.md §10.2)。初版 10 件 + 利用ガイド回帰 3 件(gq-011〜013)。
 # 各エントリ: id / question / expected_sources(QaCitation 形)/ answer_points / not_found?
-# 出典一致率は expected_sources を全て含むかで判定(§6.2 AC1 = 8/10)。
+# 出典一致率は expected_sources を全て含むかで判定(§6.2 AC1 = 率 0.8 以上・件数を増やしても床は率で維持)。
 # 回答妥当性(LLM-as-judge §10.2(b))は PR-5b で追加。
 # 対象コーパスは evals/fixtures/qa-corpus(synthetic、ADR-0002 安全)。
 
@@ -94,3 +94,31 @@
   expected_sources: []
   not_found: true
   answer_points: []
+
+# --- 利用ガイド(正典)の発見性回帰(2026-08-26): 「bot の使い方」系の質問で knowledge/ops の正典を出典にできること ---
+- id: gq-011
+  question: "ナレッジ共有 bot の使い方を教えて"
+  expected_sources:
+    - kind: github_file
+      repo: org/knowledge-base
+      path: "knowledge/ops/kb-2026-yscyrt-knowledge-sharing-agent-user-guide.md"
+  answer_points:
+    - "/ask で質問・💡 や VC 録音で残す・👍 で承認、の 3 つ"
+
+- id: gq-012
+  question: "抽出 PR の中の不要なファイルをブラウザだけで削除するには?"
+  expected_sources:
+    - kind: github_file
+      repo: org/knowledge-base
+      path: "knowledge/ops/kb-2026-yscyrt-knowledge-sharing-agent-user-guide.md"
+  answer_points:
+    - "Files changed の「…」→ Delete file → Commit changes… → Commit directly to the branch"
+
+- id: gq-013
+  question: "💡 を付けたのに何も起きないときはどうすればいい?"
+  expected_sources:
+    - kind: github_file
+      repo: org/knowledge-base
+      path: "knowledge/ops/kb-2026-yscyrt-knowledge-sharing-agent-user-guide.md"
+  answer_points:
+    - "見送り理由が DM で届く / 要点を書き直して 💡 を付け直す / 1 日 3 件の上限"
