@@ -47,8 +47,9 @@ for app in gap-tracker freshness-checker; do
 done
 [ -f "$REPO_DIR/apps/discord-bot/dist/stats-cli.js" ] || echo "WARN: apps/discord-bot/dist/stats-cli.js が未ビルドです。先に 'pnpm -r build' を実行してください。" >&2
 [ -f "$REPO_DIR/apps/discord-bot/dist/recordings-cleanup-cli.js" ] || echo "WARN: apps/discord-bot/dist/recordings-cleanup-cli.js が未ビルドです。先に 'pnpm -r build' を実行してください。" >&2
+[ -f "$REPO_DIR/apps/extractor/dist/discord/index.js" ] || echo "WARN: apps/extractor/dist/discord/index.js が未ビルドです。先に 'pnpm -r build' を実行してください。" >&2
 
-mkdir -p "$UNIT_DIR" "$DATA_DIR/data" "$DATA_DIR/clones-gap" "$DATA_DIR/clones-freshness" "$DATA_DIR/recordings"
+mkdir -p "$UNIT_DIR" "$DATA_DIR/data" "$DATA_DIR/clones-gap" "$DATA_DIR/clones-freshness" "$DATA_DIR/clones-extractor-discord" "$DATA_DIR/recordings"
 
 # $1=unit basename(stratum-xxx) / $2=有効化する REAL 環境変数名(空 = REAL ゲート無し=read-only)
 render() {
@@ -76,13 +77,15 @@ render stratum-freshness FRESHNESS_REAL
 render stratum-stats # read-only 集計(REAL ゲート無し。DISCORD_OPS_WEBHOOK 有無が実質ゲート)
 render stratum-recordings-cleanup RECORDINGS_CLEANUP_REAL
 render stratum-image-prune # 月次 docker image prune(REAL ゲート無し・未使用画像のみ削除)
+# Discord ソース(ADR-0033): discord.yaml の targets が空なら no-op なので既定 enable で安全。
+render stratum-extractor-discord EXTRACTOR_DISCORD_REAL
 # 失敗通知の受け皿(template unit・timer 無し)。各 service の OnFailure= から呼ばれる。
 sed -e "s|__ENV_FILE__|$ENV_FILE|g" "$SCRIPT_DIR/stratum-notify-failure@.service" \
   >"$UNIT_DIR/stratum-notify-failure@.service"
 echo "  installed: $UNIT_DIR/stratum-notify-failure@.service"
 
 systemctl --user daemon-reload
-systemctl --user enable --now stratum-freshness.timer stratum-stats.timer stratum-recordings-cleanup.timer stratum-image-prune.timer
+systemctl --user enable --now stratum-freshness.timer stratum-stats.timer stratum-recordings-cleanup.timer stratum-image-prune.timer stratum-extractor-discord.timer
 # gap-tracker は 2026-08-13 の判断で無効化中 → 既定では enable しない(unit の設置だけ行う)。
 if [ "$WITH_GAP" = "1" ]; then
   systemctl --user enable --now stratum-gap-tracker.timer
@@ -92,7 +95,7 @@ fi
 loginctl enable-linger "$USER" >/dev/null 2>&1 || echo "WARN: enable-linger に失敗(polkit 制限)。IT に一度だけ依頼してください(母艦再起動後の自動起動に必要)。"
 
 echo ""
-echo "完了。次回タイマーで自動起動します(freshness=平日11:00 / stats=月09:00 / recordings-cleanup=毎日04:30 / image-prune=毎月1日05:00 JST):"
+echo "完了。次回タイマーで自動起動します(freshness=平日11:00 / stats=月09:00 / recordings-cleanup=毎日04:30 / image-prune=毎月1日05:00 / extractor-discord=火09:00 JST):"
 systemctl --user list-timers 'stratum-*' --no-pager || true
 echo ""
 echo "初回は手動起動で検証してください(まず --real 無しの dry-run 推奨):"
@@ -100,3 +103,4 @@ echo "  systemctl --user start stratum-gap-tracker.service && journalctl --user 
 echo "  systemctl --user start stratum-freshness.service   && journalctl --user -u stratum-freshness   -n 40 --no-pager"
 echo "  systemctl --user start stratum-stats.service       && journalctl --user -u stratum-stats       -n 40 --no-pager"
 echo "  systemctl --user start stratum-recordings-cleanup.service && journalctl --user -u stratum-recordings-cleanup -n 40 --no-pager"
+echo "  systemctl --user start stratum-extractor-discord.service && journalctl --user -u stratum-extractor-discord -n 40 --no-pager"
