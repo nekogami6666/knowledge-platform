@@ -35,6 +35,12 @@ export const discordSourceConfigSchema = z
     max_messages_per_channel: z.number().int().positive().default(200),
     /** 1 run の LLM 抽出呼び出し上限(D7)。超過ウィンドウは次回(カーソルを進めない)。 */
     max_extract_calls: z.number().int().positive().default(8),
+    /**
+     * 1 run(= 1 PR)に入れるエントリ数のソフト上限(2026-08-26 の運用決定「1 回の量を絞る」)。
+     * ウィンドウ境界で判定し、到達後のウィンドウは抽出せず次回へ持ち越す(カーソル非前進)。
+     * 夜間 extractor の EXTRACTOR_MAX_ENTRIES と同じ思想(欠落を作らず量だけ絞る)。
+     */
+    max_entries_per_run: z.number().int().positive().default(10),
     /** この分数以上会話が途切れたらウィンドウを区切る(D2)。 */
     window_gap_minutes: z.number().int().positive().default(30),
     /** 1 ウィンドウの最大メッセージ数(D2)。 */

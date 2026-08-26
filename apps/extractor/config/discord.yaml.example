@@ -26,6 +26,8 @@ backfill_days: 90
 max_channels: 2
 max_messages_per_channel: 200
 max_extract_calls: 8
+# 1 回(= 1 PR)に入れるエントリ数のソフト上限。到達後のウィンドウは次回へ持ち越し(レビュー量の調整弁)
+max_entries_per_run: 10
 
 # 会話ウィンドウ分割(D2): この分数以上空いたら別ウィンドウ / 1 ウィンドウの最大メッセージ数
 window_gap_minutes: 30

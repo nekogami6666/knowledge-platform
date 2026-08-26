@@ -176,6 +176,8 @@ Claude on AWS 4 変数 / DISCORD_OPS_WEBHOOK は全て stratum.env に既存)。
   systemctl --user start stratum-extractor-discord.service
   journalctl --user -u stratum-extractor-discord -n 60 --no-pager   # would-be PR / カーソル前進予定を確認
   ```
+- **量の調整**: `discord.yaml` の `max_entries_per_run`(1 PR のエントリ上限・既定 10)と `max_extract_calls`
+  (1 回の LLM 抽出ウィンドウ数)で絞る。超えた分は捨てずに次回へ持ち越される。
 - **REAL 化**: `./docs/deploy/install-timers.sh --real`(他タイマーと同じフラグ。**再実行時の
   フラグ落とし注意**は従来どおり)。REAL では 1 run 最大 1 PR(`extract-discord/<日付>` ブランチ)+
   カーソル `_meta/extractor-discord-state.json` を KB main へ直 commit します。

@@ -327,6 +327,23 @@ describe("runDiscordSource", () => {
     expect(h.calls.commits[0]?.files[0]?.content).toContain('"last_message_id": "1002"');
   });
 
+  it("max_entries_per_run に達したら以降のウィンドウは抽出せず持ち越す(カーソルは処理済み末尾まで)", async () => {
+    // 3 ウィンドウ(31 分ギャップ)・各 1 エントリ・上限 1 → 1 つ目で到達、2 つ目以降は deferred
+    const h = makeHarness({
+      config: { max_entries_per_run: 1, max_extract_calls: 8 },
+      messages: [
+        makeMsg("1001", { createdAt: new Date("2026-08-20T10:00:00Z") }),
+        makeMsg("2001", { createdAt: new Date("2026-08-20T11:00:00Z") }),
+        makeMsg("3001", { createdAt: new Date("2026-08-20T12:00:00Z") }),
+      ],
+    });
+    const r = await runDiscordSource(h.deps);
+    expect(r.windowsExtracted).toBe(1);
+    expect(r.windowsDeferred).toBe(2);
+    expect(r.counts.new).toBe(1);
+    expect(h.calls.commits[0]?.files[0]?.content).toContain('"last_message_id": "1001"');
+  });
+
   it("抽出失敗のウィンドウはカーソルを進めない(先頭で失敗なら state commit 自体を行わない)", async () => {
     const h = makeHarness({ extractError: true });
     const r = await runDiscordSource(h.deps);

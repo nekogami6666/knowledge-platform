@@ -304,6 +304,15 @@ export async function runDiscordSource(deps: DiscordRunDeps): Promise<DiscordRun
         allProcessed = false;
         break;
       }
+      // エントリ上限(ソフト cap・ウィンドウ境界)。到達後は抽出せず持ち越す(D7 のコスト有界 + レビュー量の抑制)。
+      if (counts.new + counts.append + counts.supersede >= config.max_entries_per_run) {
+        logger.info("エントリ上限に達したため以降のウィンドウは次回へ持ち越します", {
+          channelId: cw.channelId,
+          maxEntries: config.max_entries_per_run,
+        });
+        allProcessed = false;
+        break;
+      }
       const first = window[0];
       const last = window[window.length - 1];
       if (first === undefined || last === undefined) continue;

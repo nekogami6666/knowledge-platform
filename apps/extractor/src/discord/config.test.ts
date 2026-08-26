@@ -11,6 +11,7 @@ describe("discordSourceConfigSchema", () => {
     expect(c.max_channels).toBe(2);
     expect(c.max_messages_per_channel).toBe(200);
     expect(c.max_extract_calls).toBe(8);
+    expect(c.max_entries_per_run).toBe(10);
     expect(c.window_gap_minutes).toBe(30);
     expect(c.window_max_messages).toBe(50);
     expect(c.review_mentions).toEqual([]);
