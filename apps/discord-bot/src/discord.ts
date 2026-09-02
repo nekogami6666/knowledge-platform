@@ -20,6 +20,7 @@ import {
   type GuildBasedChannel,
   type Interaction,
   type Message,
+  MessageFlags,
   type MessageReaction,
   type PartialMessageReaction,
   Partials,
@@ -474,8 +475,9 @@ async function handleAsk(
   const correlationId = randomUUID();
   const log = withCorrelation(logger, correlationId);
   const question = interaction.options.getString("question", true);
-  // §6.2: エフェメラルにせず全員が後から参照できる公開返信にする。
-  await interaction.deferReply();
+  // ADR-0034: 応答一式(考え中・回答・出典・エラー・👍👎)は実行者本人にだけ見せる。
+  // editReply はこの defer のエフェメラル性を継承する。followUp は継承しないため配送アダプタ側で毎回 flags を付す。
+  await interaction.deferReply({ flags: MessageFlags.Ephemeral });
   let result: AskResult;
   try {
     result = await queue.enqueue(() =>
@@ -505,7 +507,9 @@ async function handleAsk(
   const outcome = await deliverAnswer(
     {
       editReply: (m) => interaction.editReply(m),
-      followUp: (m) => interaction.followUp(m),
+      // followUp は webhook 送信で defer のエフェメラル性を継承しない(ADR-0034 D2)。
+      // 続きチャンクも部分失敗通知もこのアダプタを通るため、ここで一括して本人限定にする。
+      followUp: (m) => interaction.followUp({ ...m, flags: MessageFlags.Ephemeral }),
     },
     splitForDiscord(result.answerText),
     components,
@@ -875,6 +879,16 @@ export async function handleButton(interaction: ButtonInteraction, deps: BotDeps
   // 相関 ID には対象 queryId を使い、フィードバック操作を該当クエリに紐づけて追跡する(§7.4)。
   const log = withCorrelation(deps.logger, parsed.queryId);
   try {
+    // ADR-0034 D3: 👍👎 は /ask 実行者本人のみ。ephemeral 化後は本人しかボタンを見られないが、
+    // エフェメラル化以前の公開回答にはボタンが残るため store の記録と照合する(record 無しは従来どおり許可)。
+    const query = deps.store.getQuery(parsed.queryId);
+    if (query !== undefined && query.discordUserId !== interaction.user.id) {
+      await interaction.reply({
+        content: "この操作は /ask を実行した本人のみ行えます。",
+        flags: MessageFlags.Ephemeral,
+      });
+      return;
+    }
     deps.store.setFeedback(parsed.queryId, parsed.value);
     if (parsed.value === "down") {
       // §6.2 step6: 👎 はフライホイール燃料として questions キューへ(git には書かない)。

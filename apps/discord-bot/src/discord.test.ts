@@ -7,11 +7,12 @@ import type {
   MessageReaction,
   User,
 } from "discord.js";
-import { Events, GatewayIntentBits } from "discord.js";
+import { Events, GatewayIntentBits, MessageFlags } from "discord.js";
 import type { Logger } from "pino";
 import { describe, expect, it, vi } from "vitest";
+import { ERROR_MESSAGE } from "./ask.js";
 import type { ChannelGateInput, ChannelsConfig, OpsConfig } from "./config.js";
-import type { BotStore } from "./db.js";
+import type { BotStore, QueryRecord } from "./db.js";
 import { createMemoryStore } from "./db.js";
 import {
   askCommand,
@@ -121,7 +122,9 @@ function fakeLogger(): { logger: Logger; errors: unknown[] } {
   return { logger: l as unknown as Logger, errors };
 }
 
-function fakeStore(opts: { throwOnFeedback?: boolean } = {}): {
+function fakeStore(
+  opts: { throwOnFeedback?: boolean; queryOwners?: Record<string, string> } = {},
+): {
   store: BotStore;
   feedback: [string, string][];
   queued: unknown[];
@@ -130,6 +133,11 @@ function fakeStore(opts: { throwOnFeedback?: boolean } = {}): {
   const queued: unknown[] = [];
   const rateCounts = new Map<string, number>();
   const store = {
+    // ADR-0034 D3: handleButton の本人照合が読む。未登載(undefined)は従来挙動 = 許可。
+    getQuery: (id: string): QueryRecord | undefined => {
+      const owner = opts.queryOwners?.[id];
+      return owner === undefined ? undefined : ({ discordUserId: owner } as QueryRecord);
+    },
     setFeedback: (id: string, value: "up" | "down") => {
       if (opts.throwOnFeedback) throw new Error("db locked");
       feedback.push([id, value]);
@@ -148,12 +156,16 @@ function fakeStore(opts: { throwOnFeedback?: boolean } = {}): {
   return { store: store as unknown as BotStore, feedback, queued };
 }
 
-function fakeButton(customId: string): { interaction: ButtonInteraction; replies: unknown[] } {
+function fakeButton(
+  customId: string,
+  userId = "u1",
+): { interaction: ButtonInteraction; replies: unknown[] } {
   const replies: unknown[] = [];
   const interaction = {
     customId,
     replied: false,
     deferred: false,
+    user: { id: userId },
     reply: async (o: unknown) => {
       replies.push(o);
     },
@@ -203,6 +215,30 @@ describe("handleButton (例外封じ込め / 配線)", () => {
     await expect(handleButton(interaction, deps(logger, store))).resolves.toBeUndefined();
     expect(errors).toHaveLength(1);
     expect(replies).toHaveLength(1); // ガード付き ephemeral 通知
+  });
+
+  it("実行者本人以外の押下は拒否する(ADR-0034 D3・記録もキューも積まない)", async () => {
+    const { logger } = fakeLogger();
+    const { store, feedback, queued } = fakeStore({ queryOwners: { q1: "asker" } });
+    const { interaction, replies } = fakeButton("fb:down:q1", "someone-else");
+    await handleButton(interaction, deps(logger, store));
+    expect(feedback).toHaveLength(0);
+    expect(queued).toHaveLength(0);
+    expect(replies).toEqual([
+      {
+        content: "この操作は /ask を実行した本人のみ行えます。",
+        flags: MessageFlags.Ephemeral,
+      },
+    ]);
+  });
+
+  it("実行者本人の押下は従来どおり記録される(ADR-0034 D3)", async () => {
+    const { logger } = fakeLogger();
+    const { store, feedback } = fakeStore({ queryOwners: { q1: "u1" } });
+    const { interaction, replies } = fakeButton("fb:up:q1", "u1");
+    await handleButton(interaction, deps(logger, store));
+    expect(feedback).toEqual([["q1", "up"]]);
+    expect(replies).toHaveLength(1);
   });
 });
 
@@ -1061,18 +1097,35 @@ describe("deliverAnswer (§6.2 分割配送)", () => {
   });
 });
 
-describe("InteractionCreate /ask の分割配送結線(§6.2)", () => {
-  function fakeAskInteraction(question: string): {
+describe("InteractionCreate /ask の分割配送結線(§6.2 / ADR-0034 ephemeral)", () => {
+  interface Sent {
+    via: "editReply" | "followUp";
+    content: string;
+    components: number;
+    flags: number | undefined;
+  }
+  function fakeAskInteraction(
+    question: string,
+    over: { inGuild?: boolean; userId?: string } = {},
+  ): {
     interaction: Interaction;
-    sends: { via: "editReply" | "followUp"; content: string; components: number }[];
-    defers: () => number;
+    sends: Sent[];
+    replies: { content: string; ephemeral?: boolean; flags?: number }[];
+    deferOptions: () => unknown[];
   } {
-    const sends: { via: "editReply" | "followUp"; content: string; components: number }[] = [];
-    let deferCount = 0;
+    const sends: Sent[] = [];
+    const replies: { content: string; ephemeral?: boolean; flags?: number }[] = [];
+    const defers: unknown[] = [];
     const push = (via: "editReply" | "followUp") => {
-      return async (o: string | { content: string; components?: unknown[] }) => {
-        if (typeof o === "string") sends.push({ via, content: o, components: 0 });
-        else sends.push({ via, content: o.content, components: o.components?.length ?? 0 });
+      return async (o: string | { content: string; components?: unknown[]; flags?: number }) => {
+        if (typeof o === "string") sends.push({ via, content: o, components: 0, flags: undefined });
+        else
+          sends.push({
+            via,
+            content: o.content,
+            components: o.components?.length ?? 0,
+            flags: o.flags,
+          });
       };
     };
     const interaction = {
@@ -1082,14 +1135,17 @@ describe("InteractionCreate /ask の分割配送結線(§6.2)", () => {
       isStringSelectMenu: () => false,
       isModalSubmit: () => false,
       commandName: "ask",
-      inGuild: () => true,
+      inGuild: () => over.inGuild ?? true,
       channel: null,
       channelId: "111",
       appPermissions: { has: () => true },
-      user: { id: "u1" },
+      user: { id: over.userId ?? "u1" },
       options: { getString: () => question },
-      deferReply: async () => {
-        deferCount += 1;
+      deferReply: async (o?: unknown) => {
+        defers.push(o);
+      },
+      reply: async (o: { content: string; ephemeral?: boolean; flags?: number }) => {
+        replies.push(o);
       },
       editReply: push("editReply"),
       followUp: push("followUp"),
@@ -1097,11 +1153,12 @@ describe("InteractionCreate /ask の分割配送結線(§6.2)", () => {
     return {
       interaction: interaction as unknown as Interaction,
       sends,
-      defers: () => deferCount,
+      replies,
+      deferOptions: () => defers,
     };
   }
 
-  it("2000 字超の回答は defer 1 回 + editReply 1 回 + followUp に分割され、ボタンは最終メッセージのみ", async () => {
+  it("2000 字超の回答: defer は ephemeral flags 付き 1 回・followUp チャンクにも毎回 flags・ボタンは最終メッセージのみ", async () => {
     const { logger } = fakeLogger();
     const first = "あ".repeat(1500);
     const second = "い".repeat(1500);
@@ -1115,12 +1172,109 @@ describe("InteractionCreate /ask の分割配送結線(§6.2)", () => {
         queryId: "q1",
       }),
     });
-    const { interaction, sends, defers } = fakeAskInteraction("長い質問");
+    const { interaction, sends, deferOptions } = fakeAskInteraction("長い質問");
     client.emit(Events.InteractionCreate, interaction);
     await vi.waitFor(() => expect(sends).toHaveLength(2));
-    expect(defers()).toBe(1);
-    expect(sends[0]).toEqual({ via: "editReply", content: first, components: 0 });
-    expect(sends[1]).toEqual({ via: "followUp", content: second, components: 1 });
+    // ADR-0034 D2: 非公開化は defer の時点で確定(editReply は継承・followUp は毎回 flags)。
+    expect(deferOptions()).toEqual([{ flags: MessageFlags.Ephemeral }]);
+    expect(sends[0]).toEqual({ via: "editReply", content: first, components: 0, flags: undefined });
+    expect(sends[1]).toEqual({
+      via: "followUp",
+      content: second,
+      components: 1,
+      flags: MessageFlags.Ephemeral,
+    });
+    await client.destroy();
+  });
+
+  it("未回答(NOT_FOUND)も同じ ephemeral defer 経路で editReply 1 通のみ・ボタン無し", async () => {
+    const { logger } = fakeLogger();
+    const client = createBot({
+      logger,
+      channels: channels(),
+      store: createMemoryStore(),
+      onAsk: async () => ({
+        answerText: "見つかりませんでした",
+        status: "unanswered",
+        queryId: "q2",
+      }),
+    });
+    const { interaction, sends, deferOptions } = fakeAskInteraction("未収載の質問");
+    client.emit(Events.InteractionCreate, interaction);
+    await vi.waitFor(() => expect(sends).toHaveLength(1));
+    expect(deferOptions()).toEqual([{ flags: MessageFlags.Ephemeral }]);
+    expect(sends[0]).toEqual({
+      via: "editReply",
+      content: "見つかりませんでした",
+      components: 0,
+      flags: undefined,
+    });
+    await client.destroy();
+  });
+
+  it("onAsk throw(dispatch 失敗)でも公開送信せず、ephemeral defer への editReply でエラー通知", async () => {
+    const { logger } = fakeLogger();
+    const client = createBot({
+      logger,
+      channels: channels(),
+      store: createMemoryStore(),
+      onAsk: async () => {
+        throw new Error("infra down");
+      },
+    });
+    const { interaction, sends, replies, deferOptions } = fakeAskInteraction("質問");
+    client.emit(Events.InteractionCreate, interaction);
+    await vi.waitFor(() => expect(sends).toHaveLength(1));
+    expect(deferOptions()).toEqual([{ flags: MessageFlags.Ephemeral }]);
+    expect(sends[0]).toEqual({
+      via: "editReply",
+      content: ERROR_MESSAGE,
+      components: 0,
+      flags: undefined,
+    });
+    expect(replies).toHaveLength(0); // 公開 reply へのフォールバックは存在しない
+    await client.destroy();
+  });
+
+  it("guild 外(DM)は defer せず ephemeral reply で拒否(質問エコーも公開されない)", async () => {
+    const { logger } = fakeLogger();
+    const client = createBot({
+      logger,
+      channels: channels(),
+      store: createMemoryStore(),
+      onAsk: async () => ({ answerText: "x", status: "answered", queryId: "q" }),
+    });
+    const { interaction, sends, replies, deferOptions } = fakeAskInteraction("質問", {
+      inGuild: false,
+    });
+    client.emit(Events.InteractionCreate, interaction);
+    await vi.waitFor(() => expect(replies).toHaveLength(1));
+    expect(replies[0]).toEqual({ content: DENY_MESSAGE, ephemeral: true });
+    expect(deferOptions()).toHaveLength(0);
+    expect(sends).toHaveLength(0);
+    await client.destroy();
+  });
+
+  it("rate-limit 超過(user 6 回目)は ephemeral reply で拒否・defer しない", async () => {
+    const { logger } = fakeLogger();
+    const client = createBot({
+      logger,
+      channels: channels(),
+      store: createMemoryStore(),
+      onAsk: async () => ({ answerText: "ok", status: "answered", queryId: "q" }),
+    });
+    let last: ReturnType<typeof fakeAskInteraction> | undefined;
+    for (let i = 0; i < 6; i += 1) {
+      last = fakeAskInteraction(`質問 ${i}`);
+      client.emit(Events.InteractionCreate, last.interaction);
+      // 直列キューの完了を待つ(6 回目だけは reply 拒否で sends が増えない)。
+      if (i < 5) await vi.waitFor(() => expect(last?.sends).toHaveLength(1));
+    }
+    await vi.waitFor(() => expect(last?.replies).toHaveLength(1));
+    expect(last?.replies[0]).toMatchObject({ ephemeral: true });
+    expect(last?.replies[0]?.content).toContain("リクエストが多すぎます");
+    expect(last?.deferOptions()).toHaveLength(0);
+    expect(last?.sends).toHaveLength(0);
     await client.destroy();
   });
 });
