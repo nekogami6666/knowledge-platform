@@ -23,6 +23,13 @@ export const freshnessPayloadSchema = z
     ownerDiscord: z.string().min(1),
     /** 積んだ時点の last_verified(👍 更新時の楽観ロック代わりの参考値)。 */
     lastVerified: z.string().min(1),
+    /**
+     * KB リポ(org/name)。DM に該当ファイルへの GitHub リンクを出すために checker が
+     * freshness.yaml の kb_repo から充填する(2026-09-09 永田さん要望)。
+     * optional なのは後方互換のため: 追加前に bot.db へ積まれた payload が strict parse で
+     * 壊れて DM ごとスキップされるのを防ぐ(旧 payload はリンク無しで表示される)。
+     */
+    repo: z.string().min(1).optional(),
   })
   .strict();
 export type FreshnessPayload = z.infer<typeof freshnessPayloadSchema>;

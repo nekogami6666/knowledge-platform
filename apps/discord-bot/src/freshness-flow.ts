@@ -32,6 +32,11 @@ export function buildFreshnessDm(payload: FreshnessPayload, actionId: string): s
   return [
     `🕰️ ナレッジの鮮度確認です: **${payload.title}**`,
     `\`${payload.path}\`(最終確認 ${payload.lastVerified})`,
+    // 該当ファイルへの直リンク(main = 今の内容)。<URL> の山括弧で埋め込みプレビューを抑制。
+    // repo が無い旧 payload(スキーマ追加前に積まれた分)はリンク無しの従来文面。
+    ...(payload.repo !== undefined
+      ? [`🔗 <https://github.com/${payload.repo}/blob/main/${payload.path}>`]
+      : []),
     "この内容はまだ正しいですか? このメッセージへのリアクションで教えてください:",
     "👍 正しい(last_verified を今日に更新) / ✏️ 直す(編集用 PR を作成) / 🗑 もう古い(stale へ)",
     `(ref: freshness/${actionId})`,

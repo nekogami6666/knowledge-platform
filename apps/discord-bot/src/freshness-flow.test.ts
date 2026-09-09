@@ -69,6 +69,18 @@ describe("buildFreshnessDm / parseFreshnessRef", () => {
     expect(parseFreshnessRef(dm)).toBe("abc-123");
   });
 
+  it("repo があれば該当ファイルへの GitHub リンクを載せる(<URL> で埋め込み抑制)", () => {
+    const dm = buildFreshnessDm({ ...PAYLOAD, repo: "org/knowledge-base" }, "abc-123");
+    expect(dm).toContain(
+      "🔗 <https://github.com/org/knowledge-base/blob/main/knowledge/hardware/kb-2026-0001.md>",
+    );
+    expect(parseFreshnessRef(dm)).toBe("abc-123");
+  });
+
+  it("repo が無い旧 payload はリンク行を出さない(後方互換)", () => {
+    expect(buildFreshnessDm(PAYLOAD, "abc-123")).not.toContain("https://github.com/");
+  });
+
   it("ref が無い本文は null", () => {
     expect(parseFreshnessRef("ただの DM")).toBeNull();
   });

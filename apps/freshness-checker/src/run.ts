@@ -243,6 +243,7 @@ export async function runFreshnessChecker(deps: RunDeps): Promise<RunSummary> {
     const payload: FreshnessPayload = {
       entryId: o.entry.id,
       path: o.path,
+      repo: config.kb_repo,
       title: o.entry.title,
       ownerGithub: o.entry.owner,
       ownerDiscord: discord,

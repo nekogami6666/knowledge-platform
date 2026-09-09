@@ -172,6 +172,7 @@ describe("runFreshnessChecker(§6.7 / ADR-0019)", () => {
     expect(parseFreshnessPayload(a?.payloadJson ?? null)).toEqual({
       entryId: "kb-2026-0001",
       path: OVERDUE.path,
+      repo: "org/knowledge-base",
       title: "タイトル",
       ownerGithub: "yamada",
       ownerDiscord: "111",
