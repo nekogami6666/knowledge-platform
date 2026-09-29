@@ -26,7 +26,7 @@ import {
   createClientMessenger,
   warmDmChannels,
 } from "./discord.js";
-import { parseEnv } from "./env.js";
+import { parseEnv, parsePositiveIntEnv } from "./env.js";
 import { createFreshnessDmWorker, type FreshnessApplyDeps } from "./freshness-flow.js";
 import type { InterviewCommandDeps } from "./interview-commands.js";
 import {
@@ -163,22 +163,14 @@ async function main(): Promise<void> {
 
   // 実 agentic search(runAgentSearch + §6.2 リトライ)を共有ファクトリで構築。
   // golden eval も同じ createQaSearch を使い、同一パイプラインを評価する(PR-5)。
-  // /ask の検索タイムアウト(既定 120s)。不正値は既定へフォールバック + warn。
-  const askTimeoutRaw = env.ASK_TIMEOUT_MS;
-  const askTimeoutNum =
-    askTimeoutRaw === undefined || askTimeoutRaw.trim() === "" ? undefined : Number(askTimeoutRaw);
-  const askTimeoutMs =
-    askTimeoutNum !== undefined && Number.isInteger(askTimeoutNum) && askTimeoutNum > 0
-      ? askTimeoutNum
-      : undefined;
-  if (askTimeoutNum !== undefined && askTimeoutMs === undefined) {
-    logger.warn(
-      { env: "ASK_TIMEOUT_MS", raw: askTimeoutRaw },
-      "不正な ASK_TIMEOUT_MS のため既定(120s)で実行します",
-    );
-  }
+  // /ask の検索タイムアウト(既定 600s・ADR-0035 D1)。不正値は既定へフォールバック + warn。
   // 検索の実挙動とタイムアウト文面の秒数表示が単一値を共有する(表示だけズレる事故を防ぐ)。
-  const effectiveAskTimeoutMs = askTimeoutMs ?? DEFAULT_ASK_TIMEOUT_MS;
+  const effectiveAskTimeoutMs = parsePositiveIntEnv(
+    "ASK_TIMEOUT_MS",
+    env.ASK_TIMEOUT_MS,
+    DEFAULT_ASK_TIMEOUT_MS,
+    (data, msg) => logger.warn(data, msg),
+  );
   const search = createQaSearch({ usage: nullUsageRecorder, timeoutMs: effectiveAskTimeoutMs });
 
   const onAsk: AskHandler = (question, ctx) => {
@@ -194,6 +186,7 @@ async function main(): Promise<void> {
       logError: (err) =>
         withCorrelation(logger, ctx.correlationId).error({ err }, "/ask pipeline error"),
       logWarn: (data, msg) => withCorrelation(logger, ctx.correlationId).warn(data, msg),
+      logInfo: (data, msg) => withCorrelation(logger, ctx.correlationId).info(data, msg),
       searchTimeoutMs: effectiveAskTimeoutMs,
     };
     return handleAskRequest(

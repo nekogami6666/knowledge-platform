@@ -7,7 +7,13 @@ import type {
   MessageReaction,
   User,
 } from "discord.js";
-import { Events, GatewayIntentBits, MessageFlags } from "discord.js";
+import {
+  DiscordAPIError,
+  Events,
+  GatewayIntentBits,
+  MessageFlags,
+  RESTJSONErrorCodes,
+} from "discord.js";
 import type { Logger } from "pino";
 import { describe, expect, it, vi } from "vitest";
 import { ERROR_MESSAGE } from "./ask.js";
@@ -21,6 +27,7 @@ import {
   commandsToRegister,
   createBot,
   DENY_MESSAGE,
+  DM_FALLBACK_NOTE,
   deliverAnswer,
   denyReason,
   extractQuestionId,
@@ -32,7 +39,11 @@ import {
   handleGapAnswer,
   handleProxyMergeReaction,
   handleStats,
+  INTERACTION_DEADLINE_MARGIN_MS,
+  INTERACTION_TOKEN_MS,
+  interactionLikelyExpired,
   interviewCommand,
+  isExpiredInteractionError,
   looksLikeGapRequest,
   PROXY_MERGE_OFF_MESSAGE,
   parseFeedbackCustomId,
@@ -108,18 +119,21 @@ describe("windowKey (10分バケット)", () => {
 });
 
 /** discord.js を起動せず handleButton の配線・例外封じ込めを検証するための最小 fake 群。 */
-function fakeLogger(): { logger: Logger; errors: unknown[] } {
+function fakeLogger(): { logger: Logger; errors: unknown[]; warns: unknown[] } {
   const errors: unknown[] = [];
+  const warns: unknown[] = [];
   const l = {
     child: () => l,
     error: (obj: unknown) => {
       errors.push(obj);
     },
     info: () => {},
-    warn: () => {},
+    warn: (obj: unknown) => {
+      warns.push(obj);
+    },
     debug: () => {},
   };
-  return { logger: l as unknown as Logger, errors };
+  return { logger: l as unknown as Logger, errors, warns };
 }
 
 function fakeStore(
@@ -1043,14 +1057,14 @@ describe("deliverAnswer (§6.2 分割配送)", () => {
   it("単一チャンクは editReply 1 回で components 付き", async () => {
     const { delivery, sends } = fakeDelivery();
     const outcome = await deliverAnswer(delivery, ["回答"], buttons);
-    expect(outcome).toEqual({ sentChunks: 1 });
+    expect(outcome).toEqual({ sentChunks: 1, fallbackChunks: 0 });
     expect(sends).toEqual([{ via: "editReply", content: "回答", components: 1 }]);
   });
 
   it("3 チャンクは editReply → followUp → followUp の順で、components は末尾のみ", async () => {
     const { delivery, sends } = fakeDelivery();
     const outcome = await deliverAnswer(delivery, ["a", "b", "c"], buttons);
-    expect(outcome).toEqual({ sentChunks: 3 });
+    expect(outcome).toEqual({ sentChunks: 3, fallbackChunks: 0 });
     expect(sends).toEqual([
       { via: "editReply", content: "a", components: 0 },
       { via: "followUp", content: "b", components: 0 },
@@ -1092,7 +1106,7 @@ describe("deliverAnswer (§6.2 分割配送)", () => {
   it("チャンク 0 件なら何も送らない", async () => {
     const { delivery, sends } = fakeDelivery();
     const outcome = await deliverAnswer(delivery, [], buttons);
-    expect(outcome).toEqual({ sentChunks: 0 });
+    expect(outcome).toEqual({ sentChunks: 0, fallbackChunks: 0 });
     expect(sends).toEqual([]);
   });
 });
@@ -1275,6 +1289,221 @@ describe("InteractionCreate /ask の分割配送結線(§6.2 / ADR-0034 ephemera
     expect(last?.replies[0]?.content).toContain("リクエストが多すぎます");
     expect(last?.deferOptions()).toHaveLength(0);
     expect(last?.sends).toHaveLength(0);
+    await client.destroy();
+  });
+});
+
+// --- ADR-0035: /ask の時間予算(失効時 DM 配送・失効エラーの封じ込め) ---
+
+/** discord.js が interaction 失効時に投げる形の DiscordAPIError(10062 = UnknownInteraction)。 */
+function unknownInteractionError(): DiscordAPIError {
+  return new DiscordAPIError(
+    { message: "Unknown interaction", code: RESTJSONErrorCodes.UnknownInteraction },
+    RESTJSONErrorCodes.UnknownInteraction,
+    404,
+    "POST",
+    "https://discord.com/api/v10/interactions/x/y/callback",
+    {},
+  );
+}
+
+describe("interactionLikelyExpired / isExpiredInteractionError (ADR-0035 D2/D3)", () => {
+  it("受付から 15 分 − 余裕 を超えたら失効扱い", () => {
+    const t0 = 1_000_000;
+    const limit = INTERACTION_TOKEN_MS - INTERACTION_DEADLINE_MARGIN_MS;
+    expect(interactionLikelyExpired(t0, t0 + limit)).toBe(false);
+    expect(interactionLikelyExpired(t0, t0 + limit + 1)).toBe(true);
+  });
+
+  it("UnknownInteraction / InteractionHasAlreadyBeenAcknowledged だけを失効エラーと判定する", () => {
+    expect(isExpiredInteractionError(unknownInteractionError())).toBe(true);
+    const acked = new DiscordAPIError(
+      { message: "already acked", code: RESTJSONErrorCodes.InteractionHasAlreadyBeenAcknowledged },
+      RESTJSONErrorCodes.InteractionHasAlreadyBeenAcknowledged,
+      400,
+      "POST",
+      "u",
+      {},
+    );
+    expect(isExpiredInteractionError(acked)).toBe(true);
+    const other = new DiscordAPIError(
+      { message: "invalid form body", code: RESTJSONErrorCodes.InvalidFormBodyOrContentType },
+      RESTJSONErrorCodes.InvalidFormBodyOrContentType,
+      400,
+      "POST",
+      "u",
+      {},
+    );
+    expect(isExpiredInteractionError(other)).toBe(false);
+    expect(isExpiredInteractionError(new Error("plain"))).toBe(false);
+  });
+});
+
+describe("deliverAnswer の失効時 DM フォールバック(ADR-0035 D2)", () => {
+  type Sent = { via: "editReply" | "followUp" | "dm"; content: string; components: number };
+  function fakeDelivery(opts: { failOn: number[]; expired: boolean; dmFails?: boolean }): {
+    delivery: Parameters<typeof deliverAnswer>[0];
+    sends: Sent[];
+  } {
+    const sends: Sent[] = [];
+    let calls = 0;
+    const record = (via: "editReply" | "followUp") => {
+      return async (m: { content: string; components: unknown[] }) => {
+        calls += 1;
+        if (opts.failOn.includes(calls)) {
+          throw opts.expired ? unknownInteractionError() : new Error(`send failure #${calls}`);
+        }
+        sends.push({ via, content: m.content, components: m.components.length });
+      };
+    };
+    return {
+      delivery: {
+        editReply: record("editReply"),
+        followUp: record("followUp"),
+        fallback: async (m) => {
+          if (opts.dmFails === true) throw new Error("dm closed");
+          sends.push({ via: "dm", content: m.content, components: m.components.length });
+        },
+        isExpired: isExpiredInteractionError,
+      },
+      sends,
+    };
+  }
+  const buttons = [feedbackButtons("q1")];
+
+  it("先頭で失効したら全チャンクを DM で届け、先頭に断り書き・👍👎 は末尾のみ", async () => {
+    const { delivery, sends } = fakeDelivery({ failOn: [1], expired: true });
+    const outcome = await deliverAnswer(delivery, ["a", "b"], buttons);
+    expect(outcome).toEqual({ sentChunks: 0, fallbackChunks: 2 });
+    expect(sends).toEqual([
+      { via: "dm", content: `${DM_FALLBACK_NOTE}\na`, components: 0 },
+      { via: "dm", content: "b", components: 1 },
+    ]);
+  });
+
+  it("途中で失効したら残りだけを DM で届ける(配送済みは重複させない)", async () => {
+    const { delivery, sends } = fakeDelivery({ failOn: [2], expired: true });
+    const outcome = await deliverAnswer(delivery, ["a", "b", "c"], buttons);
+    expect(outcome).toEqual({ sentChunks: 1, fallbackChunks: 2 });
+    expect(sends.map((x) => x.via)).toEqual(["editReply", "dm", "dm"]);
+    expect(sends[1]?.content).toBe(`${DM_FALLBACK_NOTE}\nb`);
+    expect(sends[2]).toEqual({ via: "dm", content: "c", components: 1 });
+  });
+
+  it("失効以外のエラーでは DM に逃げず従来の失敗通知", async () => {
+    const { delivery, sends } = fakeDelivery({ failOn: [1], expired: false });
+    const outcome = await deliverAnswer(delivery, ["a"], buttons);
+    expect(outcome.fallbackChunks).toBe(0);
+    expect(outcome.error).toBeInstanceOf(Error);
+    expect(sends.map((x) => x.via)).toEqual(["editReply"]); // SEND_FAILED_MESSAGE の editReply
+  });
+
+  it("DM も失敗したら error + noticeError を返し throw しない", async () => {
+    const { delivery } = fakeDelivery({ failOn: [1], expired: true, dmFails: true });
+    const outcome = await deliverAnswer(delivery, ["a"], buttons);
+    expect(outcome.sentChunks).toBe(0);
+    expect(outcome.fallbackChunks).toBe(0);
+    expect(isExpiredInteractionError(outcome.error)).toBe(true);
+    expect(outcome.noticeError).toBeInstanceOf(Error);
+  });
+});
+
+describe("InteractionCreate /ask の失効封じ込め(ADR-0035 D2/D3)", () => {
+  function fakeAskInteraction(opts: { deferThrows?: unknown; editThrows?: unknown } = {}): {
+    interaction: Interaction;
+    edits: string[];
+    dms: { content: string; components: number }[];
+    defers: number;
+  } {
+    const edits: string[] = [];
+    const dms: { content: string; components: number }[] = [];
+    let defers = 0;
+    const interaction = {
+      isChatInputCommand: () => true,
+      isButton: () => false,
+      isUserSelectMenu: () => false,
+      isStringSelectMenu: () => false,
+      isModalSubmit: () => false,
+      commandName: "ask",
+      inGuild: () => true,
+      channel: null,
+      channelId: "111",
+      appPermissions: { has: () => true },
+      user: {
+        id: "u1",
+        send: async (m: { content: string; components: unknown[] }) => {
+          dms.push({ content: m.content, components: m.components.length });
+        },
+      },
+      options: { getString: () => "質問" },
+      deferReply: async () => {
+        defers += 1;
+        if (opts.deferThrows !== undefined) throw opts.deferThrows;
+      },
+      reply: async () => {},
+      editReply: async (o: string | { content: string }) => {
+        if (opts.editThrows !== undefined) throw opts.editThrows;
+        edits.push(typeof o === "string" ? o : o.content);
+      },
+      followUp: async () => {},
+    };
+    return { interaction: interaction as unknown as Interaction, edits, dms, defers };
+  }
+
+  it("deferReply が UnknownInteraction を投げたら warn で終わり onAsk を呼ばない", async () => {
+    const { logger, warns } = fakeLogger();
+    let asked = 0;
+    const client = createBot({
+      logger,
+      channels: channels(),
+      store: createMemoryStore(),
+      onAsk: async () => {
+        asked += 1;
+        return { answerText: "x", status: "answered", queryId: "q" };
+      },
+    });
+    const fake = fakeAskInteraction({ deferThrows: unknownInteractionError() });
+    client.emit(Events.InteractionCreate, fake.interaction);
+    await vi.waitFor(() => expect(warns.length).toBeGreaterThan(0));
+    expect(asked).toBe(0);
+    expect(fake.dms).toEqual([]);
+    await client.destroy();
+  });
+
+  it("キュー待ちで 15 分を超えて開始したら editReply を試みず DM で配送する", async () => {
+    const { logger } = fakeLogger();
+    let t = 0;
+    const client = createBot({
+      logger,
+      channels: channels(),
+      store: createMemoryStore(),
+      // 受付時 t=0、タスク開始時 t=15 分(失効確定)。
+      now: () => {
+        t += INTERACTION_TOKEN_MS;
+        return t;
+      },
+      onAsk: async () => ({ answerText: "回答本文", status: "answered", queryId: "q9" }),
+    });
+    const fake = fakeAskInteraction();
+    client.emit(Events.InteractionCreate, fake.interaction);
+    await vi.waitFor(() => expect(fake.dms).toHaveLength(1));
+    expect(fake.edits).toEqual([]);
+    expect(fake.dms[0]).toEqual({ content: `${DM_FALLBACK_NOTE}\n回答本文`, components: 1 });
+    await client.destroy();
+  });
+
+  it("editReply が失効エラーなら同じ回答を DM で配送する", async () => {
+    const { logger } = fakeLogger();
+    const client = createBot({
+      logger,
+      channels: channels(),
+      store: createMemoryStore(),
+      onAsk: async () => ({ answerText: "回答本文", status: "answered", queryId: "q9" }),
+    });
+    const fake = fakeAskInteraction({ editThrows: unknownInteractionError() });
+    client.emit(Events.InteractionCreate, fake.interaction);
+    await vi.waitFor(() => expect(fake.dms).toHaveLength(1));
+    expect(fake.dms[0]).toEqual({ content: `${DM_FALLBACK_NOTE}\n回答本文`, components: 1 });
     await client.destroy();
   });
 });

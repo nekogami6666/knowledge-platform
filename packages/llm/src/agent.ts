@@ -109,6 +109,10 @@ export interface AgentSearchResult<T> {
   value: T;
   /** 入出力トークン(§7.3)。 */
   usage: Usage;
+  /** Agent SDK が消費したターン数(観測用・ADR-0035 D4。result に無ければ undefined)。 */
+  numTurns?: number;
+  /** モデル API 呼び出しの合計時間 ms(観測用・ADR-0035 D4)。 */
+  durationApiMs?: number;
 }
 
 /** query() の最小シグネチャ。注入で Agent SDK をモック可能にする(kb-core の IO 注入と同趣旨)。 */
@@ -130,6 +134,8 @@ interface ResultMessage {
   subtype: string;
   structured_output?: unknown;
   usage?: { input_tokens?: number; output_tokens?: number };
+  num_turns?: number;
+  duration_api_ms?: number;
 }
 
 function isResultMessage(m: unknown): m is ResultMessage {
@@ -223,5 +229,12 @@ export async function runAgentSearch<T>(
     );
   }
 
-  return { value: parsed.data, usage };
+  return {
+    value: parsed.data,
+    usage,
+    ...(typeof result.num_turns === "number" ? { numTurns: result.num_turns } : {}),
+    ...(typeof result.duration_api_ms === "number"
+      ? { durationApiMs: result.duration_api_ms }
+      : {}),
+  };
 }

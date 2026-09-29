@@ -30,7 +30,7 @@ const envSchema = z
     OPENAI_API_KEY: z.string().optional(),
     /** repos.yaml の url に注入する clone 用トークン(config に平文で置かない・㉞)。 */
     GIT_CLONE_TOKEN: z.string().optional(),
-    /** /ask の agentic search 上限 ms(既定 120000)。KB 成長で伸びたら env で調整(㉞ 調査)。 */
+    /** /ask の agentic search 上限 ms(既定 600000・ADR-0035 D1)。KB 成長で伸びたら env で調整。 */
     ASK_TIMEOUT_MS: z.string().optional(),
     /** VC 録音 sidecar の URL(ADR-0020。compose 内部ネットワーク・例 http://recorder:9488)。未設定なら VC 入口 OFF。 */
     RECORDER_URL: z.string().optional(),
@@ -63,4 +63,21 @@ export type Env = z.infer<typeof envSchema>;
 /** process.env(または注入した source)を検証して返す。失敗時は zod エラーを throw。 */
 export function parseEnv(source: Record<string, string | undefined> = process.env): Env {
   return envSchema.parse(source);
+}
+
+/**
+ * 任意の正整数 env を解釈する(ADR-0035)。未設定・空なら fallback。不正値(非整数・0 以下)は
+ * warn を出して fallback に倒す(起動を止めない)。/ask の調整ノブ(ASK_TIMEOUT_MS 等)で共用。
+ */
+export function parsePositiveIntEnv(
+  name: string,
+  raw: string | undefined,
+  fallback: number,
+  warn: (data: Record<string, unknown>, msg: string) => void,
+): number {
+  if (raw === undefined || raw.trim() === "") return fallback;
+  const n = Number(raw);
+  if (Number.isInteger(n) && n > 0) return n;
+  warn({ env: name, raw }, `不正な ${name} のため既定(${fallback})で実行します`);
+  return fallback;
 }

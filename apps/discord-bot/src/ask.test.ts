@@ -372,6 +372,30 @@ describe("handleAskRequest synthetic 統合(§6.2 受け入れ条件)", () => {
     expect(warnsSkipped).toHaveLength(0);
   });
 
+  it("検索完了ごとに logInfo へ elapsedMs / numTurns / durationApiMs を出す(ADR-0035 D4)", async () => {
+    const infos: Record<string, unknown>[] = [];
+    let t = 0;
+    const { deps } = makeDeps({
+      search: async () => ({
+        value: { answer: "回答", citations: [], notFound: true },
+        usage: { inputTokens: 3, outputTokens: 4 },
+        numTurns: 9,
+        durationApiMs: 41_000,
+      }),
+      monotonicMs: () => (t += 1000),
+      logInfo: (data) => infos.push(data),
+    });
+    await handleAskRequest(req, deps);
+    expect(infos).toHaveLength(1);
+    expect(infos[0]).toMatchObject({ numTurns: 9, durationApiMs: 41_000, notFound: true });
+    expect(infos[0]?.elapsedMs).toBe(1000);
+    // 無ければ null(欠損と 0 を区別する)。
+    const infos2: Record<string, unknown>[] = [];
+    const { deps: deps2 } = makeDeps({ logInfo: (data) => infos2.push(data) });
+    await handleAskRequest(req, deps2);
+    expect(infos2[0]).toMatchObject({ numTurns: null, durationApiMs: null });
+  });
+
   it("検索が throw したら error として記録 + logError 通知(キューには積まない)", async () => {
     const errors: unknown[] = [];
     const { deps, store } = makeDeps({
@@ -399,7 +423,7 @@ describe("handleAskRequest synthetic 統合(§6.2 受け入れ条件)", () => {
     const res = await handleAskRequest(req, deps);
     expect(res.status).toBe("timeout");
     expect(res.answerText).toBe(timeoutMessage(DEFAULT_ASK_TIMEOUT_MS));
-    expect(res.answerText).toContain("120 秒");
+    expect(res.answerText).toContain("600 秒");
     expect(store.getQuery(res.queryId)?.answerStatus).toBe("timeout");
     expect(store.listPendingActions()).toHaveLength(0); // ナレッジ欠落ではないのでキューに積まない
     expect(errors).toHaveLength(1);

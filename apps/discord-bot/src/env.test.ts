@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseEnv } from "./env.js";
+import { parseEnv, parsePositiveIntEnv } from "./env.js";
 
 // Claude on AWS の必須 env 一式(ADR-0009)。
 const base = {
@@ -50,5 +50,27 @@ describe("parseEnv", () => {
     const env = parseEnv({ ...base, CLONES_DIR: "/x", CONFIG_DIR: "/c" });
     expect(env.CLONES_DIR).toBe("/x");
     expect(env.CONFIG_DIR).toBe("/c");
+  });
+});
+
+describe("parsePositiveIntEnv(/ask 調整ノブ・ADR-0035)", () => {
+  it("未設定・空は fallback、正整数はその値", () => {
+    const warns: string[] = [];
+    const warn = (_d: Record<string, unknown>, m: string) => warns.push(m);
+    expect(parsePositiveIntEnv("ASK_TIMEOUT_MS", undefined, 600_000, warn)).toBe(600_000);
+    expect(parsePositiveIntEnv("ASK_TIMEOUT_MS", "  ", 600_000, warn)).toBe(600_000);
+    expect(parsePositiveIntEnv("ASK_TIMEOUT_MS", "300000", 600_000, warn)).toBe(300_000);
+    expect(warns).toEqual([]);
+  });
+
+  it("不正値(非整数・0・負)は warn して fallback", () => {
+    const warns: Record<string, unknown>[] = [];
+    const warn = (d: Record<string, unknown>) => warns.push(d);
+    expect(parsePositiveIntEnv("ASK_TIMEOUT_MS", "abc", 600_000, warn)).toBe(600_000);
+    expect(parsePositiveIntEnv("ASK_TIMEOUT_MS", "0", 600_000, warn)).toBe(600_000);
+    expect(parsePositiveIntEnv("ASK_TIMEOUT_MS", "-5", 600_000, warn)).toBe(600_000);
+    expect(parsePositiveIntEnv("ASK_TIMEOUT_MS", "1.5", 600_000, warn)).toBe(600_000);
+    expect(warns).toHaveLength(4);
+    expect(warns[0]).toEqual({ env: "ASK_TIMEOUT_MS", raw: "abc" });
   });
 });

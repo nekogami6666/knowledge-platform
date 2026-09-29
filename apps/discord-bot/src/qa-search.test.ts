@@ -9,7 +9,7 @@ const ANSWER = {
 };
 
 describe("createQaSearch(タイムアウトの明示・㉞ 失敗耐性)", () => {
-  it("既定 120s を明示的に渡し、deps.timeoutMs で上書きできる", async () => {
+  it("既定 600s を明示的に渡し、deps.timeoutMs で上書きできる", async () => {
     const seen: (number | undefined)[] = [];
     const runSearch = (async (opts: { timeoutMs?: number }) => {
       seen.push(opts.timeoutMs);
@@ -17,8 +17,8 @@ describe("createQaSearch(タイムアウトの明示・㉞ 失敗耐性)", () =>
     }) as unknown as AgentSearchFn;
     await createQaSearch({ runSearch })(INPUT);
     await createQaSearch({ runSearch, timeoutMs: 300_000 })(INPUT);
-    expect(seen).toEqual([120_000, 300_000]);
-    expect(DEFAULT_ASK_TIMEOUT_MS).toBe(120_000); // §6.2「上限 120 秒」の正典値ピン
+    expect(seen).toEqual([600_000, 300_000]);
+    expect(DEFAULT_ASK_TIMEOUT_MS).toBe(600_000); // §6.2「上限 600 秒」の正典値ピン(ADR-0035 D1)
   });
 
   it("TIMEOUT はリトライしない(再送は 15 分の interaction 期限内の待ち時間を倍にするだけ)", async () => {

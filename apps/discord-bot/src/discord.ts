@@ -15,6 +15,7 @@ import {
   type Channel,
   type ChatInputCommandInteraction,
   Client,
+  DiscordAPIError,
   Events,
   GatewayIntentBits,
   type GuildBasedChannel,
@@ -26,6 +27,7 @@ import {
   Partials,
   type PartialUser,
   PermissionFlagsBits,
+  RESTJSONErrorCodes,
   SlashCommandBuilder,
   type User,
 } from "discord.js";
@@ -126,6 +128,8 @@ export interface BotDeps {
   store: BotStore;
   /** /ask の処理。未指定なら stub 応答。 */
   onAsk?: AskHandler;
+  /** 壁時計 ms(注入・既定 Date.now)。interaction token 失効判定(ADR-0035 D2)のテスト用。 */
+  now?: () => number;
   /**
    * スラッシュコマンドの登録先ギルド(env DISCORD_GUILD_ID)。指定時はそのギルドへ即時反映、
    * 未指定はグローバル登録(全サーバーに反映されるが最大 1 時間かかる)。テストサーバーでは指定推奨。
@@ -380,9 +384,39 @@ export const SEND_FAILED_MESSAGE = "すみません、回答の送信に失敗�
 export const SEND_PARTIAL_FAILED_MESSAGE =
   "(回答の続きを送信できませんでした。上の回答は途中までです)";
 
+/** Discord interaction token の寿命(15 分)。超えると editReply/followUp は UnknownInteraction になる。 */
+export const INTERACTION_TOKEN_MS = 15 * 60_000;
+/** 失効判定の余裕。受付からこれを差し引いた時刻を超えて処理を開始したら interaction を使わない。 */
+export const INTERACTION_DEADLINE_MARGIN_MS = 60_000;
+
+/**
+ * 受付(acceptedAt)からの経過で interaction token が失効済み(または配送完了前に失効しうる)と
+ * 判定する純関数(ADR-0035 D2)。true なら最初から DM で配送する。
+ */
+export function interactionLikelyExpired(acceptedAtMs: number, nowMs: number): boolean {
+  return nowMs - acceptedAtMs > INTERACTION_TOKEN_MS - INTERACTION_DEADLINE_MARGIN_MS;
+}
+
+/**
+ * interaction が失効・二重応答で使えないことを示す Discord API エラーか(ADR-0035 D3)。
+ * コードは discord.js の RESTJSONErrorCodes で参照する(数値の直書き禁止・CLAUDE.md)。
+ */
+export function isExpiredInteractionError(err: unknown): boolean {
+  return (
+    err instanceof DiscordAPIError &&
+    (err.code === RESTJSONErrorCodes.UnknownInteraction ||
+      err.code === RESTJSONErrorCodes.InteractionHasAlreadyBeenAcknowledged)
+  );
+}
+
+/** 失効後に DM で配送するときの先頭の断り書き(本文チャンクの先頭に付ける)。 */
+export const DM_FALLBACK_NOTE =
+  "(回答に時間がかかり Discord 側の応答期限を過ぎたため、DM でお届けします)";
+
 /**
  * 配送 seam(§6.2)。ack.ts の流儀: 必要な形だけを構造的に宣言し、テストは配列に積む fake を渡す。
  * editReply は deferReply 済みプレースホルダへの本返信、followUp は追加メッセージ。
+ * fallback は interaction 失効時の代替経路(本人 DM・ADR-0035 D2)。isExpired で失効エラーを判定する。
  */
 export interface AnswerDelivery {
   editReply(msg: {
@@ -393,11 +427,18 @@ export interface AnswerDelivery {
     content: string;
     components: ActionRowBuilder<ButtonBuilder>[];
   }): Promise<unknown>;
+  fallback?(msg: {
+    content: string;
+    components: ActionRowBuilder<ButtonBuilder>[];
+  }): Promise<unknown>;
+  isExpired?(err: unknown): boolean;
 }
 
 export interface DeliveryOutcome {
-  /** 送達できた本文チャンク数。 */
+  /** interaction 経由で配送できた本文チャンク数。 */
   sentChunks: number;
+  /** fallback(DM)経由で配送した本文チャンク数(ADR-0035 D2)。 */
+  fallbackChunks: number;
   /** 最初に失敗した本文送信の例外(全チャンク送達なら undefined)。 */
   error?: unknown;
   /** 失敗通知の送信も失敗した場合の例外(interaction 失効の可能性)。 */
@@ -406,9 +447,11 @@ export interface DeliveryOutcome {
 
 /**
  * 分割済み回答チャンクを順に配送する(チャンク 1 = editReply、2 以降 = followUp。§6.2)。
- * 👍👎 components は最終チャンクにのみ付す。失敗時の通知も本関数が送る: 1 チャンクでも配送済みなら
- * editReply は使わない(配送済み本文を上書きしてしまうため followUp で追記し、途中切れ回答にも
- * 👍👎 を残して評価を受けられるようにする)。本関数は throw しない。
+ * 👍👎 components は最終チャンクにのみ付す。interaction 失効エラー(isExpired)で fallback があれば、
+ * 残りのチャンクを fallback(DM)で配送する(先頭に DM_FALLBACK_NOTE。ADR-0035 D2)。
+ * それ以外の失敗時の通知も本関数が送る: 1 チャンクでも配送済みなら editReply は使わない
+ * (配送済み本文を上書きしてしまうため followUp で追記し、途中切れ回答にも 👍👎 を残して評価を
+ * 受けられるようにする)。本関数は throw しない。
  */
 export async function deliverAnswer(
   delivery: AnswerDelivery,
@@ -416,15 +459,34 @@ export async function deliverAnswer(
   components: readonly ActionRowBuilder<ButtonBuilder>[],
 ): Promise<DeliveryOutcome> {
   let sentChunks = 0;
+  let fallbackChunks = 0;
+  const last = chunks.length - 1;
+  const msgAt = (i: number, content: string) => ({
+    content,
+    components: i === last ? [...components] : [],
+  });
   try {
     for (const [i, chunk] of chunks.entries()) {
-      const msg = { content: chunk, components: i === chunks.length - 1 ? [...components] : [] };
-      if (i === 0) await delivery.editReply(msg);
-      else await delivery.followUp(msg);
+      if (i === 0) await delivery.editReply(msgAt(i, chunk));
+      else await delivery.followUp(msgAt(i, chunk));
       sentChunks += 1;
     }
-    return { sentChunks };
+    return { sentChunks, fallbackChunks };
   } catch (err) {
+    // ADR-0035 D2: token 失効なら残りを DM で届ける(600 秒 × 直列キューで 15 分を超えうる)。
+    if (delivery.fallback !== undefined && (delivery.isExpired?.(err) ?? false)) {
+      try {
+        for (let i = sentChunks; i <= last; i++) {
+          const body = chunks[i] ?? "";
+          const content = i === sentChunks ? `${DM_FALLBACK_NOTE}\n${body}` : body;
+          await delivery.fallback(msgAt(i, content));
+          fallbackChunks += 1;
+        }
+        return { sentChunks, fallbackChunks };
+      } catch (dmErr) {
+        return { sentChunks, fallbackChunks, error: err, noticeError: dmErr };
+      }
+    }
     try {
       if (sentChunks === 0) {
         await delivery.editReply({ content: SEND_FAILED_MESSAGE, components: [] });
@@ -434,9 +496,9 @@ export async function deliverAnswer(
           components: [...components],
         });
       }
-      return { sentChunks, error: err };
+      return { sentChunks, fallbackChunks, error: err };
     } catch (noticeErr) {
-      return { sentChunks, error: err, noticeError: noticeErr };
+      return { sentChunks, fallbackChunks, error: err, noticeError: noticeErr };
     }
   }
 }
@@ -448,14 +510,29 @@ async function handleAsk(
   queue: SerialQueue,
 ): Promise<void> {
   const { logger, channels, store } = deps;
+  const now = deps.now ?? Date.now;
+  // ADR-0035 D3: reply/deferReply が失効・二重応答で失敗しても handler を落とさない(warn で終える)。
+  // 失効以外のエラーは従来どおり throw(discord.js のリスナで捕捉されログに出る)。
+  const ackOrBail = async (send: () => Promise<unknown>): Promise<boolean> => {
+    try {
+      await send();
+      return true;
+    } catch (err) {
+      if (isExpiredInteractionError(err)) {
+        logger.warn({ err }, "/ask: interaction が失効済みのため応答をスキップしました");
+        return false;
+      }
+      throw err;
+    }
+  };
   // ADR-0018 D4: interaction は bot 不可視チャンネル・DM からも届くため、guild + 可視性を明示チェック。
   if (!interaction.inGuild()) {
-    await interaction.reply({ content: DENY_MESSAGE, ephemeral: true });
+    await ackOrBail(() => interaction.reply({ content: DENY_MESSAGE, ephemeral: true }));
     return;
   }
   const denied = denyReason(channels, gateInputFromInteraction(interaction));
   if (denied !== null) {
-    await interaction.reply({ content: denied, ephemeral: true });
+    await ackOrBail(() => interaction.reply({ content: denied, ephemeral: true }));
     return;
   }
 
@@ -467,7 +544,7 @@ async function handleAsk(
     !store.hitRateLimit(`channel:${interaction.channelId}`, "ask", win, RATE_LIMITS.channel)
       .allowed;
   if (overLimit) {
-    await interaction.reply({ content: RATE_LIMIT_MESSAGE, ephemeral: true });
+    await ackOrBail(() => interaction.reply({ content: RATE_LIMIT_MESSAGE, ephemeral: true }));
     return;
   }
 
@@ -477,23 +554,37 @@ async function handleAsk(
   const question = interaction.options.getString("question", true);
   // ADR-0034: 応答一式(考え中・回答・出典・エラー・👍👎)は実行者本人にだけ見せる。
   // editReply はこの defer のエフェメラル性を継承する。followUp は継承しないため配送アダプタ側で毎回 flags を付す。
-  await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+  if (!(await ackOrBail(() => interaction.deferReply({ flags: MessageFlags.Ephemeral })))) return;
+  // ADR-0035 D2: 受付時刻。直列キューで長く待ち token が失効していたら最初から DM で配送する。
+  const acceptedAt = now();
+  // 本人 DM(失効時の代替経路)。ephemeral 同様、本人以外には見えない(ADR-0034 の趣旨を維持)。
+  const dm = (m: { content: string; components: ActionRowBuilder<ButtonBuilder>[] }) =>
+    interaction.user.send({ content: m.content, components: [...m.components] });
+
   let result: AskResult;
+  let expired = false;
   try {
-    result = await queue.enqueue(() =>
-      onAsk(question, {
+    result = await queue.enqueue(() => {
+      expired = interactionLikelyExpired(acceptedAt, now());
+      if (expired) {
+        log.warn(
+          { waitedMs: now() - acceptedAt },
+          "/ask: キュー待ちで interaction token が失効したため DM で配送します(ADR-0035 D2)",
+        );
+      }
+      return onAsk(question, {
         userId: interaction.user.id,
         channelId: interaction.channelId,
         correlationId,
-      }),
-    );
+      });
+    });
   } catch (err) {
     // handleAskRequest は内部エラーを AskResult に畳んで返すため、ここに来るのは dispatch/infra 異常のみ。
     log.error({ err }, "/ask pipeline dispatch failed");
-    // interaction token は 15 分で失効する(直列キューで長く待つとここも失敗しうる)。
     // 二次失敗でハンドラごと落とさない(async リスナの unhandled rejection 防止)。
     try {
-      await interaction.editReply(ERROR_MESSAGE);
+      if (expired) await dm({ content: ERROR_MESSAGE, components: [] });
+      else await interaction.editReply(ERROR_MESSAGE);
     } catch (err2) {
       log.error({ err: err2 }, "/ask のエラー通知も送信できませんでした(interaction 失効の可能性)");
     }
@@ -503,17 +594,33 @@ async function handleAsk(
   // 出典付き回答にのみ 👍👎 を付ける(未回答/エラーには付けない)。
   const components =
     result.status === "answered" && result.queryId !== "" ? [feedbackButtons(result.queryId)] : [];
+  const chunks = splitForDiscord(result.answerText);
   // Discord の 2000 字制限を超える回答は分割配送する。送信失敗の封じ込めは deliverAnswer 側。
-  const outcome = await deliverAnswer(
-    {
-      editReply: (m) => interaction.editReply(m),
-      // followUp は webhook 送信で defer のエフェメラル性を継承しない(ADR-0034 D2)。
-      // 続きチャンクも部分失敗通知もこのアダプタを通るため、ここで一括して本人限定にする。
-      followUp: (m) => interaction.followUp({ ...m, flags: MessageFlags.Ephemeral }),
-    },
-    splitForDiscord(result.answerText),
-    components,
-  );
+  const outcome = expired
+    ? // 失効確定: interaction を試みず DM で配送(先頭に断り書き)。
+      await deliverAnswer(
+        { editReply: dm, followUp: dm },
+        chunks.map((c, i) => (i === 0 ? `${DM_FALLBACK_NOTE}\n${c}` : c)),
+        components,
+      )
+    : await deliverAnswer(
+        {
+          editReply: (m) => interaction.editReply(m),
+          // followUp は webhook 送信で defer のエフェメラル性を継承しない(ADR-0034 D2)。
+          // 続きチャンクも部分失敗通知もこのアダプタを通るため、ここで一括して本人限定にする。
+          followUp: (m) => interaction.followUp({ ...m, flags: MessageFlags.Ephemeral }),
+          fallback: dm,
+          isExpired: isExpiredInteractionError,
+        },
+        chunks,
+        components,
+      );
+  if (outcome.fallbackChunks > 0) {
+    log.warn(
+      { sentChunks: outcome.sentChunks, fallbackChunks: outcome.fallbackChunks },
+      "/ask: interaction 失効のため回答を DM で配送しました(ADR-0035 D2)",
+    );
+  }
   if (outcome.error !== undefined) {
     log.error({ err: outcome.error, sentChunks: outcome.sentChunks }, "/ask reply failed");
   }

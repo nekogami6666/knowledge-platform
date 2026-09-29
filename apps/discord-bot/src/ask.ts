@@ -10,7 +10,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join, normalize } from "node:path";
 import { parseLineRange, safeParseEntry } from "@stratum/kb-core";
-import { LlmError, loadPrompt, type PromptStore, type Usage } from "@stratum/llm";
+import { type AgentSearchResult, LlmError, loadPrompt, type PromptStore } from "@stratum/llm";
 import { z } from "zod";
 import type { AnswerStatus, BotStore } from "./db.js";
 import { formatAnswer } from "./format.js";
@@ -203,7 +203,8 @@ export interface QaSearchInput {
   question: string;
   cwd: string;
 }
-export type QaSearch = (input: QaSearchInput) => Promise<{ value: QaAnswer; usage: Usage }>;
+/** 戻りは runAgentSearch と同形(numTurns / durationApiMs を型で落とさない・ADR-0035 D4)。 */
+export type QaSearch = (input: QaSearchInput) => Promise<AgentSearchResult<QaAnswer>>;
 
 export interface AskRequest {
   question: string;
@@ -235,6 +236,11 @@ export interface AskDeps {
   logError?: (err: unknown) => void;
   /** 警告観測フック(§7.4。既定 no-op。「回答はあるのに全 citation が検証で破棄」等の診断用)。 */
   logWarn?: (data: Record<string, unknown>, msg: string) => void;
+  /**
+   * 情報観測フック(ADR-0035 D4。既定 no-op)。/ask 完了ごとに所要時間・ターン数を出し、
+   * 探索予算・カタログ・並列化の判断材料にする。
+   */
+  logInfo?: (data: Record<string, unknown>, msg: string) => void;
   /** 実効の検索タイムアウト(ms)。タイムアウト文面の秒数表示に使う(既定 DEFAULT_ASK_TIMEOUT_MS)。 */
   searchTimeoutMs?: number;
 }
@@ -251,8 +257,8 @@ export const NOT_FOUND_MESSAGE =
 export const ERROR_MESSAGE =
   "すみません、回答中にエラーが発生しました。時間をおいて再度お試しください。";
 
-/** §6.2 失敗時挙動の「上限 120 秒」の正典値。env ASK_TIMEOUT_MS による上書きは index.ts。 */
-export const DEFAULT_ASK_TIMEOUT_MS = 120_000;
+/** §6.2 失敗時挙動の「上限 600 秒」の正典値(ADR-0035 D1)。env ASK_TIMEOUT_MS による上書きは index.ts。 */
+export const DEFAULT_ASK_TIMEOUT_MS = 600_000;
 
 /**
  * タイムアウト時のユーザー向け文面(§6.2 失敗時挙動 / ADR-0030 D3)。所要時間は検索対象サイズに
@@ -292,11 +298,24 @@ export async function handleAskRequest(req: AskRequest, deps: AskDeps): Promise<
     // §6.2: repo 対応表を前置きし、モデルが正しい org/name で引用できるようにする(PR-6a)。
     const manifest = buildRepoManifest(deps.repos);
     const systemPrompt = manifest === "" ? prompt.body : `${manifest}\n${prompt.body}`;
-    const { value, usage } = await deps.search({
+    const { value, usage, numTurns, durationApiMs } = await deps.search({
       systemPrompt,
       question: req.question,
       cwd: deps.clonesDir,
     });
+    // ADR-0035 D4: 所要時間とターン数を必ず残す(タイムアウト頻発の原因分析・探索予算の調整に使う)。
+    deps.logInfo?.(
+      {
+        elapsedMs: Math.round(monoNow() - startedAt),
+        numTurns: numTurns ?? null,
+        durationApiMs: durationApiMs ?? null,
+        notFound: value.notFound,
+        citations: value.citations.length,
+        inputTokens: usage.inputTokens,
+        outputTokens: usage.outputTokens,
+      },
+      "/ask: 検索完了",
+    );
     const valid = value.notFound
       ? []
       : validateCitations(

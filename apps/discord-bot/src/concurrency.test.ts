@@ -34,4 +34,20 @@ describe("SerialQueue", () => {
     await expect(p1).rejects.toThrow("boom");
     await expect(p2).resolves.toBe("ok");
   });
+
+  it("pending は実行中+待機中を数え、成功/失敗どちらでも減る(ADR-0035 D5)", async () => {
+    const q = new SerialQueue();
+    expect(q.pending).toBe(0);
+    let release: () => void = () => {};
+    const gate = new Promise<void>((r) => {
+      release = r;
+    });
+    const p1 = q.enqueue(() => gate);
+    const p2 = q.enqueue(() => Promise.reject(new Error("boom")));
+    expect(q.pending).toBe(2);
+    release();
+    await p1;
+    await expect(p2).rejects.toThrow("boom");
+    expect(q.pending).toBe(0);
+  });
 });

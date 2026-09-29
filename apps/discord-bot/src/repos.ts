@@ -24,7 +24,13 @@ const exec = promisify(execFile);
 /** git 実行の最小 seam(注入でモック可能)。args は `git` に続く引数列。 */
 export type GitExec = (args: readonly string[]) => Promise<{ stdout: string }>;
 
-const defaultGitExec: GitExec = (args) => exec("git", [...args]);
+/**
+ * git 1 コマンドの上限(ADR-0035 D3)。ネットワーク停滞で fetch/clone が無限に待つと /ask の
+ * interaction token(15 分)が先に失効する。cold な --depth=1 fetch でも十分な 60 秒。
+ */
+export const GIT_EXEC_TIMEOUT_MS = 60_000;
+
+const defaultGitExec: GitExec = (args) => exec("git", [...args], { timeout: GIT_EXEC_TIMEOUT_MS });
 
 /** https URL から userinfo(user:token@)を除去する(トークンを .git/config に残さない)。 */
 export function stripCredentials(url: string): string {

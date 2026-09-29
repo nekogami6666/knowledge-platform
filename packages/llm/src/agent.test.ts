@@ -48,6 +48,29 @@ describe("runAgentSearch", () => {
     expect(recorded).toHaveLength(1);
   });
 
+  it("result の num_turns / duration_api_ms を numTurns / durationApiMs に転記する(ADR-0035 D4)", async () => {
+    const queryFn = streamOf({
+      type: "result",
+      subtype: "success",
+      structured_output: { answer: "A", notFound: false },
+      usage: { input_tokens: 1, output_tokens: 1 },
+      num_turns: 12,
+      duration_api_ms: 34_567,
+    });
+    const res = await runAgentSearch(baseOpts, { queryFn });
+    expect(res.numTurns).toBe(12);
+    expect(res.durationApiMs).toBe(34_567);
+    // 無い場合はキー自体を持たない(呼び出し側の `?? null` で観測できる)。
+    const res2 = await runAgentSearch(baseOpts, {
+      queryFn: streamOf({
+        type: "result",
+        subtype: "success",
+        structured_output: { answer: "A", notFound: false },
+      }),
+    });
+    expect("numTurns" in res2).toBe(false);
+  });
+
   it("structured_output がスキーマ不一致なら STRUCTURED_PARSE", async () => {
     const queryFn = streamOf({
       type: "result",

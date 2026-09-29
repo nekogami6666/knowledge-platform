@@ -443,7 +443,7 @@ Discord Gateway(WebSocket)受信とボタンインタラクションには常駐
 5. SQLite `queries` に質問・回答・出典・トークン消費・所要時間を記録
 6. `NOT_FOUND` または 👎 の場合、`questions/open/` への登録キューに積む(即 commit せず、gap-tracker が日次でまとめて commit。Bot から Git への書き込み経路を最小化するため)
 
-**失敗時挙動**: Agent SDK のタイムアウト(上限 120 秒)・API エラー時は、その旨をスレッドに返し `queries` に失敗として記録。リトライは 1 回。
+**失敗時挙動**: Agent SDK のタイムアウト(上限 600 秒・env `ASK_TIMEOUT_MS`。ADR-0035 D1)・API エラー時は、その旨を返し `queries` に失敗として記録。タイムアウトはリトライしない(ADR-0032)。直列キュー待ちで interaction token(15 分)が失効した場合は本人 DM で配送する(ADR-0035 D2)。git 実行は 1 コマンド 60 秒で打ち切る。
 
 **受け入れ条件**:
 - 既存議事録に答えが存在する質問 10 件(ゴールデンセット初版)に対し、8 件以上で正しい出典付き回答
