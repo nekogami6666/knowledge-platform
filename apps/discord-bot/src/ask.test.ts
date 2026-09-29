@@ -396,6 +396,22 @@ describe("handleAskRequest synthetic 統合(§6.2 受け入れ条件)", () => {
     expect(infos2[0]).toMatchObject({ numTurns: null, durationApiMs: null });
   });
 
+  it("onProgress は sync → search → (検索側の tool_use) の順で届き、search 入力へ透過する(ADR-0035 D5)", async () => {
+    const events: string[] = [];
+    const { deps } = makeDeps({
+      search: async (input) => {
+        input.onProgress?.({ kind: "tool_use", tool: "Grep", turn: 1 });
+        return {
+          value: { answer: "回答", citations: [], notFound: true },
+          usage: { inputTokens: 1, outputTokens: 1 },
+        };
+      },
+      onProgress: (ev) => events.push(ev.kind === "tool_use" ? `tool:${ev.tool}` : ev.kind),
+    });
+    await handleAskRequest(req, deps);
+    expect(events).toEqual(["sync", "search", "tool:Grep"]);
+  });
+
   it("検索が throw したら error として記録 + logError 通知(キューには積まない)", async () => {
     const errors: unknown[] = [];
     const { deps, store } = makeDeps({

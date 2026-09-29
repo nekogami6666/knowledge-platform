@@ -30,4 +30,17 @@ describe("createQaSearch(タイムアウトの明示・㉞ 失敗耐性)", () =>
     await expect(createQaSearch({ runSearch })(INPUT)).rejects.toThrow("timeout");
     expect(calls).toBe(1);
   });
+
+  it("onProgress を runAgentSearch の opts へ透過する(ADR-0035 D5)", async () => {
+    let seen: unknown;
+    const runSearch = (async (opts: { onProgress?: unknown }) => {
+      seen = opts.onProgress;
+      return ANSWER;
+    }) as unknown as AgentSearchFn;
+    const onProgress = () => {};
+    await createQaSearch({ runSearch })({ ...INPUT, onProgress });
+    expect(seen).toBe(onProgress);
+    await createQaSearch({ runSearch })(INPUT);
+    expect(seen).toBeUndefined();
+  });
 });

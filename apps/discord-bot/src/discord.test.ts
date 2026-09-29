@@ -1507,3 +1507,58 @@ describe("InteractionCreate /ask の失効封じ込め(ADR-0035 D2/D3)", () => {
     await client.destroy();
   });
 });
+
+describe("InteractionCreate /ask の進捗ライブ表示(ADR-0035 D5)", () => {
+  it("待機中に進捗 edit が流れ、最終 editReply は回答本文・その後に進捗 edit は来ない", async () => {
+    const { logger } = fakeLogger();
+    const edits: string[] = [];
+    const ask: { resolve: (() => void) | null } = { resolve: null };
+    const client = createBot({
+      logger,
+      channels: channels(),
+      store: createMemoryStore(),
+      askTimeoutMs: 600_000,
+      progressIntervalMs: 5,
+      onAsk: async (_q, ctx) => {
+        ctx.onProgress?.({ kind: "sync" });
+        ctx.onProgress?.({ kind: "search" });
+        ctx.onProgress?.({ kind: "tool_use", tool: "Grep", turn: 1 });
+        await new Promise<void>((res) => {
+          ask.resolve = res;
+        });
+        return { answerText: "最終回答", status: "answered", queryId: "q1" };
+      },
+    });
+    const interaction = {
+      isChatInputCommand: () => true,
+      isButton: () => false,
+      isUserSelectMenu: () => false,
+      isStringSelectMenu: () => false,
+      isModalSubmit: () => false,
+      commandName: "ask",
+      inGuild: () => true,
+      channel: null,
+      channelId: "111",
+      appPermissions: { has: () => true },
+      user: { id: "u1", send: async () => {} },
+      options: { getString: () => "質問" },
+      deferReply: async () => {},
+      reply: async () => {},
+      editReply: async (o: string | { content: string }) => {
+        edits.push(typeof o === "string" ? o : o.content);
+      },
+      followUp: async () => {},
+    } as unknown as Interaction;
+    client.emit(Events.InteractionCreate, interaction);
+    // 進捗 edit が少なくとも 1 回流れるのを待ってから回答を解決する。
+    await vi.waitFor(() => expect(edits.length).toBeGreaterThan(0));
+    expect(edits[0]).toContain("調べています…");
+    expect(edits[0]).toContain("参照 1 ファイル(上限 600 秒)");
+    ask.resolve?.();
+    await vi.waitFor(() => expect(edits.at(-1)).toBe("最終回答"));
+    const finalIdx = edits.length;
+    await new Promise((res) => setTimeout(res, 30));
+    expect(edits.length).toBe(finalIdx); // stop 後に古い tick が回答を上書きしない
+    await client.destroy();
+  });
+});

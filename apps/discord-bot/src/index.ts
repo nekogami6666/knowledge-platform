@@ -188,6 +188,8 @@ async function main(): Promise<void> {
       logWarn: (data, msg) => withCorrelation(logger, ctx.correlationId).warn(data, msg),
       logInfo: (data, msg) => withCorrelation(logger, ctx.correlationId).info(data, msg),
       searchTimeoutMs: effectiveAskTimeoutMs,
+      // ADR-0035 D5: discord 側の進捗表示へ sync/search/tool_use を流す。
+      ...(ctx.onProgress !== undefined ? { onProgress: ctx.onProgress } : {}),
     };
     return handleAskRequest(
       {
@@ -270,6 +272,8 @@ async function main(): Promise<void> {
     channels,
     store,
     onAsk,
+    // ADR-0035 D5: 進捗文面の「上限 N 秒」を実効タイムアウトと一致させる。
+    askTimeoutMs: effectiveAskTimeoutMs,
     guildId: env.DISCORD_GUILD_ID,
     ops,
     gh,

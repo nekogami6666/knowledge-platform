@@ -33,7 +33,12 @@ import {
 } from "discord.js";
 import type { Logger } from "pino";
 import { ackReaction, noticeAllowedOnce } from "./ack.js";
-import { type AskResult, ERROR_MESSAGE } from "./ask.js";
+import {
+  type AskProgressEvent,
+  type AskResult,
+  DEFAULT_ASK_TIMEOUT_MS,
+  ERROR_MESSAGE,
+} from "./ask.js";
 import { handleLightbulb, jstDayKey } from "./capture.js";
 import { SerialQueue } from "./concurrency.js";
 import {
@@ -57,6 +62,7 @@ import {
 } from "./interview-panel.js";
 import { withCorrelation } from "./logger.js";
 import { EMPTY_MEMBERS, type MembersLoader } from "./members.js";
+import { startProgressReporter } from "./progress.js";
 import { aggregateStats, formatStatsMessage } from "./stats.js";
 import { isoJst } from "./time.js";
 import type { VcRecorderWatcher, VcSnapshot } from "./vc-recorder.js";
@@ -117,7 +123,13 @@ export function commandsToRegister(
 /** /ask の処理本体(PR-4a の handleAskRequest を index.ts で包んで注入する)。 */
 export type AskHandler = (
   question: string,
-  ctx: { userId: string; channelId: string; correlationId: string },
+  ctx: {
+    userId: string;
+    channelId: string;
+    correlationId: string;
+    /** 進捗の購読(ADR-0035 D5)。index.ts が AskDeps.onProgress へ渡す。 */
+    onProgress?: (ev: AskProgressEvent) => void;
+  },
 ) => Promise<AskResult>;
 
 export interface BotDeps {
@@ -130,6 +142,10 @@ export interface BotDeps {
   onAsk?: AskHandler;
   /** 壁時計 ms(注入・既定 Date.now)。interaction token 失効判定(ADR-0035 D2)のテスト用。 */
   now?: () => number;
+  /** /ask の実効タイムアウト ms(進捗文面の「上限 N 秒」用・既定 DEFAULT_ASK_TIMEOUT_MS)。 */
+  askTimeoutMs?: number;
+  /** 進捗更新の間隔 ms(既定 5000。テストで短縮)。 */
+  progressIntervalMs?: number;
   /**
    * スラッシュコマンドの登録先ギルド(env DISCORD_GUILD_ID)。指定時はそのギルドへ即時反映、
    * 未指定はグローバル登録(全サーバーに反映されるが最大 1 時間かかる)。テストサーバーでは指定推奨。
@@ -561,10 +577,23 @@ async function handleAsk(
   const dm = (m: { content: string; components: ActionRowBuilder<ButtonBuilder>[] }) =>
     interaction.user.send({ content: m.content, components: [...m.components] });
 
+  // ADR-0035 D5: 「考え中」を一定間隔で更新する(順番待ち → 最新化 → 調べています…)。
+  // 最終回答の配送前に必ず stop() し、進行中の edit を待つ(古い tick が回答を上書きしない)。
+  const reporter = startProgressReporter({
+    edit: (content) => interaction.editReply(content),
+    timeoutMs: deps.askTimeoutMs ?? DEFAULT_ASK_TIMEOUT_MS,
+    ...(deps.progressIntervalMs !== undefined ? { intervalMs: deps.progressIntervalMs } : {}),
+    now,
+    onError: (err) => log.warn({ err }, "/ask: 進捗表示の更新に失敗しました(処理は継続)"),
+    isExpired: isExpiredInteractionError,
+  });
+  reporter.setQueueAhead(queue.pending);
+
   let result: AskResult;
   let expired = false;
   try {
     result = await queue.enqueue(() => {
+      reporter.setQueueAhead(0);
       expired = interactionLikelyExpired(acceptedAt, now());
       if (expired) {
         log.warn(
@@ -576,9 +605,11 @@ async function handleAsk(
         userId: interaction.user.id,
         channelId: interaction.channelId,
         correlationId,
+        onProgress: (ev) => reporter.onEvent(ev),
       });
     });
   } catch (err) {
+    await reporter.stop();
     // handleAskRequest は内部エラーを AskResult に畳んで返すため、ここに来るのは dispatch/infra 異常のみ。
     log.error({ err }, "/ask pipeline dispatch failed");
     // 二次失敗でハンドラごと落とさない(async リスナの unhandled rejection 防止)。
@@ -591,6 +622,7 @@ async function handleAsk(
     return;
   }
 
+  await reporter.stop();
   // 出典付き回答にのみ 👍👎 を付ける(未回答/エラーには付けない)。
   const components =
     result.status === "answered" && result.queryId !== "" ? [feedbackButtons(result.queryId)] : [];

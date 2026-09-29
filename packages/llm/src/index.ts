@@ -6,6 +6,7 @@
 
 // --- Agent SDK ラッパ(agentic search) ---
 export {
+  type AgentProgressEvent,
   type AgentQueryFn,
   type AgentSearchOptions,
   type AgentSearchResult,

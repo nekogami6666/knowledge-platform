@@ -432,7 +432,7 @@ Discord Gateway(WebSocket)受信とボタンインタラクションには常駐
 
 **処理フロー**:
 
-1. 受信即時に「調べています…」をエフェメラルでなく**スレッド返信**で投稿(検索過程と回答を後から全員が参照できるようにする)
+1. 受信即時に「調べています…」をエフェメラルでなく**スレッド返信**で投稿(検索過程と回答を後から全員が参照できるようにする)。以後、回答までは 5 秒間隔で「順番待ち(前に N 件)」「調べています… 経過 N 秒 / 参照 N ファイル」と進捗を更新する(ADR-0035 D5。ツール名と回数のみを表示し、パスや内容は出さない)
 2. ローカルの作業ディレクトリで対象リポジトリ(`minutes`, `knowledge-base`, 設定された開発リポジトリ群)を `git fetch && git reset --hard && git clean -fd`(shallow clone を起動時に作成し、以後 fetch のみ)。`clean -fd` は `reset --hard` が消さない未追跡ファイル(同一 clone を共有する gap-tracker/freshness の staging 残骸)を除去し、未 commit ファイルへの permalink 生成を防ぐ。認証トークンは `.git/config` に永続化しない(fetch は URL 引数渡し・origin は毎同期でトークン無し URL に冪等上書き。ADR-0013 D1(b) と同流儀 — cwd 配下は agentic search の読み取り面のため・§9.5)
 3. Agent SDK `query()` を起動。許可ツールは **Read / Grep / Glob のみ**(Bash・Write・ネットワークは無効化)。システムプロンプトの要点:
    - 回答は日本語、簡潔に(Discord で読める長さ: 原則 1,500 字以内)

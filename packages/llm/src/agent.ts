@@ -83,6 +83,18 @@ export function buildAgentEnv(
   return env;
 }
 
+/**
+ * agentic search の進捗イベント(ADR-0035 D5)。ツール名と通番のみを載せ、パス・引数・出力は
+ * 渡さない(検索対象の内容を UI 側へ漏らす面を増やさない)。
+ */
+export interface AgentProgressEvent {
+  kind: "tool_use";
+  /** 呼び出されたツール名(Read / Grep / Glob 等)。 */
+  tool: string;
+  /** 何ターン目の assistant メッセージか(1 始まり)。 */
+  turn: number;
+}
+
 export interface AgentSearchOptions<T> {
   /** UsageRecorder のラベル(アプリ名)。 */
   app: string;
@@ -102,6 +114,8 @@ export interface AgentSearchOptions<T> {
   maxTurns?: number;
   /** タイムアウト(ms)。既定 120000(§6.2)。AbortController で実装。 */
   timeoutMs?: number;
+  /** 進捗の購読(ADR-0035 D5)。listener の例外は握って検索を止めない。 */
+  onProgress?: (ev: AgentProgressEvent) => void;
 }
 
 export interface AgentSearchResult<T> {
@@ -136,6 +150,34 @@ interface ResultMessage {
   usage?: { input_tokens?: number; output_tokens?: number };
   num_turns?: number;
   duration_api_ms?: number;
+}
+
+/** Agent SDK の assistant メッセージ(tool_use ブロック抽出に必要な部分のみ)。 */
+interface AssistantMessage {
+  type: "assistant";
+  message?: { content?: unknown };
+}
+
+function isAssistantMessage(m: unknown): m is AssistantMessage {
+  return typeof m === "object" && m !== null && (m as { type?: unknown }).type === "assistant";
+}
+
+/** assistant メッセージ本文から tool_use ブロックのツール名だけを抜く。 */
+export function toolNamesOf(m: AssistantMessage): string[] {
+  const content = m.message?.content;
+  if (!Array.isArray(content)) return [];
+  const names: string[] = [];
+  for (const block of content) {
+    if (
+      typeof block === "object" &&
+      block !== null &&
+      (block as { type?: unknown }).type === "tool_use" &&
+      typeof (block as { name?: unknown }).name === "string"
+    ) {
+      names.push((block as { name: string }).name);
+    }
+  }
+  return names;
 }
 
 function isResultMessage(m: unknown): m is ResultMessage {
@@ -184,9 +226,20 @@ export async function runAgentSearch<T>(
   };
 
   let result: ResultMessage | undefined;
+  let turn = 0;
   try {
     for await (const msg of queryFn({ prompt: opts.prompt, options })) {
       if (isResultMessage(msg)) result = msg;
+      else if (opts.onProgress !== undefined && isAssistantMessage(msg)) {
+        turn += 1;
+        for (const tool of toolNamesOf(msg)) {
+          try {
+            opts.onProgress({ kind: "tool_use", tool, turn });
+          } catch {
+            // 進捗表示側の失敗で検索を止めない(ADR-0035 D5)。
+          }
+        }
+      }
     }
   } catch (cause) {
     if (abortController.signal.aborted) {

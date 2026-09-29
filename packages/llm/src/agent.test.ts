@@ -71,6 +71,46 @@ describe("runAgentSearch", () => {
     expect("numTurns" in res2).toBe(false);
   });
 
+  it("assistant メッセージの tool_use をツール名と通番だけで onProgress に流す(ADR-0035 D5)", async () => {
+    const queryFn = streamOf(
+      { type: "system", subtype: "init" },
+      {
+        type: "assistant",
+        message: {
+          content: [
+            { type: "text", text: "探します" },
+            { type: "tool_use", name: "Grep", input: { pattern: "秘密" } },
+            { type: "tool_use", name: "Glob", input: { pattern: "**/*.md" } },
+          ],
+        },
+      },
+      { type: "user", message: { content: [{ type: "tool_result" }] } },
+      { type: "assistant", message: { content: [{ type: "tool_use", name: "Read", input: {} }] } },
+      {
+        type: "result",
+        subtype: "success",
+        structured_output: { answer: "A", notFound: false },
+      },
+    );
+    const events: unknown[] = [];
+    const res = await runAgentSearch(
+      {
+        ...baseOpts,
+        onProgress: (ev) => {
+          events.push(ev);
+          if (events.length === 1) throw new Error("listener が壊れていても検索は続く");
+        },
+      },
+      { queryFn },
+    );
+    expect(res.value.answer).toBe("A");
+    expect(events).toEqual([
+      { kind: "tool_use", tool: "Grep", turn: 1 },
+      { kind: "tool_use", tool: "Glob", turn: 1 },
+      { kind: "tool_use", tool: "Read", turn: 2 },
+    ]);
+  });
+
   it("structured_output がスキーマ不一致なら STRUCTURED_PARSE", async () => {
     const queryFn = streamOf({
       type: "result",

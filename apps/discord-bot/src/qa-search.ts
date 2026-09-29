@@ -22,6 +22,7 @@ import { DEFAULT_ASK_TIMEOUT_MS, type QaAnswer, type QaSearch, qaAnswerSchema } 
 
 // QA 契約を再 export(評価ハーネス等の外部消費者向け。型は ask.ts が正)。
 export {
+  type AskProgressEvent,
   buildRepoManifest,
   DEFAULT_ASK_TIMEOUT_MS,
   type QaAnswer,
@@ -77,6 +78,7 @@ export function createQaSearch(deps: QaSearchFactoryDeps = {}): QaSearch {
             cwd: input.cwd,
             outputSchema: qaAnswerSchema,
             timeoutMs,
+            ...(input.onProgress !== undefined ? { onProgress: input.onProgress } : {}),
           },
           { usage },
         ),

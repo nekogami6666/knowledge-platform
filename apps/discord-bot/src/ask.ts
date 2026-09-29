@@ -10,7 +10,13 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join, normalize } from "node:path";
 import { parseLineRange, safeParseEntry } from "@stratum/kb-core";
-import { type AgentSearchResult, LlmError, loadPrompt, type PromptStore } from "@stratum/llm";
+import {
+  type AgentProgressEvent,
+  type AgentSearchResult,
+  LlmError,
+  loadPrompt,
+  type PromptStore,
+} from "@stratum/llm";
 import { z } from "zod";
 import type { AnswerStatus, BotStore } from "./db.js";
 import { formatAnswer } from "./format.js";
@@ -198,10 +204,18 @@ export function validateCitations(
 }
 
 /** agentic search の最小シグネチャ(注入でモック)。実体は index.ts で runAgentSearch を包む。 */
+/**
+ * /ask の進捗イベント(ADR-0035 D5)。sync(clone 更新)→ search(検索開始)→ tool_use×N。
+ * discord 側の進捗表示(progress.ts)が購読する。
+ */
+export type AskProgressEvent = { kind: "sync" } | { kind: "search" } | AgentProgressEvent;
+
 export interface QaSearchInput {
   systemPrompt: string;
   question: string;
   cwd: string;
+  /** 進捗の購読(ADR-0035 D5)。runAgentSearch へ透過する。 */
+  onProgress?: (ev: AgentProgressEvent) => void;
 }
 /** 戻りは runAgentSearch と同形(numTurns / durationApiMs を型で落とさない・ADR-0035 D4)。 */
 export type QaSearch = (input: QaSearchInput) => Promise<AgentSearchResult<QaAnswer>>;
@@ -241,6 +255,8 @@ export interface AskDeps {
    * 探索予算・カタログ・並列化の判断材料にする。
    */
   logInfo?: (data: Record<string, unknown>, msg: string) => void;
+  /** 進捗の購読(ADR-0035 D5。既定 no-op)。 */
+  onProgress?: (ev: AskProgressEvent) => void;
   /** 実効の検索タイムアウト(ms)。タイムアウト文面の秒数表示に使う(既定 DEFAULT_ASK_TIMEOUT_MS)。 */
   searchTimeoutMs?: number;
 }
@@ -293,15 +309,18 @@ export async function handleAskRequest(req: AskRequest, deps: AskDeps): Promise<
     createdAt,
   };
   try {
+    deps.onProgress?.({ kind: "sync" });
     const synced = await deps.syncer.sync(deps.repos);
     const prompt = await loadPrompt("qa", "answer", deps.promptStore);
     // §6.2: repo 対応表を前置きし、モデルが正しい org/name で引用できるようにする(PR-6a)。
     const manifest = buildRepoManifest(deps.repos);
     const systemPrompt = manifest === "" ? prompt.body : `${manifest}\n${prompt.body}`;
+    deps.onProgress?.({ kind: "search" });
     const { value, usage, numTurns, durationApiMs } = await deps.search({
       systemPrompt,
       question: req.question,
       cwd: deps.clonesDir,
+      ...(deps.onProgress !== undefined ? { onProgress: deps.onProgress } : {}),
     });
     // ADR-0035 D4: 所要時間とターン数を必ず残す(タイムアウト頻発の原因分析・探索予算の調整に使う)。
     deps.logInfo?.(
