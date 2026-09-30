@@ -33,6 +33,10 @@ export function citationMatches(expected: QaCitation, returned: readonly QaCitat
 export interface QaResult {
   id: string;
   answer: QaAnswer;
+  /** 1 問の所要 ms(ADR-0035 D6: 探索予算の効果測定。省略可)。 */
+  elapsedMs?: number;
+  /** Agent SDK のターン数(同上・result に無ければ undefined)。 */
+  numTurns?: number;
 }
 
 export interface QuestionScore {

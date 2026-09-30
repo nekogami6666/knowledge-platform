@@ -32,6 +32,12 @@ const envSchema = z
     GIT_CLONE_TOKEN: z.string().optional(),
     /** /ask の agentic search 上限 ms(既定 600000・ADR-0035 D1)。KB 成長で伸びたら env で調整。 */
     ASK_TIMEOUT_MS: z.string().optional(),
+    /** /ask の最大ターン数(既定 30・ADR-0035 D6)。下げると error_max_turns が汎用エラーになるため慎重に。 */
+    ASK_MAX_TURNS: z.string().optional(),
+    /** /ask の努力度(low/medium/high。未設定 = SDK 既定・ADR-0035 D6 の実験ノブ)。 */
+    ASK_EFFORT: z.enum(["low", "medium", "high"]).optional(),
+    /** /ask の拡張思考(adaptive/disabled。未設定 = SDK 既定・ADR-0035 D6 の実験ノブ)。 */
+    ASK_THINKING: z.enum(["adaptive", "disabled"]).optional(),
     /** VC 録音 sidecar の URL(ADR-0020。compose 内部ネットワーク・例 http://recorder:9488)。未設定なら VC 入口 OFF。 */
     RECORDER_URL: z.string().optional(),
     /** 録音ファイルの共有マウント(sidecar と同一パス・ADR-0020 D4)。 */

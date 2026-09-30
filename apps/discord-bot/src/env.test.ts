@@ -23,6 +23,24 @@ describe("parseEnv", () => {
     expect(env.CONFIG_DIR).toBe("./config");
   });
 
+  it("ASK_EFFORT / ASK_THINKING は未設定なら undefined、列挙外は throw(ADR-0035 D6)", () => {
+    const env = parseEnv(base);
+    expect(env.ASK_EFFORT).toBeUndefined();
+    expect(env.ASK_THINKING).toBeUndefined();
+    expect(env.ASK_MAX_TURNS).toBeUndefined();
+    const set = parseEnv({
+      ...base,
+      ASK_EFFORT: "low",
+      ASK_THINKING: "disabled",
+      ASK_MAX_TURNS: "20",
+    });
+    expect(set.ASK_EFFORT).toBe("low");
+    expect(set.ASK_THINKING).toBe("disabled");
+    expect(set.ASK_MAX_TURNS).toBe("20");
+    expect(() => parseEnv({ ...base, ASK_EFFORT: "max" })).toThrow();
+    expect(() => parseEnv({ ...base, ASK_THINKING: "enabled" })).toThrow();
+  });
+
   it("DISCORD_TOKEN が無ければ throw", () => {
     expect(() => parseEnv({ ...base, DISCORD_TOKEN: undefined })).toThrow();
   });

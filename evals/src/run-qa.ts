@@ -41,8 +41,19 @@ export async function runGoldenEval(input: GoldenEvalInput): Promise<GoldenEvalR
 
   const results: QaResult[] = [];
   for (const g of golden) {
-    const { value } = await search({ systemPrompt, question: g.question, cwd: input.corpusDir });
-    results.push({ id: g.id, answer: value });
+    // ADR-0035 D6: 所要時間とターン数も残す(正答率と併せて探索予算・ノブの効果を見る)。
+    const t0 = performance.now();
+    const { value, numTurns } = await search({
+      systemPrompt,
+      question: g.question,
+      cwd: input.corpusDir,
+    });
+    results.push({
+      id: g.id,
+      answer: value,
+      elapsedMs: Math.round(performance.now() - t0),
+      ...(numTurns !== undefined ? { numTurns } : {}),
+    });
   }
   const citation = scoreRun(golden, results);
 

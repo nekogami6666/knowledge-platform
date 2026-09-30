@@ -24,7 +24,7 @@ const REPOS = [
 ];
 
 async function main(): Promise<void> {
-  const { citation, validity } = await runGoldenEval({
+  const { citation, validity, results } = await runGoldenEval({
     goldenYaml: GOLDEN,
     promptsDir: PROMPTS_DIR,
     corpusDir: CORPUS_DIR,
@@ -40,6 +40,19 @@ async function main(): Promise<void> {
   const belowFloor = citation.citationMatchRate < 0.8;
   const alert = comparison.regressed || belowFloor;
 
+  // ADR-0035 D6: 所要時間・ターン数(正答率は非退行の門番、速度は参考値。速度の受け入れは VM 実測)。
+  const timing = results.map((r) => ({
+    id: r.id,
+    elapsedMs: r.elapsedMs ?? null,
+    numTurns: r.numTurns ?? null,
+  }));
+  const elapsed = results.map((r) => r.elapsedMs ?? 0);
+  const timingSummary = {
+    avgElapsedMs:
+      elapsed.length === 0 ? 0 : Math.round(elapsed.reduce((a, b) => a + b, 0) / elapsed.length),
+    maxElapsedMs: elapsed.length === 0 ? 0 : Math.max(...elapsed),
+  };
+
   const out = {
     generatedAt: new Date().toISOString(),
     current,
@@ -49,9 +62,11 @@ async function main(): Promise<void> {
     alert,
     citation,
     validity,
+    timingSummary,
+    timing,
   };
   writeFileSync(OUT, JSON.stringify(out, null, 2));
-  console.log(JSON.stringify({ current, comparison, belowFloor, alert }, null, 2));
+  console.log(JSON.stringify({ current, comparison, belowFloor, alert, timingSummary }, null, 2));
   if (alert) {
     const dropped =
       comparison.drops.map((d) => `${d.metric}-${d.delta.toFixed(2)}`).join(",") || "none";

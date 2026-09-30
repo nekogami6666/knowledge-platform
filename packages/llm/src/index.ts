@@ -6,10 +6,12 @@
 
 // --- Agent SDK ラッパ(agentic search) ---
 export {
+  type AgentEffort,
   type AgentProgressEvent,
   type AgentQueryFn,
   type AgentSearchOptions,
   type AgentSearchResult,
+  type AgentThinking,
   DEFAULT_ALLOWED_TOOLS,
   DEFAULT_DISALLOWED_TOOLS,
   type LlmDeps,

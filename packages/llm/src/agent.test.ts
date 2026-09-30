@@ -193,6 +193,37 @@ describe("runAgentSearch", () => {
     });
   });
 
+  it("effort / thinking は指定時だけ Options に載り、未指定ならキー自体が無い(ADR-0035 D6)", async () => {
+    const seen: Options[] = [];
+    const queryFn: AgentQueryFn = ({ options }) => {
+      if (options) seen.push(options);
+      return (async function* () {
+        yield {
+          type: "result",
+          subtype: "success",
+          structured_output: { answer: "A", notFound: false },
+          usage: { input_tokens: 0, output_tokens: 0 },
+        };
+      })();
+    };
+    await runAgentSearch(baseOpts, { queryFn });
+    await runAgentSearch(
+      { ...baseOpts, effort: "low", thinking: "disabled", maxTurns: 12 },
+      { queryFn },
+    );
+    await runAgentSearch({ ...baseOpts, thinking: "adaptive" }, { queryFn });
+    expect("effort" in (seen[0] ?? {})).toBe(false);
+    expect("thinking" in (seen[0] ?? {})).toBe(false);
+    expect(seen[0]?.maxTurns).toBe(30);
+    expect(seen[1]?.effort).toBe("low");
+    expect(seen[1]?.thinking).toEqual({ type: "disabled" });
+    expect(seen[1]?.maxTurns).toBe(12);
+    expect(seen[2]?.thinking).toEqual({ type: "adaptive" });
+    // ノブを足しても §9.5 の封じ込めは不変。
+    expect(seen[1]?.allowedTools).toEqual([...DEFAULT_ALLOWED_TOOLS]);
+    expect(seen[1]?.permissionMode).toBe("dontAsk");
+  });
+
   it("§9.5: query に渡す封じ込めオプションを固定する(危険ツールを決して許可しない)", async () => {
     let captured: Options | undefined;
     const queryFn: AgentQueryFn = ({ options }) => {

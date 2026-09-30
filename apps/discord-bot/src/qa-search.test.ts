@@ -43,4 +43,18 @@ describe("createQaSearch(タイムアウトの明示・㉞ 失敗耐性)", () =>
     await createQaSearch({ runSearch })(INPUT);
     expect(seen).toBeUndefined();
   });
+
+  it("maxTurns / effort / thinking を指定時だけ透過し、未指定なら opts に載せない(ADR-0035 D6)", async () => {
+    const seen: Record<string, unknown>[] = [];
+    const runSearch = (async (opts: Record<string, unknown>) => {
+      seen.push(opts);
+      return ANSWER;
+    }) as unknown as AgentSearchFn;
+    await createQaSearch({ runSearch })(INPUT);
+    await createQaSearch({ runSearch, maxTurns: 20, effort: "medium", thinking: "disabled" })(
+      INPUT,
+    );
+    for (const k of ["maxTurns", "effort", "thinking"]) expect(k in (seen[0] ?? {})).toBe(false);
+    expect(seen[1]).toMatchObject({ maxTurns: 20, effort: "medium", thinking: "disabled" });
+  });
 });

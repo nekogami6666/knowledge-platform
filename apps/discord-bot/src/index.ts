@@ -171,7 +171,31 @@ async function main(): Promise<void> {
     DEFAULT_ASK_TIMEOUT_MS,
     (data, msg) => logger.warn(data, msg),
   );
-  const search = createQaSearch({ usage: nullUsageRecorder, timeoutMs: effectiveAskTimeoutMs });
+  // ADR-0035 D6: 探索量の実験ノブ。未設定なら既定(maxTurns 30・effort/thinking は SDK 任せ)。
+  const askMaxTurnsRaw = env.ASK_MAX_TURNS;
+  const askMaxTurns =
+    askMaxTurnsRaw === undefined || askMaxTurnsRaw.trim() === ""
+      ? undefined
+      : parsePositiveIntEnv("ASK_MAX_TURNS", askMaxTurnsRaw, 30, (data, msg) =>
+          logger.warn(data, msg),
+        );
+  if (askMaxTurns !== undefined || env.ASK_EFFORT !== undefined || env.ASK_THINKING !== undefined) {
+    logger.info(
+      {
+        maxTurns: askMaxTurns ?? null,
+        effort: env.ASK_EFFORT ?? null,
+        thinking: env.ASK_THINKING ?? null,
+      },
+      "/ask の探索ノブが env で上書きされています(ADR-0035 D6)",
+    );
+  }
+  const search = createQaSearch({
+    usage: nullUsageRecorder,
+    timeoutMs: effectiveAskTimeoutMs,
+    ...(askMaxTurns !== undefined ? { maxTurns: askMaxTurns } : {}),
+    ...(env.ASK_EFFORT !== undefined ? { effort: env.ASK_EFFORT } : {}),
+    ...(env.ASK_THINKING !== undefined ? { thinking: env.ASK_THINKING } : {}),
+  });
 
   const onAsk: AskHandler = (question, ctx) => {
     const deps: AskDeps = {

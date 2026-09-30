@@ -9,8 +9,10 @@
  * (CLAUDE.md §12.2)。import 方向は qa-search → ask の一方向(循環を作らない)。
  */
 import {
+  type AgentEffort,
   type AgentSearchOptions,
   type AgentSearchResult,
+  type AgentThinking,
   type LlmDeps,
   nullUsageRecorder,
   retryableExceptTimeout,
@@ -53,6 +55,12 @@ export interface QaSearchFactoryDeps {
    * 成長とともに所要時間が伸びるため、env(ASK_TIMEOUT_MS)からコード変更なしに調整できるようにする。
    */
   timeoutMs?: number;
+  /** 最大ターン数(既定は runAgentSearch の 30。env ASK_MAX_TURNS・ADR-0035 D6)。 */
+  maxTurns?: number;
+  /** 努力度(既定 SDK 任せ。env ASK_EFFORT・ADR-0035 D6)。 */
+  effort?: AgentEffort;
+  /** 拡張思考(既定 SDK 任せ。env ASK_THINKING・ADR-0035 D6)。 */
+  thinking?: AgentThinking;
 }
 
 /**
@@ -79,6 +87,9 @@ export function createQaSearch(deps: QaSearchFactoryDeps = {}): QaSearch {
             outputSchema: qaAnswerSchema,
             timeoutMs,
             ...(input.onProgress !== undefined ? { onProgress: input.onProgress } : {}),
+            ...(deps.maxTurns !== undefined ? { maxTurns: deps.maxTurns } : {}),
+            ...(deps.effort !== undefined ? { effort: deps.effort } : {}),
+            ...(deps.thinking !== undefined ? { thinking: deps.thinking } : {}),
           },
           { usage },
         ),

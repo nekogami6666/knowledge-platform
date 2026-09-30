@@ -17,7 +17,7 @@
  *   本番ではプロセスを OS/コンテナの FS サンドボックス(可視範囲を clones に限定)で動かすことが必須
  *   (Phase 1b デプロイ要件)。Phase 1a は synthetic データのみのため影響は限定的。
  */
-import { type Options, query } from "@anthropic-ai/claude-agent-sdk";
+import { type Options, query, type ThinkingConfig } from "@anthropic-ai/claude-agent-sdk";
 import type { z } from "zod";
 import { zodToJsonSchema } from "zod-to-json-schema";
 import { LlmError, type LlmErrorCode } from "./errors.js";
@@ -95,6 +95,14 @@ export interface AgentProgressEvent {
   turn: number;
 }
 
+/**
+ * 推論の努力度(ADR-0035 D6 の実験ノブ)。SDK の EffortLevel のうち運用で使う範囲だけを公開し、
+ * アプリ側が Agent SDK の型に依存しないようにする(CLAUDE.md: SDK import は本ファイルのみ)。
+ */
+export type AgentEffort = "low" | "medium" | "high";
+/** 拡張思考の有無(ADR-0035 D6 の実験ノブ)。未指定なら SDK 既定。 */
+export type AgentThinking = "adaptive" | "disabled";
+
 export interface AgentSearchOptions<T> {
   /** UsageRecorder のラベル(アプリ名)。 */
   app: string;
@@ -116,6 +124,10 @@ export interface AgentSearchOptions<T> {
   timeoutMs?: number;
   /** 進捗の購読(ADR-0035 D5)。listener の例外は握って検索を止めない。 */
   onProgress?: (ev: AgentProgressEvent) => void;
+  /** 努力度(未指定なら SDK 既定)。所要時間と回答品質のトレードオフ調整用(ADR-0035 D6)。 */
+  effort?: AgentEffort;
+  /** 拡張思考(未指定なら SDK 既定)。 */
+  thinking?: AgentThinking;
 }
 
 export interface AgentSearchResult<T> {
@@ -141,6 +153,11 @@ export interface LlmDeps {
 }
 
 const defaultQueryFn: AgentQueryFn = (params) => query(params);
+
+/** 公開型 AgentThinking → SDK ThinkingConfig。 */
+function thinkingConfigOf(t: AgentThinking): ThinkingConfig {
+  return t === "disabled" ? { type: "disabled" } : { type: "adaptive" };
+}
 
 /** Agent SDK の終端 result メッセージ(必要部分のみ)。 */
 interface ResultMessage {
@@ -223,6 +240,9 @@ export async function runAgentSearch<T>(
     outputFormat: { type: "json_schema", schema },
     maxTurns,
     abortController,
+    // ADR-0035 D6: 実験ノブ。未指定時はキー自体を渡さず SDK 既定に委ねる(挙動不変)。
+    ...(opts.effort !== undefined ? { effort: opts.effort } : {}),
+    ...(opts.thinking !== undefined ? { thinking: thinkingConfigOf(opts.thinking) } : {}),
   };
 
   let result: ResultMessage | undefined;
