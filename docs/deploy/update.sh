@@ -15,8 +15,17 @@ git pull --ff-only
 if command -v node >/dev/null 2>&1; then
   echo "==> host install + build(gap-tracker 用)"
   corepack enable >/dev/null 2>&1 || true
-  pnpm install --frozen-lockfile
-  pnpm -r build
+  # システムの node(/usr/bin)では corepack enable が root 無しでは shim を置けず、pnpm が PATH に
+  # 無いまま終わる(ssh 経由の非対話実行で発生・2026-09-30)。その場合は corepack 経由で呼ぶ
+  # (package.json の packageManager に固定されたバージョンが使われる)。
+  if command -v pnpm >/dev/null 2>&1; then
+    PNPM=(pnpm)
+  else
+    PNPM=(corepack pnpm)
+    export COREPACK_ENABLE_DOWNLOAD_PROMPT=0
+  fi
+  "${PNPM[@]}" install --frozen-lockfile
+  "${PNPM[@]}" -r build
 else
   echo "==> host build をスキップ(node なし。gap-tracker を使う場合は Node 22 が必要)"
 fi
