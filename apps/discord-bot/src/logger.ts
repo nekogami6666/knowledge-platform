@@ -6,6 +6,9 @@
  *    配列でも [REDACTED] 化(formatters.log)。
  *  - (A) 値スクラブ: 最終 JSON 行から env 由来の秘密「値」を [REDACTED] に文字列置換(destination ラップ)。
  *    err.message / err.stack に混入した秘密も捕捉する。
+ *  - (C) 形スクラブ: env に無い動的な秘密。Discord の interaction token は webhook / interaction の URL の
+ *    一部として DiscordAPIError の url・message 等に載る(15 分間その応答を編集できる)。最終行から
+ *    `/webhooks/{id}/{token}` と `/interactions/{id}/{token}` の token 部分を伏字化する(2026-10-01)。
  */
 import { type DestinationStream, type Logger, pino, stdSerializers } from "pino";
 
@@ -43,6 +46,14 @@ function scrubSecretValues(line: string, secretValues: readonly string[]): strin
   return out;
 }
 
+/** (C) Discord の webhook / interaction URL に含まれる token 部分(ID の直後のセグメント)。 */
+const DISCORD_TOKEN_IN_URL_RE = /(\/(?:webhooks|interactions)\/\d+\/)[A-Za-z0-9_.-]{20,}/g;
+
+/** (C) ログ行から Discord の webhook / interaction URL の token を伏字化する。 */
+export function scrubDiscordUrlTokens(line: string): string {
+  return line.replace(DISCORD_TOKEN_IN_URL_RE, `$1${REDACTED}`);
+}
+
 /**
  * ルートロガーを作る。
  * @param level ログレベル。
@@ -69,9 +80,9 @@ export function createLogger(
       process.stdout.write(s);
     },
   };
-  // (A) 最終行に対する値スクラブを噛ませた sink。
+  // (A) 値スクラブ + (C) Discord URL の token スクラブを最終行に噛ませた sink。
   const sink: DestinationStream = {
-    write: (s: string) => base.write(scrubSecretValues(s, secretValues)),
+    write: (s: string) => base.write(scrubDiscordUrlTokens(scrubSecretValues(s, secretValues))),
   };
   return pino(options, sink);
 }

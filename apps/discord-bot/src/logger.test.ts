@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { createLogger } from "./logger.js";
+import { createLogger, scrubDiscordUrlTokens } from "./logger.js";
 
 /** pino の出力を1行ずつ捕捉する書き込み先(DestinationStream 互換)。 */
 function capture(): { lines: string[]; write: (s: string) => void } {
@@ -56,5 +56,35 @@ describe("createLogger redact (§9.1 シークレット非ログ)", () => {
     logger.info({ note: "leaked sk-ant-xyz here" }, "msg sk-ant-xyz");
     const out = sink.lines.join("\n");
     expect(out).not.toContain("sk-ant-xyz");
+  });
+});
+
+describe("(C) Discord の webhook / interaction URL の token を伏字化(2026-10-01)", () => {
+  const TOKEN = "aW50ZXJhY3Rpb246MTIzNDU2Nzg5MDpBQkNERUZHSElKS0xNTk9Q_x-y.z";
+
+  it("DiscordAPIError の url・message に載った interaction token を伏せ、ID は残す", () => {
+    const sink = capture();
+    const logger = createLogger("info", { write: sink.write });
+    const err = Object.assign(
+      new Error(`Unknown Message: /webhooks/1234567890/${TOKEN}/messages/@original`),
+      {
+        url: `https://discord.com/api/v10/webhooks/1234567890/${TOKEN}/messages/@original`,
+      },
+    );
+    logger.warn(
+      { err, other: `https://discord.com/api/v10/interactions/987654321/${TOKEN}/callback` },
+      "x",
+    );
+    const out = sink.lines.join("\n");
+    expect(out).not.toContain(TOKEN);
+    expect(out).toContain("/webhooks/1234567890/[REDACTED]/messages/@original");
+    expect(out).toContain("/interactions/987654321/[REDACTED]/callback");
+  });
+
+  it("短い値やチャンネルの permalink(guild/channel/message の ID)は変えない", () => {
+    expect(scrubDiscordUrlTokens("https://discord.com/channels/1/2/3")).toBe(
+      "https://discord.com/channels/1/2/3",
+    );
+    expect(scrubDiscordUrlTokens("/webhooks/123/short")).toBe("/webhooks/123/short");
   });
 });
