@@ -15,6 +15,7 @@ export {
   createContainmentHook,
   DEFAULT_ALLOWED_TOOLS,
   DEFAULT_DISALLOWED_TOOLS,
+  isModelSubstituted,
   type LlmDeps,
   runAgentSearch,
 } from "./agent.js";

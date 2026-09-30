@@ -1,6 +1,11 @@
 import { LlmError } from "@stratum/llm";
 import { describe, expect, it } from "vitest";
-import { type AgentSearchFn, createQaSearch, DEFAULT_ASK_TIMEOUT_MS } from "./qa-search.js";
+import {
+  type AgentSearchFn,
+  createQaSearch,
+  DEFAULT_ASK_TIMEOUT_MS,
+  shouldRetryAsk,
+} from "./qa-search.js";
 
 const INPUT = { systemPrompt: "SYS", question: "Q", cwd: "/clones" };
 const ANSWER = {
@@ -56,5 +61,35 @@ describe("createQaSearch(タイムアウトの明示・㉞ 失敗耐性)", () =>
     );
     for (const k of ["maxTurns", "effort", "thinking"]) expect(k in (seen[0] ?? {})).toBe(false);
     expect(seen[1]).toMatchObject({ maxTurns: 20, effort: "medium", thinking: "disabled" });
+  });
+});
+
+describe("STRUCTURED_PARSE の再試行(2026-10-01「test」回答の不具合対策)", () => {
+  it("退化回答・形式崩れ(STRUCTURED_PARSE)は 1 回だけ検索し直し、2 回目の結果を返す", async () => {
+    let calls = 0;
+    const runSearch = (async () => {
+      calls += 1;
+      if (calls === 1) throw new LlmError("STRUCTURED_PARSE", "回答本文が成り立っていません");
+      return ANSWER;
+    }) as unknown as AgentSearchFn;
+    await expect(createQaSearch({ runSearch, maxRetries: 1 })(INPUT)).resolves.toEqual(ANSWER);
+    expect(calls).toBe(2);
+  });
+
+  it("2 回続けて失敗したらそれ以上は再試行せずエラーにする(費用の上限)", async () => {
+    let calls = 0;
+    const runSearch = (async () => {
+      calls += 1;
+      throw new LlmError("STRUCTURED_PARSE", "x");
+    }) as unknown as AgentSearchFn;
+    await expect(createQaSearch({ runSearch, maxRetries: 1 })(INPUT)).rejects.toThrow();
+    expect(calls).toBe(2);
+  });
+
+  it("shouldRetryAsk: STRUCTURED_PARSE と過負荷は再試行、TIMEOUT と LlmError 以外はしない", () => {
+    expect(shouldRetryAsk(new LlmError("STRUCTURED_PARSE", "x"))).toBe(true);
+    expect(shouldRetryAsk(new LlmError("OVERLOADED", "x"))).toBe(true);
+    expect(shouldRetryAsk(new LlmError("TIMEOUT", "x"))).toBe(false);
+    expect(shouldRetryAsk(new Error("x"))).toBe(false);
   });
 });

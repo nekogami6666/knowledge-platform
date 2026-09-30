@@ -13,6 +13,7 @@ import { parseLineRange, safeParseEntry } from "@stratum/kb-core";
 import {
   type AgentProgressEvent,
   type AgentSearchResult,
+  isModelSubstituted,
   LlmError,
   loadPrompt,
   type PromptStore,
@@ -120,12 +121,48 @@ export const qaCitationSchema = z.discriminatedUnion("kind", [
 ]);
 export type QaCitation = z.infer<typeof qaCitationSchema>;
 
-/** SDK outputFormat に渡す回答スキーマ(§7.2: 受領後に再 parse 検証)。 */
-export const qaAnswerSchema = z.object({
-  answer: z.string(),
-  citations: z.array(qaCitationSchema),
-  notFound: z.boolean(),
-});
+/** 回答ありなのに本文として成り立たない answer の最短字数(退化回答の判定)。 */
+export const MIN_ANSWER_CHARS = 20;
+/** モデルが形式を試すために入れる仮の値(2026-10-01 に「test」「テスト」で実際に確定した)。 */
+const PLACEHOLDER_ANSWER_RE = /^(test|テスト|placeholder|dummy|sample|サンプル)[.。!!]?$/i;
+/** StructuredOutput の引数が崩れ、後続の引数が answer の文字列に吸い込まれたときの痕跡。 */
+const LEAKED_TOOL_MARKUP_RE = /<\/answer>|<parameter name=|<\/parameter>/;
+
+/**
+ * 回答ありなのに本文として成り立たない answer を検出し、理由を返す(問題なければ null)。
+ * 2026-10-01: 実モデルが StructuredOutput の引数を 3 回崩した後に仮の値で呼び直し、SDK がそれを最終回答に
+ * 採用して「test」がそのまま利用者に返る不具合があった。型は正しいため zod の型検証だけでは通ってしまう。
+ */
+export function degenerateAnswerReason(answer: string, notFound: boolean): string | null {
+  if (notFound) return null;
+  const a = answer.trim();
+  if (PLACEHOLDER_ANSWER_RE.test(a)) return "placeholder";
+  if (LEAKED_TOOL_MARKUP_RE.test(a)) return "leaked_tool_markup";
+  if ([...a].length < MIN_ANSWER_CHARS) return "too_short";
+  return null;
+}
+
+/**
+ * SDK outputFormat に渡す回答スキーマ(§7.2: 受領後に再 parse 検証)。
+ * superRefine は JSON Schema 化(SDK へ渡す形)には現れず、受領後の safeParse でだけ効く。
+ * 退化回答は STRUCTURED_PARSE となり、qa-search の再試行で 1 回だけ検索し直す。
+ */
+export const qaAnswerSchema = z
+  .object({
+    answer: z.string(),
+    citations: z.array(qaCitationSchema),
+    notFound: z.boolean(),
+  })
+  .superRefine((v, ctx) => {
+    const reason = degenerateAnswerReason(v.answer, v.notFound);
+    if (reason !== null) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["answer"],
+        message: `回答本文が成り立っていません(${reason})`,
+      });
+    }
+  });
 export type QaAnswer = z.infer<typeof qaAnswerSchema>;
 
 /** 検証通過 + bot が ref(commit SHA)を付与した引用。permalink 生成可能。 */
@@ -341,12 +378,13 @@ export async function handleAskRequest(req: AskRequest, deps: AskDeps): Promise<
     const manifest = buildRepoManifest(deps.repos);
     const systemPrompt = manifest === "" ? prompt.body : `${manifest}\n${prompt.body}`;
     deps.onProgress?.({ kind: "search" });
-    const { value, usage, numTurns, durationApiMs, deniedToolCalls } = await deps.search({
-      systemPrompt,
-      question: req.question,
-      cwd: deps.clonesDir,
-      ...(deps.onProgress !== undefined ? { onProgress: deps.onProgress } : {}),
-    });
+    const { value, usage, numTurns, durationApiMs, deniedToolCalls, requestedModel, actualModel } =
+      await deps.search({
+        systemPrompt,
+        question: req.question,
+        cwd: deps.clonesDir,
+        ...(deps.onProgress !== undefined ? { onProgress: deps.onProgress } : {}),
+      });
     // ADR-0035 D4: 所要時間とターン数を必ず残す(タイムアウト頻発の原因分析・探索予算の調整に使う)。
     deps.logInfo?.(
       {
@@ -359,9 +397,18 @@ export async function handleAskRequest(req: AskRequest, deps: AskDeps): Promise<
         citations: value.citations.length,
         inputTokens: usage.inputTokens,
         outputTokens: usage.outputTokens,
+        requestedModel: requestedModel ?? null,
+        actualModel: actualModel ?? null,
       },
       "/ask: 検索完了",
     );
+    // 組織の制限などで指定モデルが無通知で別モデルに置き換わっていないか(2026-10-01 の不具合の直接原因)。
+    if (isModelSubstituted(requestedModel, actualModel)) {
+      deps.logWarn?.(
+        { requestedModel, actualModel },
+        "/ask: 指定と異なるモデルが応答しました(組織のモデル制限による置き換えの可能性)",
+      );
+    }
     const valid = value.notFound
       ? []
       : validateCitations(

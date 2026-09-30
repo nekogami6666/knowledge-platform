@@ -7,6 +7,7 @@ import {
   createContainmentHook,
   DEFAULT_ALLOWED_TOOLS,
   DEFAULT_DISALLOWED_TOOLS,
+  isModelSubstituted,
   runAgentSearch,
 } from "./agent.js";
 import { LlmError } from "./errors.js";
@@ -446,3 +447,49 @@ describe("buildAgentEnv (§9.1 / ADR-0006: subprocess env 絞り込み)", () => 
 });
 
 // extractStructured は削除(Claude Platform on AWS/第一者とも structured_output が入る。ADR-0008)。
+
+describe("実モデルの記録と会話記録の非保存(2026-10-01「test」回答の不具合対策)", () => {
+  const success = {
+    type: "result",
+    subtype: "success",
+    structured_output: { answer: "A", notFound: false },
+    usage: { input_tokens: 1, output_tokens: 1 },
+  };
+
+  it("最初の assistant メッセージの model を actualModel に、指定モデルを requestedModel に入れる", async () => {
+    const res = await runAgentSearch(baseOpts, {
+      queryFn: streamOf(
+        { type: "system", subtype: "init", model: "claude-sonnet-4-6" },
+        { type: "assistant", message: { model: "claude-sonnet-5", content: [] } },
+        { type: "assistant", message: { model: "other", content: [] } },
+        success,
+      ),
+    });
+    expect(res.actualModel).toBe("claude-sonnet-5");
+    expect(typeof res.requestedModel).toBe("string");
+    expect(res.requestedModel?.length).toBeGreaterThan(0);
+  });
+
+  it("assistant メッセージが無ければ actualModel を持たない", async () => {
+    const res = await runAgentSearch(baseOpts, { queryFn: streamOf(success) });
+    expect("actualModel" in res).toBe(false);
+  });
+
+  it("persistSession: false を SDK に渡す(検索した社内文書を含む会話記録を残さない)", async () => {
+    let seen: Options | undefined;
+    const queryFn: AgentQueryFn = ({ options }) => {
+      seen = options;
+      return streamOf(success)({ prompt: "", options });
+    };
+    await runAgentSearch(baseOpts, { queryFn });
+    expect(seen?.persistSession).toBe(false);
+  });
+
+  it("isModelSubstituted: 前方一致なら同一、違えば置き換え、どちらか不明なら false", () => {
+    expect(isModelSubstituted("claude-sonnet-5-5", "claude-sonnet-5-5")).toBe(false);
+    expect(isModelSubstituted("claude-sonnet-5-5", "claude-sonnet-5-5-20260901")).toBe(false);
+    expect(isModelSubstituted("claude-sonnet-4-6", "claude-sonnet-5")).toBe(true);
+    expect(isModelSubstituted("claude-sonnet-4-6", undefined)).toBe(false);
+    expect(isModelSubstituted(undefined, "claude-sonnet-5")).toBe(false);
+  });
+});

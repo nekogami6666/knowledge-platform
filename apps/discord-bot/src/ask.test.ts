@@ -1,10 +1,17 @@
-import { LlmError, type PromptStore, type Usage } from "@stratum/llm";
+import {
+  type AgentQueryFn,
+  LlmError,
+  type PromptStore,
+  runAgentSearch,
+  type Usage,
+} from "@stratum/llm";
 import { describe, expect, it } from "vitest";
 import {
   type AskDeps,
   type AskRequest,
   buildRepoManifest,
   DEFAULT_ASK_TIMEOUT_MS,
+  degenerateAnswerReason,
   ERROR_MESSAGE,
   handleAskRequest,
   MANIFEST_DESCRIPTION_MAX_CHARS,
@@ -12,6 +19,7 @@ import {
   normalizeLineRange,
   type QaAnswer,
   type QaCitation,
+  qaAnswerSchema,
   sanitizeRepoDescription,
   timeoutMessage,
   validateCitations,
@@ -558,5 +566,132 @@ describe("handleAskRequest synthetic 統合(§6.2 受け入れ条件)", () => {
     expect(results).toHaveLength(3);
     expect(results.every((r) => r.queryId !== "")).toBe(true);
     expect(store.listQueries()).toHaveLength(3);
+  });
+});
+
+describe("退化回答の検出(2026-10-01「test」回答の不具合対策)", () => {
+  const cite = [{ kind: "github_file" as const, repo: "org/minutes", path: "a.md" }];
+
+  it("仮の値・タグの漏れ・短すぎる回答を理由付きで検出する", () => {
+    expect(degenerateAnswerReason("test", false)).toBe("placeholder");
+    expect(degenerateAnswerReason(" テスト ", false)).toBe("placeholder");
+    expect(degenerateAnswerReason("Placeholder.", false)).toBe("placeholder");
+    expect(
+      degenerateAnswerReason(
+        `${"本文".repeat(30)}</answer>\n<parameter name="citations">[]`,
+        false,
+      ),
+    ).toBe("leaked_tool_markup");
+    expect(degenerateAnswerReason("短い回答です", false)).toBe("too_short");
+  });
+
+  it("まともな回答と、notFound の回答は通す", () => {
+    expect(
+      degenerateAnswerReason(
+        "勤怠管理システムは Google SSO でログインし、打刻と工数を記録する。",
+        false,
+      ),
+    ).toBeNull();
+    expect(degenerateAnswerReason("test", true)).toBeNull();
+    expect(degenerateAnswerReason("", true)).toBeNull();
+  });
+
+  it("runAgentSearch 経由でも退化回答は STRUCTURED_PARSE になる(qa-search が 1 回だけ再試行する)", async () => {
+    const queryFn: AgentQueryFn = () =>
+      (async function* () {
+        yield {
+          type: "result",
+          subtype: "success",
+          structured_output: { answer: "テスト", citations: cite, notFound: false },
+        };
+      })();
+    await expect(
+      runAgentSearch(
+        {
+          app: "t",
+          role: "standard",
+          systemPrompt: "s",
+          prompt: "q",
+          cwd: "/tmp",
+          outputSchema: qaAnswerSchema,
+        },
+        { queryFn },
+      ),
+    ).rejects.toMatchObject({ code: "STRUCTURED_PARSE" });
+  });
+
+  it("qaAnswerSchema は退化回答を不合格にし、まともな回答は合格にする", () => {
+    expect(
+      qaAnswerSchema.safeParse({ answer: "test", citations: cite, notFound: false }).success,
+    ).toBe(false);
+    expect(
+      qaAnswerSchema.safeParse({
+        answer: "勤怠管理システムは Google SSO でログインし、打刻と工数を記録する。",
+        citations: cite,
+        notFound: false,
+      }).success,
+    ).toBe(true);
+  });
+
+  it("SDK に渡す JSON Schema は検証追加の前と同じ形のまま(superRefine は現れない)", async () => {
+    let schema: { type?: string; required?: string[]; properties?: Record<string, unknown> } = {};
+    const queryFn: AgentQueryFn = ({ options }) => {
+      const fmt = options.outputFormat as { schema?: typeof schema } | undefined;
+      schema = fmt?.schema ?? {};
+      return (async function* () {
+        yield {
+          type: "result",
+          subtype: "success",
+          structured_output: { answer: "回答", citations: [], notFound: true },
+        };
+      })();
+    };
+    await runAgentSearch(
+      {
+        app: "t",
+        role: "standard",
+        systemPrompt: "s",
+        prompt: "q",
+        cwd: "/tmp",
+        outputSchema: qaAnswerSchema,
+      },
+      { queryFn },
+    );
+    expect(schema.type).toBe("object");
+    expect(schema.required).toEqual(["answer", "citations", "notFound"]);
+    expect(Object.keys(schema.properties ?? {})).toEqual(["answer", "citations", "notFound"]);
+  });
+});
+
+describe("モデルの置き換え検出(2026-10-01)", () => {
+  it("指定と違うモデルが応答したら logWarn する。一致・不明なら出さない", async () => {
+    const run = async (requestedModel?: string, actualModel?: string) => {
+      const warns: Array<{ data: Record<string, unknown>; msg: string }> = [];
+      const infos: Array<Record<string, unknown>> = [];
+      const { deps } = makeDeps({
+        search: async () => ({
+          value: { answer: "回答", citations: [], notFound: true },
+          usage: { inputTokens: 1, outputTokens: 1 },
+          ...(requestedModel !== undefined ? { requestedModel } : {}),
+          ...(actualModel !== undefined ? { actualModel } : {}),
+        }),
+        logWarn: (data, msg) => warns.push({ data, msg }),
+        logInfo: (data) => infos.push(data),
+      });
+      await handleAskRequest(req, deps);
+      return { warns, infos };
+    };
+    const substituted = await run("claude-sonnet-4-6", "claude-sonnet-5");
+    expect(substituted.warns).toHaveLength(1);
+    expect(substituted.warns[0]?.data).toEqual({
+      requestedModel: "claude-sonnet-4-6",
+      actualModel: "claude-sonnet-5",
+    });
+    expect(substituted.infos[0]).toMatchObject({
+      requestedModel: "claude-sonnet-4-6",
+      actualModel: "claude-sonnet-5",
+    });
+    expect((await run("claude-sonnet-5-5", "claude-sonnet-5-5")).warns).toHaveLength(0);
+    expect((await run("claude-sonnet-5-5", undefined)).warns).toHaveLength(0);
   });
 });

@@ -152,6 +152,25 @@ export interface AgentSearchResult<T> {
    * 観測用(ADR-0037): 0 超は cwd 外読み取りの試行やツール誤用のシグナル。result に無ければ undefined。
    */
   deniedToolCalls?: number;
+  /** 指定したモデル ID(models.ts の解決結果)。runAgentSearch は常に入れる(テスト用の差し替えでは省略可)。 */
+  requestedModel?: string;
+  /**
+   * 実際に応答したモデル ID(assistant メッセージの message.model・最初の 1 件)。組織の制限で指定モデルが
+   * 使えないと SDK は無通知で別モデルに置き換えるため、requestedModel と比べて検出する(2026-10-01 の
+   * 「test」回答の不具合の直接原因)。assistant メッセージが無ければ undefined。
+   */
+  actualModel?: string;
+}
+
+/**
+ * 指定モデルと実モデルが食い違うか(実モデルが不明なら false)。日付付き ID 等の派生
+ * (例: claude-sonnet-5-5-20260901)は同一とみなすため前方一致で比べる。
+ */
+export function isModelSubstituted(
+  requested: string | undefined,
+  actual: string | undefined,
+): boolean {
+  return requested !== undefined && actual !== undefined && !actual.startsWith(requested);
 }
 
 /** query() の最小シグネチャ。注入で Agent SDK をモック可能にする(kb-core の IO 注入と同趣旨)。 */
@@ -186,7 +205,7 @@ interface ResultMessage {
 /** Agent SDK の assistant メッセージ(tool_use ブロック抽出に必要な部分のみ)。 */
 interface AssistantMessage {
   type: "assistant";
-  message?: { content?: unknown };
+  message?: { content?: unknown; model?: unknown };
 }
 
 function isAssistantMessage(m: unknown): m is AssistantMessage {
@@ -272,12 +291,15 @@ export async function runAgentSearch<T>(
   // 読み取り範囲の封じ込め(ADR-0037): deny のみを返す PreToolUse hook + SDK の
   // blockReadsOutsideWorkingDirectories。mcpServers / agents / canUseTool / toolAliases / additionalDirectories は
   // 能力・到達範囲を広げうるため意図的に未設定のまま維持する(§9.5)。
+  const requestedModel = modelIdFor(opts.role);
   const options: Options = {
     systemPrompt: opts.systemPrompt,
-    model: modelIdFor(opts.role),
+    model: requestedModel,
     cwd: opts.cwd,
     permissionMode: "dontAsk",
     settingSources: [],
+    // 会話記録(検索で読んだ社内文書の本文を含む)を ~/.claude/projects に残さない(2026-10-01)。
+    persistSession: false,
     tools: [...allowedTools],
     allowedTools: [...allowedTools],
     disallowedTools: [...DEFAULT_DISALLOWED_TOOLS],
@@ -297,10 +319,15 @@ export async function runAgentSearch<T>(
 
   let result: ResultMessage | undefined;
   let turn = 0;
+  let actualModel: string | undefined;
   try {
     for await (const msg of queryFn({ prompt: opts.prompt, options })) {
       if (isResultMessage(msg)) result = msg;
-      else if (opts.onProgress !== undefined && isAssistantMessage(msg)) {
+      else if (isAssistantMessage(msg) && actualModel === undefined) {
+        const m = msg.message?.model;
+        if (typeof m === "string" && m !== "") actualModel = m;
+      }
+      if (opts.onProgress !== undefined && isAssistantMessage(msg)) {
         turn += 1;
         for (const tool of toolNamesOf(msg)) {
           try {
@@ -362,5 +389,7 @@ export async function runAgentSearch<T>(
     ...(Array.isArray(result.permission_denials)
       ? { deniedToolCalls: result.permission_denials.length }
       : {}),
+    requestedModel,
+    ...(actualModel !== undefined ? { actualModel } : {}),
   };
 }

@@ -14,6 +14,7 @@ import {
   type AgentSearchResult,
   type AgentThinking,
   type LlmDeps,
+  LlmError,
   nullUsageRecorder,
   retryableExceptTimeout,
   runAgentSearch,
@@ -64,6 +65,17 @@ export interface QaSearchFactoryDeps {
 }
 
 /**
+ * /ask の再試行判定。TIMEOUT 以外の再試行対象に加え、STRUCTURED_PARSE(退化回答・形式崩れ)も
+ * 1 回だけ検索し直す(2026-10-01「test」回答の不具合対策。回数は maxRetries で抑える)。
+ */
+export function shouldRetryAsk(error: unknown): boolean {
+  return (
+    retryableExceptTimeout(error) ||
+    (error instanceof LlmError && error.code === "STRUCTURED_PARSE")
+  );
+}
+
+/**
  * 実 agentic search(runAgentSearch + §6.2 の 1 回リトライ)を {@link QaSearch} として組み立てる。
  * `app: "discord-bot"`・`role: "standard"`・`outputSchema: qaAnswerSchema` を固定する。
  * Claude on AWS の認証(CLAUDE_CODE_USE_ANTHROPIC_AWS / ANTHROPIC_AWS_* / AWS_REGION)は
@@ -95,6 +107,6 @@ export function createQaSearch(deps: QaSearchFactoryDeps = {}): QaSearch {
         ),
       // TIMEOUT は再送しない(所要時間は検索対象サイズ比例 — 再送は待ち時間を倍にするだけで、
       // ユーザーは interaction の 15 分期限内で待っている・2026-08-16 の教訓)。
-      { maxRetries, shouldRetry: retryableExceptTimeout },
+      { maxRetries, shouldRetry: shouldRetryAsk },
     );
 }
