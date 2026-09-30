@@ -26,14 +26,39 @@ import type { RepoSpec, RepoSyncer, SyncedRepo } from "./repos.js";
 const DISCORD_PERMALINK_RE = /^https:\/\/discord\.com\/channels\/\d+\/\d+\/\d+$/;
 const REPO_RE = /^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/;
 
+/** manifest に載せるリポ説明の上限文字数(対応表がリポ数に比例して膨らむのを抑える)。 */
+export const MANIFEST_DESCRIPTION_MAX_CHARS = 120;
+
+/**
+ * リポ説明を manifest の 1 行に収まる形へ整える。改行・連続空白は 1 つの空白に畳んで前後を trim し、
+ * 上限を超えたら切り詰めて末尾を「…」にする。空になったら undefined(説明なし扱い)。
+ */
+export function sanitizeRepoDescription(description: string | undefined): string | undefined {
+  if (description === undefined) return undefined;
+  const oneLine = description.replace(/\s+/g, " ").trim();
+  if (oneLine === "") return undefined;
+  const chars = Array.from(oneLine); // サロゲートペアを途中で割らない
+  if (chars.length <= MANIFEST_DESCRIPTION_MAX_CHARS) return oneLine;
+  return `${chars
+    .slice(0, MANIFEST_DESCRIPTION_MAX_CHARS - 1)
+    .join("")
+    .trimEnd()}…`;
+}
+
 /**
  * 検索対象 repo の「subdir ↔ org/name」対応表を systemPrompt に前置する manifest を組む(§6.2)。
  * cwd 配下のサブディレクトリ名しか見えないエージェントに、引用すべき `repo`(org/name)を教える。
  * これが無いと本番 /ask でモデルが正しい repo を引用できない(eval と同一の manifest を共用する)。
+ * description があれば行末に ` — 説明` を足し、探索するリポを絞る手がかりにする(ADR-0036 D6)。
+ * description が無いリポの行は従来と同一(eval の manifest・ベースラインを変えない)。
  */
 export function buildRepoManifest(repos: readonly RepoSpec[]): string {
   if (repos.length === 0) return "";
-  const lines = repos.map((r) => `- ${r.repo} → サブディレクトリ \`${r.dir}/\``);
+  const lines = repos.map((r) => {
+    const base = `- ${r.repo} → サブディレクトリ \`${r.dir}/\``;
+    const description = sanitizeRepoDescription(r.description);
+    return description === undefined ? base : `${base} — ${description}`;
+  });
   return [
     "## 検索対象リポジトリ(このコーパスでの対応)",
     ...lines,

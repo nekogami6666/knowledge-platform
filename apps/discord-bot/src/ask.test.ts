@@ -7,10 +7,12 @@ import {
   DEFAULT_ASK_TIMEOUT_MS,
   ERROR_MESSAGE,
   handleAskRequest,
+  MANIFEST_DESCRIPTION_MAX_CHARS,
   NOT_FOUND_MESSAGE,
   normalizeLineRange,
   type QaAnswer,
   type QaCitation,
+  sanitizeRepoDescription,
   timeoutMessage,
   validateCitations,
 } from "./ask.js";
@@ -262,6 +264,63 @@ describe("buildRepoManifest (§6.2 repo 対応表)", () => {
 
   it("repos が空なら空文字(前置きしない)", () => {
     expect(buildRepoManifest([])).toBe("");
+  });
+
+  it("description が無ければ従来と同一のバイト列(eval の manifest を変えない)", () => {
+    expect(
+      buildRepoManifest([
+        { repo: "org/minutes", dir: "minutes" },
+        { repo: "org/fw", dir: "dispenser-fw", description: "   " },
+      ]),
+    ).toBe(
+      [
+        "## 検索対象リポジトリ(このコーパスでの対応)",
+        "- org/minutes → サブディレクトリ `minutes/`",
+        "- org/fw → サブディレクトリ `dispenser-fw/`",
+        "引用の repo にはこの org/name を使い、path は各サブディレクトリ配下からの相対パスにすること。",
+        "",
+      ].join("\n"),
+    );
+  });
+
+  it("description があればその行だけ末尾に ` — 説明` を足す(ADR-0036 D6)", () => {
+    const m = buildRepoManifest([
+      { repo: "org/minutes", dir: "minutes", description: "開発定例の議事録" },
+      { repo: "org/fw", dir: "dispenser-fw" },
+    ]);
+    expect(m).toContain("- org/minutes → サブディレクトリ `minutes/` — 開発定例の議事録\n");
+    expect(m).toContain("- org/fw → サブディレクトリ `dispenser-fw/`\n");
+  });
+
+  it("description の改行・連続空白は 1 行に畳み、manifest の行構造を壊さない", () => {
+    const m = buildRepoManifest([
+      { repo: "org/kb", dir: "kb", description: "  社内ナレッジ\n## 見出し風\r\n\t本文  " },
+    ]);
+    expect(m).toContain("- org/kb → サブディレクトリ `kb/` — 社内ナレッジ ## 見出し風 本文\n");
+    expect(m.split("\n")).toHaveLength(4); // 見出し + 1 行 + 注記 + 末尾空行
+  });
+});
+
+describe("sanitizeRepoDescription", () => {
+  it("上限以内はそのまま、空・空白のみ・undefined は undefined", () => {
+    expect(sanitizeRepoDescription("勤怠管理システム")).toBe("勤怠管理システム");
+    expect(sanitizeRepoDescription("")).toBeUndefined();
+    expect(sanitizeRepoDescription(" \n ")).toBeUndefined();
+    expect(sanitizeRepoDescription(undefined)).toBeUndefined();
+  });
+
+  it("上限を超えたら上限文字数ちょうどに切り詰めて末尾を「…」にする", () => {
+    const exact = "あ".repeat(MANIFEST_DESCRIPTION_MAX_CHARS);
+    expect(sanitizeRepoDescription(exact)).toBe(exact);
+    const out = sanitizeRepoDescription("あ".repeat(MANIFEST_DESCRIPTION_MAX_CHARS + 50));
+    expect(out).toBe(`${"あ".repeat(MANIFEST_DESCRIPTION_MAX_CHARS - 1)}…`);
+    expect(Array.from(out ?? "")).toHaveLength(MANIFEST_DESCRIPTION_MAX_CHARS);
+  });
+
+  it("切り詰めでサロゲートペア(絵文字)を割らない", () => {
+    const out = sanitizeRepoDescription("🧪".repeat(MANIFEST_DESCRIPTION_MAX_CHARS + 1)) ?? "";
+    // 期待値一致 = 末尾が完全な 🧪 + 「…」で、孤立サロゲートが残っていない。
+    expect(out).toBe(`${"🧪".repeat(MANIFEST_DESCRIPTION_MAX_CHARS - 1)}…`);
   });
 });
 

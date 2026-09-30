@@ -50,6 +50,12 @@ export interface RepoSpec {
   dir: string;
   /** git remote URL(clone/fetch 用)。synthetic で既存ディレクトリを使う場合は省略可。 */
   url?: string;
+  /**
+   * リポの説明(GitHub の description 等・任意)。/ask の manifest に載せ、モデルが探索する
+   * リポを絞る手がかりにする(ADR-0036 D6)。種別(KB/議事録/コード)は持たせず、説明と名前から
+   * モデルに判断させる(リポ名・種別の対応をコードにハードコードしない)。
+   */
+  description?: string;
 }
 
 /** 同期後の1リポの状態。 */
