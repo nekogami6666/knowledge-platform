@@ -150,6 +150,21 @@ export interface CommitSummary {
   authoredAt: string;
 }
 
+/**
+ * org 配下のリポ1件の要約(ADR-0036 D1: /ask の検索対象を「トークンで見える org リポ全部」から決める)。
+ * 除外判定(archived / fork)と manifest 用の description だけを持つ。
+ */
+export interface OrgRepo {
+  /** リポ名(org を含まない。clone 先 dir の既定)。 */
+  name: string;
+  /** "org/name"(citation allowlist 兼 permalink の正規名)。 */
+  fullName: string;
+  archived: boolean;
+  fork: boolean;
+  /** GitHub の description(未設定は null)。 */
+  description: string | null;
+}
+
 /** gh-client が公開する最小操作(F1 extractor / bot 代理マージ / C5 gap-tracker が消費)。 */
 export interface GhClient {
   /** 複数ファイルを1コミットにまとめた PR を作成する(Git Data API)。 */
@@ -183,6 +198,11 @@ export interface GhClient {
    * author は GitHub アカウント紐づきの login のみ(email 写像はしない・ADR-0017 D2)。
    */
   listCommits(repo: string, opts: ListCommitsOptions): Promise<CommitSummary[]>;
+  /**
+   * 認証主体(App installation / token)から見える org のリポを全件列挙する(ADR-0036 D1)。
+   * archived / fork も含めて返す(除外判定は呼び出し側)。404(org 不在・見えない)は NOT_FOUND。
+   */
+  listOrgRepos(org: string): Promise<OrgRepo[]>;
 }
 
 interface TreeItem {
@@ -329,6 +349,15 @@ export interface OctokitLike {
           sha: string;
           author?: { login: string } | null;
           commit: { author?: { date?: string } | null };
+        }>;
+      }>;
+      listForOrg(p: { org: string; type?: string; per_page?: number; page?: number }): Promise<{
+        data: Array<{
+          name: string;
+          full_name: string;
+          archived?: boolean;
+          fork: boolean;
+          description: string | null;
         }>;
       }>;
     };
@@ -707,6 +736,37 @@ export function createGhClient(octokit: OctokitLike): GhClient {
         throw new GhClientError("API_ERROR", `commit の列挙に失敗しました(${repo})`, {
           cause: e,
         });
+      }
+    },
+
+    async listOrgRepos(org) {
+      const perPage = 100;
+      const out: OrgRepo[] = [];
+      try {
+        // type "all" = 認証主体から見える public + private 全部(token でも App でも同じ呼び方)。
+        // 件数上限は設けない: 取りこぼすと「見えるのに検索できない」リポが出るため(ADR-0036 D1)。
+        for (let page = 1; ; page++) {
+          const res = await octokit.rest.repos.listForOrg({
+            org,
+            type: "all",
+            per_page: perPage,
+            page,
+          });
+          for (const r of res.data) {
+            out.push({
+              name: r.name,
+              fullName: r.full_name,
+              archived: r.archived ?? false,
+              fork: r.fork,
+              description: r.description ?? null,
+            });
+          }
+          if (res.data.length < perPage) break; // 最終ページ
+        }
+        return out;
+      } catch (e) {
+        const code = statusOf(e) === 404 ? "NOT_FOUND" : "API_ERROR";
+        throw new GhClientError(code, `org のリポ列挙に失敗しました(${org})`, { cause: e });
       }
     },
   };

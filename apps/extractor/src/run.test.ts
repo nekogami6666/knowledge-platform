@@ -2,6 +2,7 @@ import type {
   CommitSummary,
   GhClient,
   MergedPrSummary,
+  OrgRepo,
   PrCommentItem,
   PrFileSummary,
   PrSummary,
@@ -88,6 +89,7 @@ function makeGh(over: Partial<GhClient> = {}): GhClient {
     listPullRequestComments: vi.fn(async (): Promise<PrCommentItem[]> => []),
     listPullRequestFiles: vi.fn(async (): Promise<PrFileSummary[]> => []),
     listCommits: vi.fn(async (): Promise<CommitSummary[]> => []),
+    listOrgRepos: vi.fn(async (): Promise<OrgRepo[]> => []),
     ...over,
   };
 }

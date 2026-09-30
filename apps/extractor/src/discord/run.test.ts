@@ -152,6 +152,7 @@ function makeHarness(
     listPullRequestComments: async () => [],
     listPullRequestFiles: async () => [],
     listCommits: async () => [],
+    listOrgRepos: async () => [],
   };
   const logger: Logger = {
     info: () => {},

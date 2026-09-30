@@ -23,6 +23,7 @@ type ReviewCommentsFn = OctokitLike["rest"]["pulls"]["listReviewComments"];
 type ListFilesFn = OctokitLike["rest"]["pulls"]["listFiles"];
 type IssueCommentsFn = OctokitLike["rest"]["issues"]["listComments"];
 type ListCommitsFn = OctokitLike["rest"]["repos"]["listCommits"];
+type ListForOrgFn = OctokitLike["rest"]["repos"]["listForOrg"];
 
 function fakeOctokit(
   over: {
@@ -32,6 +33,7 @@ function fakeOctokit(
     listFiles?: ListFilesFn;
     listComments?: IssueCommentsFn;
     listCommits?: ListCommitsFn;
+    listForOrg?: ListForOrgFn;
   } = {},
 ) {
   const defaultList: ListFn = async () => ({
@@ -85,6 +87,7 @@ function fakeOctokit(
       repos: {
         getContent: vi.fn(over.getContent ?? defaultGetContent),
         listCommits: vi.fn<ListCommitsFn>(over.listCommits ?? (async () => ({ data: [] }))),
+        listForOrg: vi.fn<ListForOrgFn>(over.listForOrg ?? (async () => ({ data: [] }))),
       },
     },
   };
@@ -618,5 +621,69 @@ describe("listCommits(§6.6 ⑤-a expertise-mapper の evidence)", () => {
     await expect(gh.listCommits("o/r", { since: "s" })).rejects.toMatchObject({
       code: "API_ERROR",
     });
+  });
+});
+
+describe("listOrgRepos(ADR-0036 D1: トークンで見える org リポの列挙)", () => {
+  type OrgRow = Awaited<ReturnType<ListForOrgFn>>["data"][number];
+  const row = (name: string, over: Partial<OrgRow> = {}): OrgRow => ({
+    name,
+    full_name: `o/${name}`,
+    archived: false,
+    fork: false,
+    description: null,
+    ...over,
+  });
+
+  it("name / fullName / archived / fork / description を写像する(archived 欠落は false)", async () => {
+    const oct = fakeOctokit({
+      listForOrg: async () => ({
+        data: [
+          row("kb", { description: "ナレッジ本体" }),
+          row("old", { archived: true }),
+          row("forked", { fork: true }),
+          { name: "bare", full_name: "o/bare", fork: false, description: null },
+        ],
+      }),
+    });
+    const gh = createGhClient(oct as unknown as OctokitLike);
+    expect(await gh.listOrgRepos("o")).toEqual([
+      { name: "kb", fullName: "o/kb", archived: false, fork: false, description: "ナレッジ本体" },
+      { name: "old", fullName: "o/old", archived: true, fork: false, description: null },
+      { name: "forked", fullName: "o/forked", archived: false, fork: true, description: null },
+      { name: "bare", fullName: "o/bare", archived: false, fork: false, description: null },
+    ]);
+    expect(oct.rest.repos.listForOrg).toHaveBeenCalledWith({
+      org: "o",
+      type: "all",
+      per_page: 100,
+      page: 1,
+    });
+  });
+
+  it("ページ跨ぎ: 満杯(100 件)ページの次を取り、満杯未満で打ち切る", async () => {
+    const first = Array.from({ length: 100 }, (_, i) => row(`r${i}`));
+    const pages = [{ data: first }, { data: [row("last")] }];
+    let call = 0;
+    const oct = fakeOctokit({ listForOrg: async () => pages[call++] ?? { data: [] } });
+    const gh = createGhClient(oct as unknown as OctokitLike);
+    const out = await gh.listOrgRepos("o");
+    expect(out).toHaveLength(101);
+    expect(out[100]?.fullName).toBe("o/last");
+    expect(oct.rest.repos.listForOrg).toHaveBeenCalledTimes(2);
+    expect(oct.rest.repos.listForOrg).toHaveBeenLastCalledWith(
+      expect.objectContaining({ page: 2 }),
+    );
+  });
+
+  it("404 は NOT_FOUND・その他の失敗は API_ERROR(GhClientError)", async () => {
+    const oct = fakeOctokit();
+    const gh = createGhClient(oct as unknown as OctokitLike);
+    oct.rest.repos.listForOrg.mockRejectedValueOnce({ status: 404 });
+    await expect(gh.listOrgRepos("o")).rejects.toMatchObject({ code: "NOT_FOUND" });
+    oct.rest.repos.listForOrg.mockRejectedValueOnce({ status: 500 });
+    const err = await gh.listOrgRepos("o").catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(GhClientError);
+    expect(err).toMatchObject({ code: "API_ERROR" });
   });
 });

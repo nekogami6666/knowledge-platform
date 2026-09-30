@@ -33,16 +33,33 @@ export interface ChannelGateInput {
 }
 
 /**
+ * org 可視リポの自動列挙(ADR-0036 D1。明示オプトイン・既定 null = OFF)。
+ * - org: GitHub の org 名(`GET /orgs/{org}/repos` をトークンの可視範囲で列挙)。
+ * - exclude: 列挙から外すリポ名("name" or "org/name"・大小無視の完全一致。D3)。
+ *   **列挙分にだけ効く**。`repos:` の手動指定は明示の意図として除外しない(repo-scope.ts)。
+ * - sync_on_ask: /ask のたびに同期するリポ名パターン(`*` のみの簡易 glob・大小無視。D5)。
+ *   それ以外の列挙分は定期同期のみ。
+ */
+export const allVisibleConfigSchema = z.object({
+  org: z.string().min(1),
+  exclude: z.array(z.string()).default([]),
+  sync_on_ask: z.array(z.string()).default([]),
+});
+export type AllVisibleConfig = z.infer<typeof allVisibleConfigSchema>;
+
+/**
  * 検索対象リポ(§6.2 / §14 #5)。repo="org/name"(citation allowlist 兼 permalink)、
  * dir=CLONES_DIR 配下の clone 先、url=git remote(synthetic で既存 dir を使う場合は省略可)。
+ * all_visible があれば列挙分と和集合にする(repos: 側が優先・ADR-0036 D1)。
  */
 export const reposConfigSchema = z
   .object({
     repos: z
       .array(z.object({ repo: z.string(), dir: z.string(), url: z.string().optional() }))
       .default([]),
+    all_visible: allVisibleConfigSchema.nullable().default(null),
   })
-  .default({ repos: [] });
+  .default({ repos: [], all_visible: null });
 export type ReposConfig = z.infer<typeof reposConfigSchema>;
 
 /**

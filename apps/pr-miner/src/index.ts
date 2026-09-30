@@ -36,6 +36,7 @@ function nullGhClient(): GhClient {
     listPullRequestComments: async () => fail(),
     listPullRequestFiles: async () => fail(),
     listCommits: async () => fail(),
+    listOrgRepos: async () => fail(),
   };
 }
 

@@ -23,6 +23,7 @@ export {
   type MergedPrSummary,
   type MergePrOptions,
   type OctokitLike,
+  type OrgRepo,
   type PrCommentItem,
   type PrDetail,
   type PrFileSummary,

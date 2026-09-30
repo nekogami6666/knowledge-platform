@@ -28,6 +28,43 @@ describe("loadRepos", () => {
     );
     expect(c.repos).toEqual([{ repo: "org/minutes", dir: "minutes", url: "https://x/y.git" }]);
   });
+
+  it("all_visible が無ければ null(既存 repos.yaml は従来どおり・ADR-0036 D1 既定 OFF)", async () => {
+    expect((await loadRepos(reader({}))).all_visible).toBeNull();
+    const c = await loadRepos(
+      reader({ "repos.yaml": "repos:\n  - repo: org/minutes\n    dir: minutes" }),
+    );
+    expect(c).toEqual({ repos: [{ repo: "org/minutes", dir: "minutes" }], all_visible: null });
+  });
+
+  it("all_visible をパースする(exclude / sync_on_ask は既定 [])", async () => {
+    const full = await loadRepos(
+      reader({
+        "repos.yaml": [
+          "all_visible:",
+          "  org: org",
+          "  exclude: [secret-repo, org/other-secret]",
+          "  sync_on_ask: [knowledge-base, '*-minutes']",
+        ].join("\n"),
+      }),
+    );
+    expect(full.repos).toEqual([]);
+    expect(full.all_visible).toEqual({
+      org: "org",
+      exclude: ["secret-repo", "org/other-secret"],
+      sync_on_ask: ["knowledge-base", "*-minutes"],
+    });
+    const minimal = await loadRepos(reader({ "repos.yaml": "all_visible:\n  org: org" }));
+    expect(minimal.all_visible).toEqual({ org: "org", exclude: [], sync_on_ask: [] });
+  });
+
+  it("all_visible: null の明示は OFF・org 欠落/空は拒否", async () => {
+    expect((await loadRepos(reader({ "repos.yaml": "all_visible: null" }))).all_visible).toBeNull();
+    await expect(
+      loadRepos(reader({ "repos.yaml": "all_visible:\n  exclude: [x]" })),
+    ).rejects.toThrow();
+    await expect(loadRepos(reader({ "repos.yaml": 'all_visible:\n  org: ""' }))).rejects.toThrow();
+  });
 });
 
 describe("loadChannels", () => {

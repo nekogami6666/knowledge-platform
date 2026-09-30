@@ -8,3 +8,17 @@ repos:
   - repo: org/knowledge-base
     dir: knowledge-base
     url: https://github.com/org/knowledge-base.git
+
+# org 可視リポの自動列挙(ADR-0036。既定 OFF = このブロック自体を書かない)。
+# GIT_CLONE_TOKEN で見える org のリポを列挙し、アーカイブ・フォーク・exclude を除いて上の repos: と
+# 和集合にする(repos: 側の指定が優先。exclude は列挙分にだけ効き、repos: の手動指定は外さない)。
+# exclude: リポ名 or "org/name"(大小無視の完全一致)。機密リポは clone しないことで読み取り面から外す。
+# sync_on_ask: /ask のたびに最新化するリポ名(`*` の簡易 glob 可)。それ以外は定期同期のみ。
+# all_visible:
+#   org: org
+#   exclude:
+#     - secret-repo
+#     - org/another-secret-repo
+#   sync_on_ask:
+#     - knowledge-base
+#     - "*-minutes"
