@@ -199,6 +199,9 @@ Claude on AWS 4 変数 / DISCORD_OPS_WEBHOOK は全て stratum.env に既存)。
   `docker compose build --no-cache` を試し、ログを添えて相談。
 - **回答が来ない / 認証エラー**: env の鍵を確認。`ANTHROPIC_AWS_API_KEY` が AEAA…(~131字)であること
   (MT…/72字なら Discord トークンの取り違え)。VM から `aws-external-anthropic.<region>.api.aws` に出られるか。
+  `401 The security token included in the request has expired` はキーの失効(2026-09 に発生)。再発行したキーを
+  クリップボードにコピーし、開発機で `./docs/deploy/set-anthropic-key.sh` を実行すると、疎通確認 → VM の env 更新 →
+  bot 作り直し → GitHub Actions の secret 更新までを一度に行う(キーが通らなければ何も変更しない)。
 - **zod 起因の実行時エラー**: agent-sdk は zod@^4 希望・repo は 3.25 固定(既知の peer 不整合。
   ADR-0016 記録)。まずこれを疑い、再現ログを issue へ。
 
