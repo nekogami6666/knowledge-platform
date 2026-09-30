@@ -26,7 +26,9 @@ import {
 } from "./ask.js";
 import { SerialQueue } from "./concurrency.js";
 import { type BotStore, createMemoryStore } from "./db.js";
-import type { RepoSpec, RepoSyncer, SyncedRepo } from "./repos.js";
+import { createRepoRegistry, type RepoRegistry } from "./repo-registry.js";
+import type { ScopedRepo } from "./repo-scope.js";
+import type { RepoSyncer, SyncedRepo } from "./repos.js";
 
 const synced: SyncedRepo[] = [
   { repo: "org/minutes", absDir: "/clones/minutes", resolvedCommit: "sha-min" },
@@ -220,9 +222,19 @@ owner: yamada
 // --- synthetic 統合テスト(修正5: /ask パイプライン end-to-end・全SDKモック) ---
 
 function fakeSyncer(): RepoSyncer {
-  return { sync: async () => synced };
+  return {
+    sync: async () => synced,
+    syncEach: async () => {
+      throw new Error("従来モードでは syncEach を呼ばない");
+    },
+    resolveHead: async () => {
+      throw new Error("従来モードでは resolveHead を呼ばない");
+    },
+  };
 }
-const repos: RepoSpec[] = [{ repo: "org/minutes", dir: "minutes" }];
+const repos: ScopedRepo[] = [
+  { repo: "org/minutes", dir: "minutes", syncOnAsk: true, managed: false },
+];
 const promptStore: PromptStore = {
   read: async () => "---\nrole: standard\n---\nQ&A システムプロンプト本文",
 };
@@ -235,7 +247,7 @@ function counterId(): () => string {
 function makeDeps(over: Partial<AskDeps> = {}): { deps: AskDeps; store: BotStore } {
   const store = createMemoryStore();
   const deps: AskDeps = {
-    repos,
+    getRepos: () => repos,
     syncer: fakeSyncer(),
     promptStore,
     store,
@@ -566,6 +578,233 @@ describe("handleAskRequest synthetic 統合(§6.2 受け入れ条件)", () => {
     expect(results).toHaveLength(3);
     expect(results.every((r) => r.queryId !== "")).toBe(true);
     expect(store.listQueries()).toHaveLength(3);
+  });
+});
+
+// --- all_visible 有効時のリポ単位同期(ADR-0036 D5) ---
+
+describe("handleAskRequest リポ単位同期(ADR-0036 D5)", () => {
+  const kb: ScopedRepo = {
+    repo: "org/knowledge-base",
+    dir: "knowledge-base",
+    syncOnAsk: true,
+    managed: false,
+  };
+  const minutes: ScopedRepo = {
+    repo: "org/biz-minutes",
+    dir: "biz-minutes",
+    syncOnAsk: true,
+    managed: true,
+  };
+  const code: ScopedRepo = { repo: "org/app", dir: "app", syncOnAsk: false, managed: true };
+  const fresh: ScopedRepo = { repo: "org/new", dir: "new", syncOnAsk: false, managed: true };
+  const sr = (r: ScopedRepo, sha: string): SyncedRepo => ({
+    repo: r.repo,
+    absDir: `/clones/${r.dir}`,
+    resolvedCommit: sha,
+  });
+
+  interface Harness {
+    syncer: RepoSyncer;
+    syncedSpecs: string[];
+    headCalls: string[];
+  }
+  /**
+   * fail: 同期に失敗させる repo。heads: resolveHead の結果(無ければ null = clone 無し)。
+   * empty: 空リポとして返す repo。
+   */
+  function harness(
+    fail: string[] = [],
+    heads: Record<string, string> = {},
+    empty: string[] = [],
+  ): Harness {
+    const h: Harness = {
+      syncedSpecs: [],
+      headCalls: [],
+      syncer: {
+        sync: async () => {
+          throw new Error("リポ単位モードでは sync を呼ばない");
+        },
+        syncEach: async (specs) =>
+          specs.map((spec) => {
+            h.syncedSpecs.push(spec.repo);
+            if (empty.includes(spec.repo)) return { status: "empty" as const, spec };
+            return fail.includes(spec.repo)
+              ? { status: "failed" as const, spec, error: new Error(`fetch failed ${spec.repo}`) }
+              : {
+                  status: "synced" as const,
+                  spec,
+                  synced: sr(spec as ScopedRepo, `new-${spec.dir}`),
+                };
+          }),
+        resolveHead: async (spec) => {
+          h.headCalls.push(spec.repo);
+          const sha = heads[spec.repo];
+          return sha === undefined ? null : sr(spec as ScopedRepo, sha);
+        },
+      },
+    };
+    return h;
+  }
+
+  function perRepoDeps(
+    registry: RepoRegistry,
+    h: Harness,
+    answer: QaAnswer,
+    over: Partial<AskDeps> = {},
+  ): { deps: AskDeps; store: BotStore; prompts: string[]; warns: Record<string, unknown>[] } {
+    const prompts: string[] = [];
+    const warns: Record<string, unknown>[] = [];
+    const { deps, store } = makeDeps({
+      getRepos: () => registry.scope(),
+      syncer: h.syncer,
+      perRepo: { registry, kbDir: "knowledge-base" },
+      search: async (input) => {
+        prompts.push(input.systemPrompt);
+        return { value: answer, usage: { inputTokens: 1, outputTokens: 1 } };
+      },
+      logWarn: (data) => warns.push(data),
+      ...over,
+    });
+    return { deps, store, prompts, warns };
+  }
+
+  const citeCode: QaAnswer = {
+    answer: "実装はここです。",
+    citations: [{ kind: "github_file", repo: "org/app", path: "src/a.ts", lines: "L1" }],
+    notFound: false,
+  };
+
+  it("sync_on_ask のリポだけを同期し、今回同期しないリポへの引用は定期同期の SyncedRepo で検証を通す", async () => {
+    const registry = createRepoRegistry([kb, minutes, code]);
+    registry.recordSynced(sr(code, "periodic-sha"));
+    const h = harness();
+    const { deps } = perRepoDeps(registry, h, citeCode);
+    const res = await handleAskRequest(req, deps);
+    expect(h.syncedSpecs).toEqual(["org/knowledge-base", "org/biz-minutes"]);
+    expect(h.headCalls).toEqual([]); // 定期同期の記録があれば git を叩かない
+    expect(res.status).toBe("answered");
+    expect(res.answerText).toContain("https://github.com/org/app/blob/periodic-sha/src/a.ts#L1");
+    // 今回同期分は registry に反映される(次の /ask・定期同期と共有)。
+    expect(registry.lastSynced("org/biz-minutes")?.resolvedCommit).toBe("new-biz-minutes");
+  });
+
+  it("定期同期の記録が無いリポは rev-parse HEAD(resolveHead)で解決して引用を通す", async () => {
+    const registry = createRepoRegistry([kb, code]);
+    const h = harness([], { "org/app": "head-sha" });
+    const { deps } = perRepoDeps(registry, h, citeCode);
+    const res = await handleAskRequest(req, deps);
+    expect(h.headCalls).toEqual(["org/app"]);
+    expect(res.status).toBe("answered");
+    expect(res.answerText).toContain("/org/app/blob/head-sha/src/a.ts");
+    expect(registry.lastSynced("org/app")?.resolvedCommit).toBe("head-sha");
+  });
+
+  it("clone の無いリポ(初回 clone 前)は manifest に載せず、その引用は破棄する", async () => {
+    const registry = createRepoRegistry([kb, code, fresh]);
+    registry.recordSynced(sr(code, "periodic-sha"));
+    const h = harness(); // org/new の resolveHead は null
+    const { deps, prompts } = perRepoDeps(registry, h, {
+      answer: "新リポにあります。",
+      citations: [{ kind: "github_file", repo: "org/new", path: "README.md" }],
+      notFound: false,
+    });
+    const res = await handleAskRequest(req, deps);
+    expect(prompts[0]).toContain("org/app → サブディレクトリ `app/`");
+    expect(prompts[0]).not.toContain("org/new");
+    expect(res.status).toBe("unanswered");
+  });
+
+  it("KB 以外の同期失敗は warn して clone の現状で検索を続ける(/ask 全体は止めない)", async () => {
+    const registry = createRepoRegistry([kb, minutes]);
+    const h = harness(["org/biz-minutes"], { "org/biz-minutes": "old-sha" });
+    const { deps, warns } = perRepoDeps(registry, h, {
+      answer: "議事録にあります。",
+      citations: [{ kind: "github_file", repo: "org/biz-minutes", path: "2026/x.md" }],
+      notFound: false,
+    });
+    const res = await handleAskRequest(req, deps);
+    expect(res.status).toBe("answered");
+    expect(res.answerText).toContain("/org/biz-minutes/blob/old-sha/2026/x.md");
+    expect(warns).toHaveLength(1);
+    expect(warns[0]?.repo).toBe("org/biz-minutes");
+    expect(registry.lastError("org/biz-minutes")).toContain("fetch failed");
+  });
+
+  it("同期に失敗し clone も無いリポは今回の対象から外す", async () => {
+    const registry = createRepoRegistry([kb, minutes]);
+    const h = harness(["org/biz-minutes"]);
+    const { deps, prompts } = perRepoDeps(registry, h, {
+      answer: "x",
+      citations: [],
+      notFound: true,
+    });
+    const res = await handleAskRequest(req, deps);
+    expect(res.status).toBe("unanswered");
+    expect(prompts[0]).not.toContain("org/biz-minutes");
+    expect(prompts[0]).toContain("org/knowledge-base");
+  });
+
+  it("空リポ(commit 無し)は warn せず manifest・allowlist から外す。定期同期で空と分かったリポは git を叩かない", async () => {
+    const emptyMin: ScopedRepo = { ...minutes, repo: "org/sales-minutes", dir: "sales-minutes" };
+    const emptyCode: ScopedRepo = {
+      ...code,
+      repo: "org/sales-management",
+      dir: "sales-management",
+    };
+    const registry = createRepoRegistry([kb, emptyMin, emptyCode]);
+    registry.recordEmpty("org/sales-management"); // 定期同期の結果
+    const h = harness([], {}, ["org/sales-minutes"]);
+    const { deps, prompts, warns } = perRepoDeps(registry, h, {
+      answer: "x",
+      citations: [{ kind: "github_file", repo: "org/sales-minutes", path: "README.md" }],
+      notFound: false,
+    });
+    const res = await handleAskRequest(req, deps);
+    expect(res.status).toBe("unanswered"); // 空リポへの引用は allowlist 外
+    // リポ単位の同期失敗 warn は出さない(出るのは「全 citation が破棄」の診断 warn のみ)。
+    expect(warns.some((w) => w.repo !== undefined)).toBe(false);
+    expect(h.headCalls).toEqual([]);
+    expect(prompts[0]).not.toContain("org/sales-minutes");
+    expect(prompts[0]).not.toContain("org/sales-management");
+    expect(registry.isEmpty("org/sales-minutes")).toBe(true);
+  });
+
+  it("manifest には検索範囲(ScopedRepo)の description がそのまま載る(ADR-0036 D6)", async () => {
+    const described: ScopedRepo = { ...code, description: "勤怠管理システムの実装" };
+    const registry = createRepoRegistry([kb, described]);
+    registry.recordSynced(sr(code, "periodic-sha"));
+    const { deps, prompts } = perRepoDeps(registry, harness(), {
+      answer: "x",
+      citations: [],
+      notFound: true,
+    });
+    await handleAskRequest(req, deps);
+    expect(prompts[0]).toContain("org/app → サブディレクトリ `app/` — 勤怠管理システムの実装");
+  });
+
+  it("KB の同期失敗は従来どおり /ask 全体のエラー", async () => {
+    const registry = createRepoRegistry([kb, minutes]);
+    const h = harness(["org/knowledge-base"], { "org/knowledge-base": "old" });
+    const { deps, store } = perRepoDeps(registry, h, citeCode);
+    const res = await handleAskRequest(req, deps);
+    expect(res.status).toBe("error");
+    expect(store.getQuery(res.queryId)?.answerStatus).toBe("error");
+  });
+
+  it("検索範囲は /ask のたびに getter で読む(定期同期での差し替えが次の /ask に効く)", async () => {
+    const registry = createRepoRegistry([kb]);
+    const h = harness([], { "org/app": "h1" });
+    const { deps, prompts } = perRepoDeps(registry, h, {
+      answer: "x",
+      citations: [],
+      notFound: true,
+    });
+    await handleAskRequest(req, deps);
+    registry.setScope([kb, code]);
+    await handleAskRequest(req, deps);
+    expect(prompts[0]).not.toContain("org/app");
+    expect(prompts[1]).toContain("org/app → サブディレクトリ `app/`");
   });
 });
 

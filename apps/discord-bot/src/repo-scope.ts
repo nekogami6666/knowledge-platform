@@ -16,8 +16,7 @@ import type { RepoSpec } from "./repos.js";
 
 /** 検索範囲に入った1リポ(RepoSpec + 同期方針・由来)。 */
 export interface ScopedRepo extends RepoSpec {
-  /** GitHub の description(manifest 用。無ければ省略)。 */
-  description?: string;
+  // description(GitHub の説明・manifest 用)は RepoSpec 側に持つ(ADR-0036 D6)。
   /** true = /ask のたびに同期、false = 定期のバックグラウンド同期のみ(D5)。 */
   syncOnAsk: boolean;
   /** true = all_visible の列挙由来(対象外になれば clone 削除の対象・D4)、false = repos: の手動指定。 */

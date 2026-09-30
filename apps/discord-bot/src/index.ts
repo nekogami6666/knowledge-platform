@@ -18,6 +18,7 @@ import { withCloneToken } from "@stratum/shared";
 import { type Client, Events } from "discord.js";
 import { setNotifySecrets } from "./ack.js";
 import { type AskDeps, DEFAULT_ASK_TIMEOUT_MS, handleAskRequest } from "./ask.js";
+import { SerialQueue } from "./concurrency.js";
 import { createFsConfigReader, loadChannels, loadOps, loadRepos, loadVoice } from "./config.js";
 import {
   type AskHandler,
@@ -42,6 +43,8 @@ import { loadInterviewTopics } from "./interview-topics.js";
 import { createLogger, withCorrelation } from "./logger.js";
 import { createCloneMembersLoader, DEFAULT_KB_DIR } from "./members.js";
 import { createQaSearch } from "./qa-search.js";
+import { createRepoRegistry } from "./repo-registry.js";
+import { resolveRepoScope } from "./repo-scope.js";
 import { createGitRepoSyncer } from "./repos.js";
 import { createSqliteStore } from "./sqlite-store.js";
 import { isoJst } from "./time.js";
@@ -87,6 +90,10 @@ async function main(): Promise<void> {
   // members 対応表は KB clone の _meta/members.yaml が唯一の正(ADR-0017 D3)。
   // clone 先 dir は repos.yaml の ops.kb_repo 該当エントリから引く(無ければ既定名)。
   const kbDir = repos.find((r) => r.repo === ops.kb_repo)?.dir ?? DEFAULT_KB_DIR;
+  // 検索範囲(ADR-0036)。all_visible の列挙・定期同期での差し替えは後続(3b-2)で配線する。
+  const registry = createRepoRegistry(
+    resolveRepoScope({ manual: repos, allVisible: null, visible: [] }).repos,
+  );
   const getMembers = createCloneMembersLoader({ clonesDir: env.CLONES_DIR, kbDir, logger });
 
   // 👍 代理マージ(§6.3): ops.yaml と GitHub 認証が両方揃ったときだけ有効(既定 OFF)。
@@ -129,6 +136,9 @@ async function main(): Promise<void> {
   const store = createSqliteStore(env.DB_PATH);
   const syncer = createGitRepoSyncer(env.CLONES_DIR);
   const promptStore = createFsPromptStore(env.PROMPTS_DIR);
+  // §6.2 /ask の直列キュー。鮮度確認の KB 書き込みも同じキューに載せ、検索中の reset --hard・
+  // 書き込み途中の同期を起こさない(ADR-0035 の既知レース・ADR-0036 D5)。
+  const queue = new SerialQueue();
 
   // §6.7(ADR-0019 D2/D3): 鮮度確認 DM への 👍✏️🗑 応答。👍/🗑 は main 直 commit のため
   // gh 認証 + ops.kb_repo(§6.3 と同じ唯一の書き込み先)が前提。無ければ機能 OFF。
@@ -142,6 +152,9 @@ async function main(): Promise<void> {
       kbRepo,
       // gh-client の既定と同じ(KB の base ブランチを変える場合はここも設定化する)。
       baseBranch: "main",
+      // KB clone を触る区間(sync → 書き込み → validate → commit)を /ask と直列化する。
+      // syncKbClone は区間の内側で呼ばれるためキューに積まない(積むとデッドロック)。
+      runExclusive: (task) => queue.enqueue(task),
       syncKbClone: async () => {
         const [synced] = await syncer.sync([kbSpec]);
         if (synced === undefined) throw new Error("KB clone の同期に失敗しました");
@@ -199,7 +212,8 @@ async function main(): Promise<void> {
 
   const onAsk: AskHandler = (question, ctx) => {
     const deps: AskDeps = {
-      repos,
+      // 検索範囲は毎回 registry から読む(ADR-0036)。
+      getRepos: () => registry.scope(),
       syncer,
       promptStore,
       store,
@@ -293,6 +307,7 @@ async function main(): Promise<void> {
 
   const bot = createBot({
     logger,
+    queue,
     channels,
     store,
     onAsk,

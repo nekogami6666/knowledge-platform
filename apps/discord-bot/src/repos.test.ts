@@ -156,6 +156,69 @@ describe("createGitRepoSyncer(トークン非永続化・ADR-0013 D1(b) と同�
   });
 });
 
+describe("createGitRepoSyncer.syncEach / resolveHead(リポ単位・ADR-0036 D5)", () => {
+  const tmpDirs: string[] = [];
+  afterEach(async () => {
+    await Promise.all(tmpDirs.splice(0).map((d) => rm(d, { recursive: true, force: true })));
+  });
+  const makeClonesDir = async (): Promise<string> => {
+    const d = await mkdtemp(join(tmpdir(), "bot-repos-each-"));
+    tmpDirs.push(d);
+    return d;
+  };
+
+  it("1 リポの失敗で後続を止めず、specs と同順にリポ単位の成否を返す(throw しない)", async () => {
+    const c = await makeClonesDir();
+    const specs: RepoSpec[] = [
+      { repo: "org/a", dir: "a", url: "https://github.com/org/a.git" },
+      { repo: "org/b", dir: "b", url: "https://github.com/org/b.git" },
+      { repo: "org/c", dir: "c", url: "https://github.com/org/c.git" },
+    ];
+    const exec: GitExec = async (args) => {
+      if (args[2] === "rev-parse" && args[3] === "--git-dir") return { stdout: ".git\n" };
+      if (args.includes("fetch") && args[1]?.endsWith("/b")) throw new Error("network down");
+      return { stdout: "sha\n" };
+    };
+    const results = await createGitRepoSyncer(c, exec).syncEach(specs);
+    expect(results.map((r) => [r.spec.repo, r.status])).toEqual([
+      ["org/a", "synced"],
+      ["org/b", "failed"],
+      ["org/c", "synced"],
+    ]);
+    const failed = results[1];
+    expect(failed?.status === "failed" && String(failed.error)).toContain("network down");
+  });
+
+  it("sync は従来どおり最初の失敗で throw する(all_visible 無しの挙動を変えない)", async () => {
+    const c = await makeClonesDir();
+    const exec: GitExec = async (args) => {
+      if (args.includes("fetch")) throw new Error("network down");
+      return { stdout: ".git\n" };
+    };
+    await expect(
+      createGitRepoSyncer(c, exec).sync([
+        { repo: "org/a", dir: "a", url: "https://github.com/org/a.git" },
+      ]),
+    ).rejects.toThrow("network down");
+  });
+
+  it("resolveHead は fetch せず rev-parse HEAD のみ。clone 無し・親リポの内側は null", async () => {
+    const c = await makeClonesDir();
+    const { exec, calls } = fakeExec(["a"]);
+    const syncer = createGitRepoSyncer(c, exec);
+    const a = await syncer.resolveHead({ repo: "org/a", dir: "a", url: "https://x/a.git" });
+    expect(a).toEqual({ repo: "org/a", absDir: join(c, "a"), resolvedCommit: "abc123" });
+    expect(calls.some((x) => x.includes("fetch") || x[0] === "clone")).toBe(false);
+    expect(await syncer.resolveHead({ repo: "org/b", dir: "b" })).toBeNull();
+
+    const nested: GitExec = async (args) =>
+      args[3] === "--git-dir" ? { stdout: "../.git\n" } : { stdout: "parent-sha\n" };
+    expect(
+      await createGitRepoSyncer(c, nested).resolveHead({ repo: "org/a", dir: "a" }),
+    ).toBeNull();
+  });
+});
+
 // 実 git 統合(§10.1): 「scrub 済み origin でも URL 引数 fetch で default branch 追従でき、
 // 未追跡残骸は clean で消え、tracked は温存される」を実 git の意味論で固定する。
 describe("createGitRepoSyncer 実 git 統合(scrub + URL 引数 fetch)", () => {
@@ -206,6 +269,94 @@ describe("createGitRepoSyncer 実 git 統合(scrub + URL 引数 fetch)", () => {
     expect(second?.resolvedCommit).not.toBe(first?.resolvedCommit);
     expect(await exists(join(kbDir, "litter.md"))).toBe(false);
     expect(await exists(join(kbDir, "tracked.md"))).toBe(true);
+  });
+
+  /** origin(bare)と seed(push 用)を作る。commit=false なら commit 無しの空リポのまま。 */
+  async function makeOrigin(
+    root: string,
+    commit: boolean,
+  ): Promise<{
+    url: string;
+    seedDir: string;
+    push: (file: string, body: string) => Promise<void>;
+  }> {
+    const originDir = join(root, "origin.git");
+    const seedDir = join(root, "seed");
+    await execFileAsync("git", ["init", "--bare", "-b", "main", originDir]);
+    await execFileAsync("git", ["clone", originDir, seedDir]);
+    await execFileAsync("git", ["-C", seedDir, "config", "user.email", "t@example.com"]);
+    await execFileAsync("git", ["-C", seedDir, "config", "user.name", "t"]);
+    const push = async (file: string, body: string): Promise<void> => {
+      await writeFile(join(seedDir, file), body);
+      await execFileAsync("git", ["-C", seedDir, "add", "-A"]);
+      await execFileAsync("git", ["-C", seedDir, "commit", "-m", file]);
+      await execFileAsync("git", ["-C", seedDir, "push", "origin", "main"]);
+    };
+    if (commit) await push("tracked.md", "v1\n");
+    return { url: `file://${originDir}`, seedDir, push };
+  }
+
+  // ADR-0037 × ADR-0036: 定期同期・/ask のリポ単位同期(syncEach)で作る clone も symlink を無害化する。
+  it("syncEach の新規 clone も core.symlinks=false で展開し、既存(未移行)clone も移行する", async () => {
+    const root = await mkdtemp(join(tmpdir(), "bot-repos-each-symlink-"));
+    tmpDirs.push(root);
+    const { url, seedDir } = await makeOrigin(root, true);
+    const outside = join(root, "outside-secret.txt");
+    await writeFile(outside, "SECRET\n");
+    await symlink(outside, join(seedDir, "leak"));
+    await execFileAsync("git", ["-C", seedDir, "add", "-A"]);
+    await execFileAsync("git", ["-C", seedDir, "commit", "-m", "leak"]);
+    await execFileAsync("git", ["-C", seedDir, "push", "origin", "main"]);
+    const clonesDir = join(root, "clones");
+    const syncer = createGitRepoSyncer(clonesDir);
+
+    const [fresh] = await syncer.syncEach([{ repo: "org/a", dir: "a", url }]);
+    expect(fresh?.status).toBe("synced");
+    expect((await lstat(join(clonesDir, "a", "leak"))).isSymbolicLink()).toBe(false);
+    const cfgA = await execFileAsync("git", [
+      "-C",
+      join(clonesDir, "a"),
+      "config",
+      "--get",
+      "core.symlinks",
+    ]);
+    expect(cfgA.stdout.trim()).toBe("false");
+
+    const legacy = join(clonesDir, "b");
+    await execFileAsync("git", ["clone", "--depth=1", url, legacy]);
+    expect((await lstat(join(legacy, "leak"))).isSymbolicLink()).toBe(true);
+    const [migrated] = await syncer.syncEach([{ repo: "org/b", dir: "b", url }]);
+    expect(migrated?.status).toBe("synced");
+    expect((await lstat(join(legacy, "leak"))).isSymbolicLink()).toBe(false);
+    const cfgB = await execFileAsync("git", ["-C", legacy, "config", "--get", "core.symlinks"]);
+    expect(cfgB.stdout.trim()).toBe("false");
+  });
+
+  // VM 実験(2026-09-30): commit の無い org リポは clone できるが HEAD が無く rev-parse HEAD が失敗する。
+  it("空リポは syncEach で empty(失敗にしない)。再同期も empty、commit が入れば synced になる", async () => {
+    const root = await mkdtemp(join(tmpdir(), "bot-repos-empty-"));
+    tmpDirs.push(root);
+    const { url, push } = await makeOrigin(root, false);
+    const clonesDir = join(root, "clones");
+    const syncer = createGitRepoSyncer(clonesDir);
+    const spec: RepoSpec = { repo: "org/empty", dir: "empty", url };
+
+    // 新規 clone(空)→ empty。clone 自体は残る(次回は既存 clone 経路)。
+    expect((await syncer.syncEach([spec]))[0]?.status).toBe("empty");
+    expect(await exists(join(clonesDir, "empty", ".git"))).toBe(true);
+    // 既存の空 clone: fetch(remote HEAD 不在で失敗する)をせず empty。
+    expect((await syncer.syncEach([spec]))[0]?.status).toBe("empty");
+    // resolveHead は null(/ask を壊さない)。
+    expect(await syncer.resolveHead(spec)).toBeNull();
+    // 従来の sync は空リポを失敗として throw(all_visible 無しの挙動は不変)。
+    await expect(syncer.sync([spec])).rejects.toThrow();
+
+    // origin に commit が入れば通常の fetch/reset で展開される。
+    await push("first.md", "hello\n");
+    const [after] = await syncer.syncEach([spec]);
+    expect(after?.status).toBe("synced");
+    expect(await readFile(join(clonesDir, "empty", "first.md"), "utf8")).toBe("hello\n");
+    expect((await syncer.resolveHead(spec))?.resolvedCommit).toHaveLength(40);
   });
 
   // ADR-0037: コミットされた cwd 外向き symlink(x -> /data/bot.db 型)を clone 側で無害化する。

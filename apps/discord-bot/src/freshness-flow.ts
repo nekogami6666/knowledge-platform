@@ -94,8 +94,18 @@ export interface FreshnessApplyDeps {
   kbRepo: string;
   /** commit / PR のベースブランチ(gh-client の既定と同じ "main")。 */
   baseBranch: string;
-  /** KB clone を最新化して絶対パスを返す(ローカル validateRepo 用・ADR-0019 D3)。 */
+  /**
+   * KB clone を最新化して絶対パスを返す(ローカル validateRepo 用・ADR-0019 D3)。
+   * runExclusive の内側でだけ呼ばれる。**自分でキューに積まないこと**(積むと実行中の自タスクの
+   * 完了を待ち続けるデッドロックになる)。
+   */
   syncKbClone(): Promise<string>;
+  /**
+   * KB clone を触る区間(sync → 読み → 書き込み → validate → commit)を /ask・定期同期と直列化する
+   * (ADR-0036 D5。ADR-0035 の既知レース: 検索中の reset --hard・書き込み途中の同期を防ぐ)。
+   * index.ts は /ask と同じ SerialQueue.enqueue を渡す。未指定ならそのまま実行する。
+   */
+  runExclusive?: <T>(task: () => Promise<T>) => Promise<T>;
   readFile(absPath: string): Promise<string>;
   writeFile(absPath: string, content: string): Promise<void>;
   validate(kbRoot: string): Promise<{ ok: boolean; problems: readonly unknown[] }>;
@@ -109,6 +119,16 @@ export interface FreshnessApplyDeps {
 
 /** リアクション 1 件を適用し、DM へ返す文言を返す(返信は呼び手のグルーが行う)。 */
 export async function applyFreshnessReaction(
+  kind: FreshnessKind,
+  actionId: string,
+  deps: FreshnessApplyDeps,
+): Promise<string> {
+  // 冪等判定(pending の読み)も区間に含める: 同じ DM への連打が並行に commit しない。
+  const run = deps.runExclusive ?? (<T>(task: () => Promise<T>) => task());
+  return run(() => applyExclusive(kind, actionId, deps));
+}
+
+async function applyExclusive(
   kind: FreshnessKind,
   actionId: string,
   deps: FreshnessApplyDeps,

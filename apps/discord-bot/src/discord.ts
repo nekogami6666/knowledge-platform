@@ -148,6 +148,11 @@ export interface BotDeps {
   /** 進捗更新の間隔 ms(既定 5000。テストで短縮)。 */
   progressIntervalMs?: number;
   /**
+   * /ask の直列キュー(§6.2)。index.ts が定期同期・鮮度確認の KB 書き込みと共有するために注入する
+   * (ADR-0036 D5)。未指定なら createBot 内で生成する。
+   */
+  queue?: SerialQueue;
+  /**
    * スラッシュコマンドの登録先ギルド(env DISCORD_GUILD_ID)。指定時はそのギルドへ即時反映、
    * 未指定はグローバル登録(全サーバーに反映されるが最大 1 時間かかる)。テストサーバーでは指定推奨。
    */
@@ -275,8 +280,8 @@ export const BOT_PARTIALS = [
 export function createBot(deps: BotDeps): Client {
   const client = new Client({ intents: [...BOT_INTENTS], partials: [...BOT_PARTIALS] });
   const onAsk = deps.onAsk ?? stubHandler;
-  // §6.2: /ask は直列処理(同時多発でもクラッシュしない)。
-  const queue = new SerialQueue();
+  // §6.2: /ask は直列処理(同時多発でもクラッシュしない)。定期同期・鮮度確認と共有(ADR-0036 D5)。
+  const queue = deps.queue ?? new SerialQueue();
 
   // 起動時に /ask を Discord へ登録する。guildId 指定ならそのギルドへ即時、未指定はグローバル
   // (反映に最大 1 時間)。登録失敗は致命ではないのでログのみで起動を続ける。

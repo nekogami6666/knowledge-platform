@@ -1,6 +1,7 @@
 import type { GhClient } from "@stratum/gh-client";
 import type { Logger } from "pino";
 import { describe, expect, it } from "vitest";
+import { SerialQueue } from "./concurrency.js";
 import { createMemoryStore, type PendingAction } from "./db.js";
 import { FRESHNESS_ACTION_TYPE } from "./freshness.js";
 import {
@@ -294,5 +295,62 @@ describe("drainFreshnessDms(DM 送信 worker)", () => {
     const deps = { logger, store, dm: async () => {} };
     await drainFreshnessDms(deps);
     expect(stateOf(store, "act-1")).toBe("done");
+  });
+});
+
+describe("applyFreshnessReaction の直列化(ADR-0036 D5: /ask・定期同期と同じ SerialQueue)", () => {
+  it("sync → 書き込み → commit の区間が 1 タスクとしてキューに載り、/ask と交互に割り込まない", async () => {
+    const queue = new SerialQueue();
+    const order: string[] = [];
+    const h = makeDeps({});
+    let releaseAsk: () => void = () => {};
+    // 先行の /ask(検索中)。これが終わるまで KB clone に触らないこと。
+    const ask = queue.enqueue(async () => {
+      order.push("ask:start");
+      await new Promise<void>((r) => {
+        releaseAsk = r;
+      });
+      order.push("ask:end");
+    });
+    const deps: FreshnessApplyDeps = {
+      ...h.deps,
+      runExclusive: (task) => queue.enqueue(task),
+      syncKbClone: async () => {
+        order.push("fresh:sync");
+        return "/kb";
+      },
+      writeFile: async (p, c) => {
+        order.push("fresh:write");
+        h.writes.set(p, c);
+      },
+    };
+    const applied = applyFreshnessReaction("verify", "act-1", deps);
+    // 後続の /ask(freshness の区間の後に並ぶ)。
+    const ask2 = queue.enqueue(async () => {
+      order.push("ask2");
+    });
+    await Promise.resolve();
+    expect(order).toEqual(["ask:start"]); // 検索中の /ask の間は sync も書き込みもしない
+    releaseAsk();
+    await Promise.all([ask, applied, ask2]);
+    expect(order).toEqual(["ask:start", "ask:end", "fresh:sync", "fresh:write", "ask2"]);
+    expect(h.commits).toHaveLength(1);
+  });
+
+  it("syncKbClone は区間の内側で直接呼ばれる(キューに二重に積まずデッドロックしない)", async () => {
+    const queue = new SerialQueue();
+    const h = makeDeps({});
+    let pendingDuringSync = -1;
+    const deps: FreshnessApplyDeps = {
+      ...h.deps,
+      runExclusive: (task) => queue.enqueue(task),
+      syncKbClone: async () => {
+        pendingDuringSync = queue.pending;
+        return "/kb";
+      },
+    };
+    await expect(applyFreshnessReaction("trash", "act-1", deps)).resolves.toContain("stale");
+    expect(pendingDuringSync).toBe(1); // 自タスクのみ
+    expect(queue.pending).toBe(0);
   });
 });

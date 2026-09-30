@@ -2,6 +2,8 @@
  * /ask オーケストレータ(design.md §6.2)。純関数寄りに保ち、依存は注入する(テスト容易性)。
  * フロー: RepoSyncer.sync → loadPrompt(qa/answer) → search(agentic) → citation 多層検証 →
  * permalink 化 → queries 記録 → notFound/出典全滅は pending_actions(question_queue)へ。
+ * all_visible 有効時(ADR-0036 D5)は sync_on_ask 分だけをリポ単位で同期し、それ以外は
+ * 定期同期の結果(RepoRegistry)を使う(syncForAskPerRepo)。
  *
  * QaCitation は **discord-bot 側の引用ドメイン**で、kb-core の Source(KB エントリの provenance)
  * とは別物(修正2)。kb-core は検証・permalink 変換の道具としてのみ再利用する(format.ts)。
@@ -21,6 +23,8 @@ import {
 import { z } from "zod";
 import type { AnswerStatus, BotStore } from "./db.js";
 import { formatAnswer } from "./format.js";
+import type { RepoRegistry } from "./repo-registry.js";
+import type { ScopedRepo } from "./repo-scope.js";
 import type { RepoSpec, RepoSyncer, SyncedRepo } from "./repos.js";
 
 // discord ドメイン検証は kb-core と同一の permalink 規律(§9.5)に揃える。
@@ -290,9 +294,25 @@ export interface AskRequest {
   correlationId: string;
 }
 
+/**
+ * リポ単位の同期(ADR-0036 D5)。all_visible 有効時だけ注入する。
+ * - registry: 検索範囲と最新の SyncedRepo(定期同期が更新する)。
+ * - kbDir: KB の clone 先 dir。KB の同期失敗だけは従来どおり /ask 全体のエラーにする。
+ */
+export interface PerRepoSyncDeps {
+  registry: RepoRegistry;
+  kbDir: string;
+}
+
 export interface AskDeps {
-  repos: readonly RepoSpec[];
+  /** 検索範囲(/ask のたびに読む getter。all_visible 有効時は定期同期で差し替わる・ADR-0036)。 */
+  getRepos: () => readonly ScopedRepo[];
   syncer: RepoSyncer;
+  /**
+   * 指定時はリポ単位の同期(ADR-0036 D5)。未指定 = 従来どおり全リポを /ask ごとに同期し、
+   * 1 リポでも失敗したら /ask 全体をエラーにする(all_visible が null の構成)。
+   */
+  perRepo?: PerRepoSyncDeps;
   promptStore: PromptStore;
   store: BotStore;
   /** 検索対象 clone ルート(Agent SDK の cwd)。 */
@@ -351,6 +371,81 @@ export function timeoutMessage(timeoutMs: number): string {
   );
 }
 
+/**
+ * all_visible 有効時の /ask 用同期(ADR-0036 D5)。
+ * - sync_on_ask のリポだけをリポ単位で同期する。KB の失敗は throw(従来どおり /ask はエラー)、
+ *   それ以外の失敗は warn して clone の現状(前回同期の状態)で検索する。clone が無ければ対象外。
+ * - 今回同期しないリポは定期同期の SyncedRepo → 無ければ `rev-parse HEAD` で解決する。
+ *   引用の許可リストは「clone のある全対象リポ」から作る(今回同期分だけにするとコードのリポへの
+ *   引用がすべて破棄される)。
+ * 戻り: clone のあるリポ(manifest 用)と、その SyncedRepo(引用検証用)。同順。
+ */
+export async function syncForAskPerRepo(
+  deps: Pick<AskDeps, "getRepos" | "syncer" | "logWarn" | "logInfo">,
+  perRepo: PerRepoSyncDeps,
+): Promise<{ available: ScopedRepo[]; synced: SyncedRepo[] }> {
+  const { registry } = perRepo;
+  const scope = deps.getRepos();
+  const results = await deps.syncer.syncEach(scope.filter((r) => r.syncOnAsk));
+  const fresh = new Map<string, SyncedRepo>();
+  const failed = new Set<string>();
+  for (const r of results) {
+    if (r.status === "synced") {
+      registry.recordSynced(r.synced);
+      fresh.set(r.spec.repo, r.synced);
+      continue;
+    }
+    if (r.status === "empty") {
+      // commit の無い空リポ: 失敗ではない(warn しない)。manifest・allowlist から外すだけ。
+      registry.recordEmpty(r.spec.repo);
+      continue;
+    }
+    registry.recordError(r.spec.repo, r.error);
+    if (r.spec.dir === perRepo.kbDir) throw r.error; // KB は members・鮮度確認の正本。従来どおりエラー
+    failed.add(r.spec.repo);
+    deps.logWarn?.(
+      { repo: r.spec.repo, err: r.error },
+      "/ask: リポの同期に失敗しました(clone の現状で検索します・ADR-0036 D5)",
+    );
+  }
+  const head = async (spec: ScopedRepo): Promise<SyncedRepo | undefined> => {
+    try {
+      return (await deps.syncer.resolveHead(spec)) ?? undefined;
+    } catch {
+      return undefined;
+    }
+  };
+  const available: ScopedRepo[] = [];
+  const synced: SyncedRepo[] = [];
+  for (const spec of scope) {
+    if (registry.isEmpty(spec.repo)) continue; // 空リポ(引用できるファイルが無い)
+    let s = fresh.get(spec.repo);
+    if (s === undefined && failed.has(spec.repo)) {
+      // 失敗が fetch 後(reset/clean の途中)でも permalink が作業ツリーとズレないよう実 HEAD を使う。
+      s = await head(spec);
+    } else if (s === undefined) {
+      s = registry.lastSynced(spec.repo);
+      if (s === undefined) {
+        s = await head(spec);
+        if (s !== undefined) registry.recordSynced(s);
+      }
+    }
+    if (s === undefined) continue; // clone 未取得(初回 clone 待ち)・壊れた clone は対象外
+    available.push(spec);
+    synced.push(s);
+  }
+  deps.logInfo?.(
+    {
+      inScope: scope.length,
+      available: available.length,
+      syncedNow: fresh.size,
+      failed: failed.size,
+    },
+    "/ask: 検索範囲(ADR-0036)",
+  );
+  return { available, synced };
+}
+
 /** 既定の単調クロック(§6.2 step5 の所要時間計測)。壁時計でなく monotonic を使う。 */
 const defaultMonotonicMs = (): number => performance.now();
 
@@ -372,10 +467,19 @@ export async function handleAskRequest(req: AskRequest, deps: AskDeps): Promise<
   };
   try {
     deps.onProgress?.({ kind: "sync" });
-    const synced = await deps.syncer.sync(deps.repos);
+    let repos: readonly RepoSpec[];
+    let synced: SyncedRepo[];
+    if (deps.perRepo !== undefined) {
+      ({ available: repos, synced } = await syncForAskPerRepo(deps, deps.perRepo));
+    } else {
+      // 従来挙動(all_visible 無し): 全リポを同期し、1 リポでも失敗したら /ask 全体をエラーにする。
+      repos = deps.getRepos();
+      synced = await deps.syncer.sync(repos);
+    }
     const prompt = await loadPrompt("qa", "answer", deps.promptStore);
     // §6.2: repo 対応表を前置きし、モデルが正しい org/name で引用できるようにする(PR-6a)。
-    const manifest = buildRepoManifest(deps.repos);
+    // all_visible 有効時は clone のあるリポだけを載せる(ADR-0036)。
+    const manifest = buildRepoManifest(repos);
     const systemPrompt = manifest === "" ? prompt.body : `${manifest}\n${prompt.body}`;
     deps.onProgress?.({ kind: "search" });
     const { value, usage, numTurns, durationApiMs, deniedToolCalls, requestedModel, actualModel } =
