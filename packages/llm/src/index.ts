@@ -12,6 +12,7 @@ export {
   type AgentSearchOptions,
   type AgentSearchResult,
   type AgentThinking,
+  createContainmentHook,
   DEFAULT_ALLOWED_TOOLS,
   DEFAULT_DISALLOWED_TOOLS,
   type LlmDeps,
@@ -23,6 +24,12 @@ export { LlmError, type LlmErrorCode, RETRYABLE_LLM_CODES } from "./errors.js";
 // 全 AI 操作は Claude on AWS(Agent SDK)経由に統一(ADR-0009)。第一者直叩き(@anthropic-ai/sdk・
 // generateStructured)とプロバイダ抽象(resolveProvider/LlmProvider)は撤去済み。
 export { MODELS, type ModelRole, modelIdFor, STT_MODEL } from "./models.js";
+// --- 読み取り封じ込めガード(ADR-0037)---
+export {
+  type ContainmentDecision,
+  checkToolPathContainment,
+  resolveContainmentRoot,
+} from "./path-guard.js";
 // --- プロンプトローダ ---
 export {
   createFsPromptStore,

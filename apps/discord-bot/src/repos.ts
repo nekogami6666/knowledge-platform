@@ -11,6 +11,11 @@
  * bot は refspec 無し(remote HEAD = default branch 追従)、バッチは baseBranch 固定。共有クローンや
  * 将来の共有パッケージ統合(§2 方針・stripCredentials は 4 複製目)では差異に注意。
  *
+ * symlink の無害化(ADR-0037 多層防御): clone は `-c core.symlinks=false` で行い、既存 clone も同設定へ
+ * 移行する。git は symlink を「リンク先パスを本文に持つ通常ファイル」として展開するため、検索対象リポに
+ * コミットされた `x -> /data/bot.db` 型の symlink が agent の読み取り面で外部へ解決されない
+ * (本丸の封じ込めは packages/llm の realpath ガード。ここは clone 側のもう一層)。
+ *
  * `RepoSyncer` は注入可能な seam。テストは fake の git を渡し、本番は既定の execFile を使う
  * (CLAUDE.md §12.2: native/外部プロセス依存のグルーは統合テストで代替)。
  */
@@ -65,6 +70,8 @@ export interface RepoSyncer {
  * git による RepoSyncer。clonesDir 配下に各 repo を配置する。
  * - ディレクトリが無く url がある: `git clone --depth=1 <url>` → `git remote set-url origin <scrubbed>`
  * - 既存: `git fetch --depth=1 <url>`(default branch)→ `git reset --hard FETCH_HEAD` → `git clean -fd`
+ *   (reset は常に `-c core.symlinks=false`。未移行 clone は reset 前に index を空にして全ファイルを
+ *   書き直させ、展開済みの symlink も通常ファイルへ置換してから core.symlinks=false を永続化する)
  * 最後に `git rev-parse HEAD` で resolvedCommit を得る。fetch は url を引数で渡すため、origin に
  * トークンを残さずに private リポを更新できる(scrub 後も fetch が通る・VM 実証 2026-07-22)。
  * git 実行は注入 seam(既定は実 execFile)。
@@ -106,15 +113,41 @@ export function createGitRepoSyncer(
               "remote.origin.url",
               stripCredentials(spec.url),
             ]);
+            // ADR-0037: core.symlinks=false へ移行済みの clone か(未設定は exit 1 で throw)。
+            let symlinksDisabled: boolean;
+            try {
+              const v = await gitExec(["-C", absDir, "config", "--get", "core.symlinks"]);
+              symlinksDisabled = v.stdout.trim() === "false";
+            } catch {
+              symlinksDisabled = false;
+            }
             // url を引数で渡す(origin の保存 URL に依存しない=トークンを config に残さない)。
             // refspec 無しの fetch は remote HEAD(= default branch)を FETCH_HEAD に置く。
             await gitExec(["-C", absDir, "fetch", "--depth=1", spec.url]);
-            await gitExec(["-C", absDir, "reset", "--hard", "FETCH_HEAD"]);
+            if (!symlinksDisabled) {
+              // 展開済みの symlink は stat 一致のため reset では書き直されない。index を空にして
+              // reset --hard に全ファイルを再展開させる(移行時の 1 回だけ)。
+              await gitExec(["-C", absDir, "read-tree", "--empty"]);
+            }
+            await gitExec([
+              "-C",
+              absDir,
+              "-c",
+              "core.symlinks=false",
+              "reset",
+              "--hard",
+              "FETCH_HEAD",
+            ]);
             // reset --hard は未追跡ファイルを消さない。他プロセス(gap-tracker 等)の staging
             // 残骸が検索対象に混入し、未 commit ファイルへの permalink を生成しうるため clean する。
             await gitExec(["-C", absDir, "clean", "-fd"]);
+            // 再展開が成功してから永続化する(途中失敗なら次回 sync で移行をやり直す)。
+            if (!symlinksDisabled) {
+              await gitExec(["-C", absDir, "config", "core.symlinks", "false"]);
+            }
           } else {
-            await gitExec(["clone", "--depth=1", spec.url, absDir]);
+            // -c はクローン先の .git/config に永続化され、初回 checkout から symlink を通常ファイル化する。
+            await gitExec(["clone", "-c", "core.symlinks=false", "--depth=1", spec.url, absDir]);
             // clone は origin にトークン含み URL を書くため、即座にトークン無しへ差し替える(ADR-0013)。
             await gitExec([
               "-C",

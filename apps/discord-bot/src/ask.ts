@@ -316,7 +316,7 @@ export async function handleAskRequest(req: AskRequest, deps: AskDeps): Promise<
     const manifest = buildRepoManifest(deps.repos);
     const systemPrompt = manifest === "" ? prompt.body : `${manifest}\n${prompt.body}`;
     deps.onProgress?.({ kind: "search" });
-    const { value, usage, numTurns, durationApiMs } = await deps.search({
+    const { value, usage, numTurns, durationApiMs, deniedToolCalls } = await deps.search({
       systemPrompt,
       question: req.question,
       cwd: deps.clonesDir,
@@ -328,6 +328,8 @@ export async function handleAskRequest(req: AskRequest, deps: AskDeps): Promise<
         elapsedMs: Math.round(monoNow() - startedAt),
         numTurns: numTurns ?? null,
         durationApiMs: durationApiMs ?? null,
+        // ADR-0037: 拒否されたツール呼び出し数(cwd 外読み取りの試行等。0 超は注入の兆候として追跡)。
+        deniedToolCalls: deniedToolCalls ?? null,
         notFound: value.notFound,
         citations: value.citations.length,
         inputTokens: usage.inputTokens,

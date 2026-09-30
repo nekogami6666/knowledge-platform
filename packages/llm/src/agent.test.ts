@@ -4,6 +4,7 @@ import { z } from "zod";
 import {
   type AgentQueryFn,
   buildAgentEnv,
+  createContainmentHook,
   DEFAULT_ALLOWED_TOOLS,
   DEFAULT_DISALLOWED_TOOLS,
   runAgentSearch,
@@ -264,6 +265,129 @@ describe("runAgentSearch", () => {
     // §9.1 / ADR-0006: subprocess env を絞り込み、秘密は渡さない。
     expect(captured?.env).toBeDefined();
     expect(captured?.env && "DISCORD_TOKEN" in captured.env).toBe(false);
+    // ADR-0037: 基本ツール集合を allowedTools に絞り、読み取りを cwd 配下に閉じ込める 2 層を必ず渡す。
+    expect(captured?.tools).toEqual([...DEFAULT_ALLOWED_TOOLS]);
+    expect(captured?.settings).toEqual({
+      permissions: { blockReadsOutsideWorkingDirectories: true },
+    });
+    expect(captured?.hooks?.PreToolUse?.[0]?.hooks).toHaveLength(1);
+    // 到達範囲を広げうるオプションは未設定のまま(§9.5)。
+    expect(captured?.additionalDirectories).toBeUndefined();
+    expect(captured?.canUseTool).toBeUndefined();
+    expect(captured?.mcpServers).toBeUndefined();
+    expect(captured?.managedSettings).toBeUndefined();
+  });
+
+  it("ADR-0037: allowedTools:[](ツール無し単発)は tools:[] でファイル系ツールを基本集合から外す", async () => {
+    let captured: Options | undefined;
+    const queryFn: AgentQueryFn = ({ options }) => {
+      captured = options;
+      return (async function* () {
+        yield {
+          type: "result",
+          subtype: "success",
+          structured_output: { answer: "A", notFound: false },
+        };
+      })();
+    };
+    await runAgentSearch({ ...baseOpts, allowedTools: [] }, { queryFn });
+    expect(captured?.tools).toEqual([]);
+    expect(captured?.allowedTools).toEqual([]);
+  });
+
+  it("ADR-0037: result.permission_denials の件数を deniedToolCalls に転記する", async () => {
+    const res = await runAgentSearch(baseOpts, {
+      queryFn: streamOf({
+        type: "result",
+        subtype: "success",
+        structured_output: { answer: "A", notFound: false },
+        permission_denials: [{ tool_name: "Read" }, { tool_name: "Glob" }],
+      }),
+    });
+    expect(res.deniedToolCalls).toBe(2);
+    const res2 = await runAgentSearch(baseOpts, {
+      queryFn: streamOf({
+        type: "result",
+        subtype: "success",
+        structured_output: { answer: "A", notFound: false },
+      }),
+    });
+    expect("deniedToolCalls" in res2).toBe(false);
+  });
+
+  it("ADR-0037: 渡した hook は cwd 外の Read を deny し、cwd 内は判定を委ねる(allow を返さない)", async () => {
+    let captured: Options | undefined;
+    const queryFn: AgentQueryFn = ({ options }) => {
+      captured = options;
+      return (async function* () {
+        yield {
+          type: "result",
+          subtype: "success",
+          structured_output: { answer: "A", notFound: false },
+        };
+      })();
+    };
+    await runAgentSearch(baseOpts, { queryFn });
+    const hook = captured?.hooks?.PreToolUse?.[0]?.hooks[0];
+    expect(hook).toBeDefined();
+    if (hook === undefined) return;
+    const signal = new AbortController().signal;
+    const pre = (tool_name: string, tool_input: unknown) =>
+      hook(
+        {
+          hook_event_name: "PreToolUse",
+          tool_name,
+          tool_input,
+          tool_use_id: "t1",
+          session_id: "s",
+          transcript_path: "/dev/null",
+          cwd: baseOpts.cwd,
+        } as Parameters<typeof hook>[0],
+        "t1",
+        { signal },
+      );
+    await expect(pre("Read", { file_path: "/config/ops.yaml" })).resolves.toMatchObject({
+      hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny" },
+    });
+    await expect(pre("Read", { file_path: `${baseOpts.cwd}/repo/a.md` })).resolves.toEqual({});
+    await expect(pre("StructuredOutput", { answer: "A" })).resolves.toEqual({});
+  });
+});
+
+describe("createContainmentHook(ADR-0037)", () => {
+  const signal = new AbortController().signal;
+  const input = (tool_name: string, tool_input: unknown) =>
+    ({
+      hook_event_name: "PreToolUse",
+      tool_name,
+      tool_input,
+      tool_use_id: "t1",
+      session_id: "s",
+      transcript_path: "/dev/null",
+      cwd: "/clones",
+    }) as Parameters<ReturnType<typeof createContainmentHook>>[0];
+
+  it("realpath の想定外失敗(code 無しの例外)は deny(fail-closed)", async () => {
+    let calls = 0;
+    const flaky = (p: string): string => {
+      calls += 1;
+      if (calls === 1) return p; // root 解決は成功
+      throw new Error("boom"); // code 無し = 想定外
+    };
+    const hook = createContainmentHook("/clones", flaky);
+    await expect(
+      hook(input("Read", { file_path: "/clones/a.md" }), "t1", { signal }),
+    ).resolves.toMatchObject({
+      hookSpecificOutput: { permissionDecision: "deny" },
+    });
+  });
+
+  it("PreToolUse 以外のイベントには何も返さない", async () => {
+    const hook = createContainmentHook("/clones", (p) => p);
+    const ev = { ...input("Read", {}), hook_event_name: "PostToolUse" } as unknown as Parameters<
+      typeof hook
+    >[0];
+    await expect(hook(ev, "t1", { signal })).resolves.toEqual({});
   });
 });
 

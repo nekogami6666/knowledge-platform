@@ -381,19 +381,25 @@ describe("handleAskRequest synthetic 統合(§6.2 受け入れ条件)", () => {
         usage: { inputTokens: 3, outputTokens: 4 },
         numTurns: 9,
         durationApiMs: 41_000,
+        deniedToolCalls: 2,
       }),
       monotonicMs: () => (t += 1000),
       logInfo: (data) => infos.push(data),
     });
     await handleAskRequest(req, deps);
     expect(infos).toHaveLength(1);
-    expect(infos[0]).toMatchObject({ numTurns: 9, durationApiMs: 41_000, notFound: true });
+    expect(infos[0]).toMatchObject({
+      numTurns: 9,
+      durationApiMs: 41_000,
+      deniedToolCalls: 2, // ADR-0037: 拒否数も観測する
+      notFound: true,
+    });
     expect(infos[0]?.elapsedMs).toBe(1000);
     // 無ければ null(欠損と 0 を区別する)。
     const infos2: Record<string, unknown>[] = [];
     const { deps: deps2 } = makeDeps({ logInfo: (data) => infos2.push(data) });
     await handleAskRequest(req, deps2);
-    expect(infos2[0]).toMatchObject({ numTurns: null, durationApiMs: null });
+    expect(infos2[0]).toMatchObject({ numTurns: null, durationApiMs: null, deniedToolCalls: null });
   });
 
   it("onProgress は sync → search → (検索側の tool_use) の順で届き、search 入力へ透過する(ADR-0035 D5)", async () => {

@@ -72,6 +72,15 @@ SDK の `settings`/`managedSettings` の `permissions.deny` で Read/Grep/Glob �
   ジェイル(landlock / bubblewrap / 別サンドボックス subprocess)は **host 選定(§14 #2)後の follow-up**。
 - status は **proposed のまま**(accepted は人間レビュー)。design.md §9.5 への転記も人間が行う。
 
+## 追記(2026-09-30・ADR-0037)
+
+本番コンテナで cwd 外(`/config/ops.yaml`)の Read が実証されたため、ADR-0037 で agent 内の読み取り
+封じ込めを追加した: deny のみを返す PreToolUse hook(realpath(cwd) 外を拒否)+ SDK の
+`blockReadsOutsideWorkingDirectories` + `tools` による基本ツール集合の限定 + bot clone の
+`core.symlinks=false`。これに伴い D2 の「hooks / canUseTool は未設定」は「allow を返す・入力を書き換える
+コールバックは未設定(deny のみの hook は可)」へ、D4 の SDK レベル deny の評価は ADR-0037 D2 で
+完了とする。D1(OS/コンテナ層の隔離)は引き続き本丸であり、agent の別 uid 実行等は ADR-0037 の将来課題。
+
 ## 却下した代替案
 
 - **cwd を境界として信頼する(現状の暗黙前提)** → SDK の実挙動と矛盾し漏洩経路が残るため却下。

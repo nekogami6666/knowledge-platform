@@ -10,18 +10,26 @@
  * - 結果は SDKResultSuccess.structured_output(型 unknown)に出るため、必ず zod で再検証する
  * - timeout 相当は AbortController(Options に timeout は無い)。usage は result メッセージから記録
  *
- * ⚠️ セキュリティ境界の重要注意(敵対的レビュー所見 / 封じ込め方式は別途 ADR で確定予定):
- *   `cwd` は FS の封じ込め境界ではない。Read/Grep/Glob は cwd 外の絶対パス(~/.ssh, /proc/self/environ,
- *   兄弟 clone 等)も読め、その内容を structured_output(回答本文)に載せて漏洩させうる。§9.5 の
- *   「文書内に指示が混入しても実行能力がない」前提は、Read 自体が読み取り能力であるため完全には成立しない。
- *   本番ではプロセスを OS/コンテナの FS サンドボックス(可視範囲を clones に限定)で動かすことが必須
- *   (Phase 1b デプロイ要件)。Phase 1a は synthetic データのみのため影響は限定的。
+ * ⚠️ セキュリティ境界(ADR-0006 / ADR-0037):
+ *   `cwd` は SDK 上は FS の封じ込め境界ではない。素の `allowedTools:["Read",...]` は cwd 外の絶対パス・
+ *   `../`・cwd 内から外を指す symlink もプロンプトなしで読ませる(本番 2026-09-30 に /config/ops.yaml の
+ *   読み取りを実証)。そこで読み取り範囲を realpath(cwd) 配下に閉じ込める層を重ねる(ADR-0037):
+ *   1. PreToolUse hook(自前コード・path-guard.ts): ファイル系ツールの対象 realpath が root 外なら **deny のみ**
+ *   2. `settings.permissions.blockReadsOutsideWorkingDirectories: true`(SDK 側の強制。symlink も解決する)
+ *   3. `tools` = allowedTools(基本ツール集合自体を絞る。ツール無し単発は StructuredOutput のみになる)
+ *   これらはコンテナ層の隔離(別 uid 実行等・ADR-0006 D1)を置き換えるものではなく、その内側の多層防御。
  */
-import { type Options, query, type ThinkingConfig } from "@anthropic-ai/claude-agent-sdk";
+import {
+  type HookCallback,
+  type Options,
+  query,
+  type ThinkingConfig,
+} from "@anthropic-ai/claude-agent-sdk";
 import type { z } from "zod";
 import { zodToJsonSchema } from "zod-to-json-schema";
 import { LlmError, type LlmErrorCode } from "./errors.js";
 import { type ModelRole, modelIdFor } from "./models.js";
+import { checkToolPathContainment, type RealpathFn, resolveContainmentRoot } from "./path-guard.js";
 import { nullUsageRecorder, type Usage, type UsageRecorder } from "./usage.js";
 
 /** §9.5: Q&A エージェントの許可ツール(読み取り専用)。 */
@@ -139,6 +147,11 @@ export interface AgentSearchResult<T> {
   numTurns?: number;
   /** モデル API 呼び出しの合計時間 ms(観測用・ADR-0035 D4)。 */
   durationApiMs?: number;
+  /**
+   * 拒否されたツール呼び出し数(result.permission_denials。封じ込め hook・dontAsk 拒否を含む)。
+   * 観測用(ADR-0037): 0 超は cwd 外読み取りの試行やツール誤用のシグナル。result に無ければ undefined。
+   */
+  deniedToolCalls?: number;
 }
 
 /** query() の最小シグネチャ。注入で Agent SDK をモック可能にする(kb-core の IO 注入と同趣旨)。 */
@@ -167,6 +180,7 @@ interface ResultMessage {
   usage?: { input_tokens?: number; output_tokens?: number };
   num_turns?: number;
   duration_api_ms?: number;
+  permission_denials?: unknown[];
 }
 
 /** Agent SDK の assistant メッセージ(tool_use ブロック抽出に必要な部分のみ)。 */
@@ -202,6 +216,34 @@ function isResultMessage(m: unknown): m is ResultMessage {
 }
 
 /**
+ * 読み取り封じ込めの PreToolUse hook を作る(ADR-0037)。root = realpath(cwd) を生成時に 1 回だけ解決し、
+ * ファイル系ツールの対象 realpath が root 外なら deny を返す。**allow は決して返さない**(判定を
+ * permission 系へ委ねる `{}` か deny のみ)ため、hook が能力を再導入することはない。
+ * 判定中の想定外例外はファイル系ツールに限り deny に倒す(fail-closed)。
+ */
+export function createContainmentHook(cwd: string, realpath?: RealpathFn): HookCallback {
+  const root = resolveContainmentRoot(cwd, realpath);
+  return async (input) => {
+    if (input.hook_event_name !== "PreToolUse") return {};
+    let reason: string | undefined;
+    try {
+      const d = checkToolPathContainment(input.tool_name, input.tool_input, root, realpath);
+      if (!d.allowed) reason = d.reason;
+    } catch {
+      reason = `${input.tool_name}: パス判定に失敗したため拒否しました`;
+    }
+    if (reason === undefined) return {};
+    return {
+      hookSpecificOutput: {
+        hookEventName: "PreToolUse",
+        permissionDecision: "deny",
+        permissionDecisionReason: reason,
+      },
+    };
+  };
+}
+
+/**
  * 質問に対して agentic search を実行し、構造化出力を zod 検証して返す。
  * 許可ツールは Read/Grep/Glob のみ、設定は読み込まない(§9.5)。usage は常に記録する。
  */
@@ -224,17 +266,25 @@ export async function runAgentSearch<T>(
   const abortController = new AbortController();
   const timer = setTimeout(() => abortController.abort(), timeoutMs);
 
-  // 封じ込めの主たる保証は permissionMode:"dontAsk"(未承認ツールはプロンプトせず拒否)+ allowedTools 許可リスト。
-  // disallowedTools は冗長な明示拒否。mcpServers / agents / hooks / canUseTool / toolAliases /
-  // additionalDirectories は能力を再導入しうるため意図的に未設定のまま維持する(§9.5)。
+  // ツール能力の封じ込め: permissionMode:"dontAsk"(未承認ツールはプロンプトせず拒否)+ allowedTools 許可リスト
+  // + tools で基本ツール集合自体を allowedTools に絞る(allowedTools:[] でも既定では cwd 配下の Read/Grep/Glob が
+  // 通るため・ADR-0037 実験)。disallowedTools は冗長な明示拒否。
+  // 読み取り範囲の封じ込め(ADR-0037): deny のみを返す PreToolUse hook + SDK の
+  // blockReadsOutsideWorkingDirectories。mcpServers / agents / canUseTool / toolAliases / additionalDirectories は
+  // 能力・到達範囲を広げうるため意図的に未設定のまま維持する(§9.5)。
   const options: Options = {
     systemPrompt: opts.systemPrompt,
     model: modelIdFor(opts.role),
     cwd: opts.cwd,
     permissionMode: "dontAsk",
     settingSources: [],
+    tools: [...allowedTools],
     allowedTools: [...allowedTools],
     disallowedTools: [...DEFAULT_DISALLOWED_TOOLS],
+    // flag 設定層(settingSources:[] でも適用される)。managedSettings は IT 管理設定がある環境で
+    // 既定で捨てられるため使わない(ADR-0037)。
+    settings: { permissions: { blockReadsOutsideWorkingDirectories: true } },
+    hooks: { PreToolUse: [{ hooks: [createContainmentHook(opts.cwd)] }] },
     // §9.1 / ADR-0006: subprocess env を最小許可リストに置換し、DISCORD_TOKEN 等を渡さない。
     env: buildAgentEnv(),
     outputFormat: { type: "json_schema", schema },
@@ -308,6 +358,9 @@ export async function runAgentSearch<T>(
     ...(typeof result.num_turns === "number" ? { numTurns: result.num_turns } : {}),
     ...(typeof result.duration_api_ms === "number"
       ? { durationApiMs: result.duration_api_ms }
+      : {}),
+    ...(Array.isArray(result.permission_denials)
+      ? { deniedToolCalls: result.permission_denials.length }
       : {}),
   };
 }
