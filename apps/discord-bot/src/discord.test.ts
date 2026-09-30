@@ -21,6 +21,7 @@ import type { ChannelGateInput, ChannelsConfig, OpsConfig } from "./config.js";
 import type { BotStore, QueryRecord } from "./db.js";
 import { createMemoryStore } from "./db.js";
 import {
+  ASK_ROLE_DENY_MESSAGE,
   askCommand,
   BOT_INTENTS,
   type BotDeps,
@@ -321,7 +322,7 @@ describe("parseGithubPrUrl", () => {
   });
 });
 
-const opsOn: OpsConfig = { channel_id: "OPS", kb_repo: "org/knowledge-base" };
+const opsOn: OpsConfig = { channel_id: "OPS", kb_repo: "org/knowledge-base", ask_role_ids: [] };
 
 describe("proxyMergeDecision (§6.3 のガード判定)", () => {
   const base = {
@@ -340,7 +341,9 @@ describe("proxyMergeDecision (§6.3 のガード判定)", () => {
     });
   });
   it("ops 未設定(null)は機能 OFF", () => {
-    expect(proxyMergeDecision({ ...base, ops: { channel_id: null, kb_repo: null } })).toEqual({
+    expect(
+      proxyMergeDecision({ ...base, ops: { channel_id: null, kb_repo: null, ask_role_ids: [] } }),
+    ).toEqual({
       merge: false,
       reason: "ops-config-off",
     });
@@ -1120,7 +1123,7 @@ describe("InteractionCreate /ask の分割配送結線(§6.2 / ADR-0034 ephemera
   }
   function fakeAskInteraction(
     question: string,
-    over: { inGuild?: boolean; userId?: string } = {},
+    over: { inGuild?: boolean; userId?: string; member?: unknown } = {},
   ): {
     interaction: Interaction;
     sends: Sent[];
@@ -1153,6 +1156,7 @@ describe("InteractionCreate /ask の分割配送結線(§6.2 / ADR-0034 ephemera
       channel: null,
       channelId: "111",
       appPermissions: { has: () => true },
+      member: over.member ?? null,
       user: { id: over.userId ?? "u1" },
       options: { getString: () => question },
       deferReply: async (o?: unknown) => {
@@ -1267,6 +1271,131 @@ describe("InteractionCreate /ask の分割配送結線(§6.2 / ADR-0034 ephemera
     expect(deferOptions()).toHaveLength(0);
     expect(sends).toHaveLength(0);
     await client.destroy();
+  });
+
+  describe("利用ロール(ops.ask_role_ids・ADR-0036 D7)", () => {
+    const opsWithRole = (...ask_role_ids: string[]): OpsConfig => ({
+      channel_id: null,
+      kb_repo: null,
+      ask_role_ids,
+    });
+    const answered = async () => ({
+      answerText: "回答",
+      status: "answered" as const,
+      queryId: "q",
+    });
+
+    it("ロールを持たないメンバーは ephemeral reply で拒否・defer も onAsk もしない", async () => {
+      const { logger } = fakeLogger();
+      const onAsk = vi.fn(answered);
+      const client = createBot({
+        logger,
+        channels: channels(),
+        store: createMemoryStore(),
+        ops: opsWithRole("555", "777"),
+        onAsk,
+      });
+      const { interaction, sends, replies, deferOptions } = fakeAskInteraction("質問", {
+        member: { roles: ["111"] },
+      });
+      client.emit(Events.InteractionCreate, interaction);
+      await vi.waitFor(() => expect(replies).toHaveLength(1));
+      expect(replies[0]).toEqual({ content: ASK_ROLE_DENY_MESSAGE, ephemeral: true });
+      expect(deferOptions()).toHaveLength(0);
+      expect(sends).toHaveLength(0);
+      expect(onAsk).not.toHaveBeenCalled();
+      await client.destroy();
+    });
+
+    it("ロールを持つメンバー(API 形 roles: string[])は通常どおり回答する", async () => {
+      const { logger } = fakeLogger();
+      const client = createBot({
+        logger,
+        channels: channels(),
+        store: createMemoryStore(),
+        ops: opsWithRole("555", "777"),
+        onAsk: answered,
+      });
+      const { interaction, sends, replies } = fakeAskInteraction("質問", {
+        member: { roles: ["111", "555"] },
+      });
+      client.emit(Events.InteractionCreate, interaction);
+      await vi.waitFor(() => expect(sends).toHaveLength(1));
+      expect(sends[0]?.content).toBe("回答");
+      expect(replies).toHaveLength(0);
+      await client.destroy();
+    });
+
+    it("キャッシュ済み GuildMember 形(roles.cache)でも判定できる", async () => {
+      const { logger } = fakeLogger();
+      const client = createBot({
+        logger,
+        channels: channels(),
+        store: createMemoryStore(),
+        ops: opsWithRole("555", "777"),
+        onAsk: answered,
+      });
+      const { interaction, sends } = fakeAskInteraction("質問", {
+        member: { roles: { cache: new Map([["555", {}]]) } },
+      });
+      client.emit(Events.InteractionCreate, interaction);
+      await vi.waitFor(() => expect(sends).toHaveLength(1));
+      await client.destroy();
+    });
+
+    it("メンバー情報が無い(判定不能)は拒否する(安全側)", async () => {
+      const { logger } = fakeLogger();
+      const client = createBot({
+        logger,
+        channels: channels(),
+        store: createMemoryStore(),
+        ops: opsWithRole("555", "777"),
+        onAsk: answered,
+      });
+      const { interaction, replies, deferOptions } = fakeAskInteraction("質問");
+      client.emit(Events.InteractionCreate, interaction);
+      await vi.waitFor(() => expect(replies).toHaveLength(1));
+      expect(replies[0]).toEqual({ content: ASK_ROLE_DENY_MESSAGE, ephemeral: true });
+      expect(deferOptions()).toHaveLength(0);
+      await client.destroy();
+    });
+
+    it("ask_role_ids が空ならメンバー情報が無くても従来どおり回答する", async () => {
+      const { logger } = fakeLogger();
+      const client = createBot({
+        logger,
+        channels: channels(),
+        store: createMemoryStore(),
+        ops: opsWithRole(),
+        onAsk: answered,
+      });
+      const { interaction, sends } = fakeAskInteraction("質問");
+      client.emit(Events.InteractionCreate, interaction);
+      await vi.waitFor(() => expect(sends).toHaveLength(1));
+      await client.destroy();
+    });
+
+    it("拒否はレート制限の予算を消費しない", async () => {
+      const { logger } = fakeLogger();
+      const store = createMemoryStore();
+      const client = createBot({
+        logger,
+        channels: channels(),
+        store,
+        ops: opsWithRole("555", "777"),
+        onAsk: answered,
+      });
+      for (let i = 0; i < 6; i += 1) {
+        const denied = fakeAskInteraction(`質問 ${i}`, { member: { roles: [] } });
+        client.emit(Events.InteractionCreate, denied.interaction);
+        await vi.waitFor(() => expect(denied.replies).toHaveLength(1));
+      }
+      const ok = fakeAskInteraction("質問", { member: { roles: ["555"] } });
+      client.emit(Events.InteractionCreate, ok.interaction);
+      await vi.waitFor(() => expect(ok.sends).toHaveLength(1));
+      expect(ok.replies).toHaveLength(0);
+      await client.destroy();
+    });
   });
 
   it("rate-limit 超過(user 6 回目)は ephemeral reply で拒否・defer しない", async () => {

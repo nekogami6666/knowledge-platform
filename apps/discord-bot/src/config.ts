@@ -55,8 +55,14 @@ export const opsConfigSchema = z
   .object({
     channel_id: z.string().nullable().default(null),
     kb_repo: z.string().nullable().default(null),
+    /**
+     * /ask を使えるメンバーのロール ID(ADR-0036 D7)。いずれか 1 つを持っていれば使える。
+     * 検索対象に private リポが入る一方、Discord には社外メンバーもいるため社内のチームロールに限定する。
+     * 空 = 全員が使える(従来どおり)。
+     */
+    ask_role_ids: z.array(z.string()).default([]),
   })
-  .default({ channel_id: null, kb_repo: null });
+  .default({ channel_id: null, kb_repo: null, ask_role_ids: [] });
 export type OpsConfig = z.infer<typeof opsConfigSchema>;
 
 /**
@@ -144,4 +150,18 @@ export function isChannelAllowed(config: ChannelsConfig, gate: ChannelGateInput)
   if (config.permanent_exclude.includes(gate.channelId)) return false;
   if (gate.parentId !== null && config.permanent_exclude.includes(gate.parentId)) return false;
   return gate.botCanView === true;
+}
+
+/**
+ * /ask の利用者ゲート(ADR-0036 D7)。askRoleIds が空なら全員を通す(従来どおり)。
+ * いずれか 1 つのロールを持っていれば通す。メンバーのロールが判定できない(memberRoleIds: null)
+ * 場合は拒否する(安全側)。
+ */
+export function isAskAllowedByRole(
+  askRoleIds: readonly string[],
+  memberRoleIds: readonly string[] | null,
+): boolean {
+  if (askRoleIds.length === 0) return true;
+  if (memberRoleIds === null) return false;
+  return askRoleIds.some((id) => memberRoleIds.includes(id));
 }

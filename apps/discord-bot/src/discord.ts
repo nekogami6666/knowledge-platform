@@ -44,6 +44,7 @@ import { SerialQueue } from "./concurrency.js";
 import {
   type ChannelGateInput,
   type ChannelsConfig,
+  isAskAllowedByRole,
   isChannelAllowed,
   type OpsConfig,
   type VoiceConfig,
@@ -66,7 +67,7 @@ import { startProgressReporter } from "./progress.js";
 import { aggregateStats, formatStatsMessage } from "./stats.js";
 import { isoJst } from "./time.js";
 import type { VcRecorderWatcher, VcSnapshot } from "./vc-recorder.js";
-import { gateInputFromInteraction } from "./visibility.js";
+import { gateInputFromInteraction, memberRoleIdsFromInteraction } from "./visibility.js";
 import { handleVoiceCorrection, handleVoiceMemo } from "./voice.js";
 
 /** /ask コマンド定義(登録は別途 REST で行う)。 */
@@ -196,6 +197,9 @@ export const DENY_MESSAGE = "このチャンネルでは利用できません(§
 export function denyReason(channels: ChannelsConfig, gate: ChannelGateInput): string | null {
   return isChannelAllowed(channels, gate) ? null : DENY_MESSAGE;
 }
+
+/** ADR-0036 D7: /ask を使えるロールを持たない人への応答(検索も記録もしない)。 */
+export const ASK_ROLE_DENY_MESSAGE = "このコマンドは社内メンバーのみ利用できます。";
 
 // レート制限(§6.2 直列+制御 / §13 専門家負荷)。固定 10 分バケットで user/channel 別にカウント。
 const RATE_WINDOW_MS = 10 * 60 * 1000;
@@ -549,6 +553,17 @@ async function handleAsk(
   const denied = denyReason(channels, gateInputFromInteraction(interaction));
   if (denied !== null) {
     await ackOrBail(() => interaction.reply({ content: denied, ephemeral: true }));
+    return;
+  }
+  // ADR-0036 D7: 検索対象に private リポが入るため、社内のチームロール(ops.ask_role_ids)に限定する。
+  // レート制限より前に判定し、対象外の人が予算を消費しないようにする。質問本文はログに残さない。
+  const askRoleIds = deps.ops?.ask_role_ids ?? [];
+  if (
+    askRoleIds.length > 0 &&
+    !isAskAllowedByRole(askRoleIds, memberRoleIdsFromInteraction(interaction))
+  ) {
+    logger.info({ userId: interaction.user.id }, "/ask: 利用ロールが無いため拒否しました");
+    await ackOrBail(() => interaction.reply({ content: ASK_ROLE_DENY_MESSAGE, ephemeral: true }));
     return;
   }
 

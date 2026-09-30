@@ -39,3 +39,16 @@ export function gateInputFromInteraction(
     botCanView: interaction.appPermissions.has(PermissionFlagsBits.ViewChannel),
   };
 }
+
+/**
+ * /ask 実行者のロール ID 一覧(ADR-0036 D7 の利用者ゲート用)。interaction.member は
+ * キャッシュ済みの GuildMember(roles.cache)か API 生の形(roles: string[])のどちらか。
+ * payload に同梱されるため GuildMembers intent は不要。取れない(DM 等)場合は null。
+ */
+export function memberRoleIdsFromInteraction(
+  interaction: ChatInputCommandInteraction,
+): string[] | null {
+  const member = interaction.member;
+  if (member === null) return null;
+  return Array.isArray(member.roles) ? [...member.roles] : [...member.roles.cache.keys()];
+}

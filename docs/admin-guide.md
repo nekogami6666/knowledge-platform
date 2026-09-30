@@ -51,7 +51,7 @@ CI(validate)が赤い PR は**マージしない**のが鉄則です(bot も non
 | ファイル | 何を決める | 主なキー |
 |---|---|---|
 | `voice.yaml` | 録音まわり | `vc_channel_id`(録音VC)/ `max_recording_minutes`(既定15・**22以下推奨**)/ `interview_panel_channel_id`(面談パネルの設置先)/ `interview_arm_ttl_minutes`(面談待機の期限・既定120分) |
-| `ops.yaml` | 承認まわり | `channel_id`(通知チャンネル)/ `kb_repo`(👍代理マージの対象リポ) |
+| `ops.yaml` | 承認まわり・利用者 | `channel_id`(通知チャンネル)/ `kb_repo`(👍代理マージの対象リポ)/ `ask_role_ids`(/ask を使えるロールの一覧。いずれかを持てば可・未設定なら全員・ADR-0036 D7) |
 | `repos.yaml` | /ask の検索対象 | 検索させるリポジトリの一覧(認証付きURL) |
 | `channels.yaml` | 読み取り除外 | `permanent_exclude`(bot に読ませないチャンネル) |
 

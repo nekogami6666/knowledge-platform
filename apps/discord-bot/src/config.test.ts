@@ -3,6 +3,7 @@ import {
   type ChannelGateInput,
   type ChannelsConfig,
   type ConfigReader,
+  isAskAllowedByRole,
   isChannelAllowed,
   loadChannels,
   loadOps,
@@ -77,18 +78,40 @@ describe("isChannelAllowed(ADR-0018: ロール可視性 + permanent_exclude)", (
 describe("loadOps (👍 代理マージ設定・§6.3)", () => {
   it("ファイルが無ければ両方 null(機能 OFF)", async () => {
     const ops = await loadOps(reader({}));
-    expect(ops).toEqual({ channel_id: null, kb_repo: null });
+    expect(ops).toEqual({ channel_id: null, kb_repo: null, ask_role_ids: [] });
   });
   it("ops.yaml の実値を読む", async () => {
     const ops = await loadOps(
       reader({ "ops.yaml": "channel_id: '123'\nkb_repo: org/knowledge-base" }),
     );
-    expect(ops).toEqual({ channel_id: "123", kb_repo: "org/knowledge-base" });
+    expect(ops).toEqual({ channel_id: "123", kb_repo: "org/knowledge-base", ask_role_ids: [] });
   });
   it("片方だけの設定も許す(有効化判定は呼び出し側)", async () => {
     const ops = await loadOps(reader({ "ops.yaml": "channel_id: '123'" }));
     expect(ops.channel_id).toBe("123");
     expect(ops.kb_repo).toBeNull();
+  });
+  it("ask_role_ids(/ask の利用ロール・ADR-0036 D7)を読む", async () => {
+    const ops = await loadOps(reader({ "ops.yaml": "ask_role_ids: ['555', '666']" }));
+    expect(ops.ask_role_ids).toEqual(["555", "666"]);
+  });
+});
+
+describe("isAskAllowedByRole(/ask の利用者ゲート・ADR-0036 D7)", () => {
+  it("ask_role_ids が空なら誰でも通す(従来どおり)", () => {
+    expect(isAskAllowedByRole([], [])).toBe(true);
+    expect(isAskAllowedByRole([], null)).toBe(true);
+  });
+  it("いずれか 1 つのロールを持つメンバーは通す", () => {
+    expect(isAskAllowedByRole(["555", "666"], ["111", "666"])).toBe(true);
+    expect(isAskAllowedByRole(["555"], ["111", "555"])).toBe(true);
+  });
+  it("どのロールも持たないメンバーは拒否する", () => {
+    expect(isAskAllowedByRole(["555", "666"], ["111"])).toBe(false);
+    expect(isAskAllowedByRole(["555"], [])).toBe(false);
+  });
+  it("ロールが判定できない(null)なら拒否する(安全側)", () => {
+    expect(isAskAllowedByRole(["555"], null)).toBe(false);
   });
 });
 

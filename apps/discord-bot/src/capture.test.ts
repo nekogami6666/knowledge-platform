@@ -368,7 +368,7 @@ function mkDeps(
     store,
     getMembers: async () => ({ members: [{ github: "yamada", discord: "U1" }] }),
     cwd: "/clones",
-    ops: { channel_id: "OPS", kb_repo: "org/knowledge-base" },
+    ops: { channel_id: "OPS", kb_repo: "org/knowledge-base", ask_role_ids: [] },
     gh,
     promptStore: fakePromptStore,
     triageSearch: triageYes,
@@ -445,7 +445,7 @@ describe("handleLightbulb (§6.4 ③-a)", () => {
     const { gh, list } = fakeGh();
     for (const over of [
       { gh: undefined },
-      { ops: { channel_id: "OPS", kb_repo: null } },
+      { ops: { channel_id: "OPS", kb_repo: null, ask_role_ids: [] } },
       { promptStore: undefined },
     ] as Partial<CaptureDeps>[]) {
       // 抑制(1日1回)を実際に数えるため memory store を使う。
