@@ -55,6 +55,8 @@ const envSchema = z
     CLONES_DIR: z.string().default("./.clones"),
     /** SQLite ファイルパス。 */
     DB_PATH: z.string().default("./data/bot.db"),
+    /** Discord 本文インデックスの SQLite(ADR-0038。bot.db とは別ファイル。discord-index.yaml が有効なときだけ作る)。 */
+    DISCORD_INDEX_DB_PATH: z.string().default("./data/discord-index.db"),
     /** channels.yaml / repos.yaml / ops.yaml / voice.yaml の置き場(members は KB の _meta/members.yaml・ADR-0017 D3)。 */
     CONFIG_DIR: z.string().default("./config"),
     /** プロンプト(prompts/<app>/<name>.md)のルート。リポジトリルートの prompts/。 */

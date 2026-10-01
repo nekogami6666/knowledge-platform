@@ -1,0 +1,12 @@
+# Discord 本文インデックス(ADR-0038)。discord-index.yaml にコピーして使う(gitignore 済み)。
+# /ask が Discord の直近の議論を検索できるよう、bot に見えるチャンネル(permanent_exclude を除く)の
+# 本文を別ファイル(env DISCORD_INDEX_DB_PATH・コンテナでは /data/discord-index.db)に保存する。
+# 質問者には、その人が Discord 上で閲覧できるチャンネルの本文だけが検索される。
+# 無効化 = enabled: false で再起動。ロールバック = さらに DB ファイル(と -wal / -shm)を削除。
+enabled: false
+backfill_days: 90 # カーソルが無いチャンネルの初回取り込み(extractor と同じ)
+retention_days: 180 # これより古い本文は削除(backfill_days 以上)
+reconcile_interval_hours: 6 # 停止中の編集・削除を反映する定期照合の周期
+reconcile_window_days: 7 # 定期照合で取り直す範囲
+max_results: 20 # discord_search 1 回で返す上限
+max_fetch_per_channel: 10000 # 1 周期でチャンネルあたりに取得する上限

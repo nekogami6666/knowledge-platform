@@ -6,6 +6,7 @@ import {
   isAskAllowedByRole,
   isChannelAllowed,
   loadChannels,
+  loadDiscordIndex,
   loadOps,
   loadRepos,
   loadVoice,
@@ -168,6 +169,42 @@ describe("loadVoice(voice-memo / VC 録音 / interview・ADR-0015 / 0020 / 0028)
     expect(voice.interview_arm_ttl_minutes).toBe(30);
     await expect(
       loadVoice(reader({ "voice.yaml": "interview_arm_ttl_minutes: 0" })),
+    ).rejects.toThrow();
+  });
+});
+
+describe("loadDiscordIndex(ADR-0038 D9)", () => {
+  it("ファイルが無ければ既定値(enabled: false = 機能 OFF)", async () => {
+    expect(await loadDiscordIndex(reader({}))).toEqual({
+      enabled: false,
+      backfill_days: 90,
+      retention_days: 180,
+      reconcile_interval_hours: 6,
+      reconcile_window_days: 7,
+      max_results: 20,
+      max_fetch_per_channel: 10_000,
+    });
+  });
+
+  it("部分指定は既定値で補う", async () => {
+    const c = await loadDiscordIndex(
+      reader({ "discord-index.yaml": "enabled: true\nretention_days: 120" }),
+    );
+    expect(c.enabled).toBe(true);
+    expect(c.retention_days).toBe(120);
+    expect(c.backfill_days).toBe(90);
+  });
+
+  it("保持期間が初回取り込みより短い・照合範囲が保持期間より長い設定は拒否する", async () => {
+    await expect(
+      loadDiscordIndex(reader({ "discord-index.yaml": "retention_days: 30" })),
+    ).rejects.toThrow();
+    await expect(
+      loadDiscordIndex(
+        reader({
+          "discord-index.yaml": "backfill_days: 7\nretention_days: 10\nreconcile_window_days: 11",
+        }),
+      ),
     ).rejects.toThrow();
   });
 });

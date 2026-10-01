@@ -35,7 +35,8 @@ COPY --from=build --chown=node:node /repo/prompts /app/prompts
 ENV PROMPTS_DIR=/app/prompts \
     CONFIG_DIR=/config \
     CLONES_DIR=/clones \
-    DB_PATH=/data/bot.db
+    DB_PATH=/data/bot.db \
+    DISCORD_INDEX_DB_PATH=/data/discord-index.db
 # 秘密(DISCORD_TOKEN / Claude on AWS の 4 変数 CLAUDE_CODE_USE_ANTHROPIC_AWS・ANTHROPIC_AWS_API_KEY・
 # ANTHROPIC_AWS_WORKSPACE_ID・AWS_REGION)は実行時 env で渡す。イメージにもレイヤにも焼かない(§9.1・ADR-0009)。
 USER node

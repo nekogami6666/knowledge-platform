@@ -33,7 +33,14 @@ import {
   safeErrorInfo,
 } from "./ask-lifecycle.js";
 import { SerialQueue } from "./concurrency.js";
-import { createFsConfigReader, loadChannels, loadOps, loadRepos, loadVoice } from "./config.js";
+import {
+  createFsConfigReader,
+  loadChannels,
+  loadDiscordIndex,
+  loadOps,
+  loadRepos,
+  loadVoice,
+} from "./config.js";
 import {
   type AskHandler,
   buildVcSnapshot,
@@ -41,6 +48,9 @@ import {
   createClientMessenger,
   warmDmChannels,
 } from "./discord.js";
+import { attachDiscordIndexListeners, createDiscordIndexSource } from "./discord-index-discord.js";
+import { createDiscordIndexStore, type DiscordIndexStore } from "./discord-index-store.js";
+import { createDiscordIndexSync } from "./discord-index-sync.js";
 import { parseEnv, parsePositiveIntEnv } from "./env.js";
 import { createFreshnessDmWorker, type FreshnessApplyDeps } from "./freshness-flow.js";
 import type { InterviewCommandDeps } from "./interview-commands.js";
@@ -100,6 +110,8 @@ async function main(): Promise<void> {
   );
   const ops = await loadOps(reader);
   const voice = await loadVoice(reader);
+  // ADR-0038: Discord 本文インデックス(既定 OFF。OFF なら DB を作らずイベントも購読しない)。
+  const discordIndexConfig = await loadDiscordIndex(reader);
 
   // members 対応表は KB clone の _meta/members.yaml が唯一の正(ADR-0017 D3)。
   // clone 先 dir は repos.yaml の ops.kb_repo 該当エントリから引く(無ければ既定名)。
@@ -129,6 +141,7 @@ async function main(): Promise<void> {
       repos: repos.length,
       proxyMerge: gh !== undefined,
       voiceMemo: voice.channel_id !== null,
+      discordIndex: discordIndexConfig.enabled,
     },
     "config loaded",
   );
@@ -167,6 +180,10 @@ async function main(): Promise<void> {
     ),
     log: lifecycleLog,
   });
+  // ADR-0038 D2: bot.db とは別ファイル。有効なときだけ開く。
+  const discordIndexStore: DiscordIndexStore | undefined = discordIndexConfig.enabled
+    ? createDiscordIndexStore(env.DISCORD_INDEX_DB_PATH)
+    : undefined;
   const syncer = createGitRepoSyncer(env.CLONES_DIR);
   const promptStore = createFsPromptStore(env.PROMPTS_DIR);
   // §6.2 /ask の直列キュー。鮮度確認の KB 書き込みも同じキューに載せ、検索中の reset --hard・
@@ -393,6 +410,48 @@ async function main(): Promise<void> {
     ...(panelDeps !== undefined ? { interviewPanel: panelDeps } : {}),
   });
   clientForPanel = bot;
+  // ADR-0038 D3: Discord 本文インデックスの同期(イベント + 起動時の取り込み + 定期照合)。
+  // 定期照合のタイマーは正常終了(ADR-0035 追記)で止めるため保持する。
+  let discordIndexTimer: ReturnType<typeof setInterval> | undefined;
+  if (discordIndexStore !== undefined) {
+    const indexLogger = logger.child({ component: "discord-index" });
+    const indexSync = createDiscordIndexSync({
+      store: discordIndexStore,
+      source: createDiscordIndexSource(bot),
+      channels,
+      config: discordIndexConfig,
+      logger: {
+        info: (data, msg) => indexLogger.info(data, msg),
+        warn: (data, msg) => indexLogger.warn(data, msg),
+      },
+    });
+    attachDiscordIndexListeners(bot, indexSync, {
+      info: (data, msg) => indexLogger.info(data, msg),
+      warn: (data, msg) => indexLogger.warn(data, msg),
+    });
+    const runCycle = (): void => {
+      void indexSync.runCycle().catch((err: unknown) => {
+        indexLogger.warn({ err }, "discord-index: 同期に失敗しました(次の周期で再試行)");
+      });
+    };
+    bot.once(Events.ClientReady, () => {
+      runCycle();
+      discordIndexTimer = setInterval(
+        runCycle,
+        discordIndexConfig.reconcile_interval_hours * 3_600_000,
+      );
+      discordIndexTimer.unref();
+    });
+    indexLogger.info(
+      {
+        backfillDays: discordIndexConfig.backfill_days,
+        retentionDays: discordIndexConfig.retention_days,
+        reconcileIntervalHours: discordIndexConfig.reconcile_interval_hours,
+        reconcileWindowDays: discordIndexConfig.reconcile_window_days,
+      },
+      "Discord 本文インデックスは有効です(ADR-0038)",
+    );
+  }
   const messenger = createClientMessenger(bot);
   const memoWorker = createVoiceMemoWorker({
     logger,
@@ -511,9 +570,16 @@ async function main(): Promise<void> {
   // stop_grace_period(90 秒)は grace(既定 60 秒)+ 中断後の後処理(15 秒)より長くしておく。
   const onShutdownSignal = createShutdownHandler({
     lifecycle: askLifecycle,
-    stopTimers: () => clearInterval(freshnessTimer),
+    stopTimers: () => {
+      clearInterval(freshnessTimer);
+      if (discordIndexTimer !== undefined) clearInterval(discordIndexTimer);
+    },
     destroyClient: () => bot.destroy(),
-    closeStore: () => store.close(),
+    closeStore: () => {
+      store.close();
+      // ADR-0038: Discord 本文インデックス(別ファイル)も閉じる。
+      discordIndexStore?.close();
+    },
     exit: (code) => process.exit(code),
     log: lifecycleLog,
   });

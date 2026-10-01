@@ -47,23 +47,26 @@ export interface CollectorSession {
   close(): Promise<void>;
 }
 
-/** 1 ページ分の取得関数(テスト seam)。oldest-first で返すこと。 */
-export type FetchPageFn = (
+/**
+ * 1 ページ分の取得関数(テスト seam)。oldest-first で返すこと。
+ * 要素型は既定で CollectorMessageItem。Discord 本文インデックス(ADR-0038)も同じページングを使う。
+ */
+export type FetchPageFn<T extends { id: string } = CollectorMessageItem> = (
   afterId: string | null,
   limit: number,
-) => Promise<CollectorMessageItem[]>;
+) => Promise<T[]>;
 
 /**
  * after カーソルでページを進めながら最大 cap 件を集める(純関数側・テスト対象)。
  * 終了条件: cap 到達 or ページが limit 未満(= 末尾到達)。
  */
-export async function paginateAfter(
-  fetchPage: FetchPageFn,
+export async function paginateAfter<T extends { id: string } = CollectorMessageItem>(
+  fetchPage: FetchPageFn<T>,
   afterId: string | null,
   cap: number,
   pageSize = 100,
-): Promise<CollectorMessageItem[]> {
-  const out: CollectorMessageItem[] = [];
+): Promise<T[]> {
+  const out: T[] = [];
   let cursor = afterId;
   while (out.length < cap) {
     const limit = Math.min(pageSize, cap - out.length);

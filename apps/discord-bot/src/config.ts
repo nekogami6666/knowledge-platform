@@ -117,6 +117,45 @@ export const voiceConfigSchema = z
   });
 export type VoiceConfig = z.infer<typeof voiceConfigSchema>;
 
+/**
+ * Discord 本文インデックス(ADR-0038)の設定。`enabled: true` で初めて有効になる(既定 OFF =
+ * DB を作らずイベントも購読しない)。既定値の理由は ADR-0038 D9。
+ * - backfill_days: カーソルが無いチャンネルの初回取り込み範囲(extractor と同じ 90 日)。
+ * - retention_days: 本文の保持期間(これより古い本文は定期照合で削除)。backfill_days 以上。
+ * - reconcile_interval_hours / reconcile_window_days: 停止中の編集・削除を反映する定期照合の周期と範囲。
+ * - max_results: discord_search 1 回で返す上限件数。
+ * - max_fetch_per_channel: 1 周期でチャンネルあたりに REST で取得する上限(残りは次の周期でカーソルから)。
+ */
+export const discordIndexConfigSchema = z
+  .object({
+    enabled: z.boolean().default(false),
+    backfill_days: z.number().int().positive().default(90),
+    retention_days: z.number().int().positive().default(180),
+    reconcile_interval_hours: z.number().positive().default(6),
+    reconcile_window_days: z.number().int().positive().default(7),
+    max_results: z.number().int().positive().max(100).default(20),
+    max_fetch_per_channel: z.number().int().positive().default(10_000),
+  })
+  .superRefine((c, ctx) => {
+    // 取り込んだ直後に保持期間で消える設定を拒否する(取り込みと削除の空回り)。
+    if (c.retention_days < c.backfill_days) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["retention_days"],
+        message: "retention_days は backfill_days 以上にしてください",
+      });
+    }
+    if (c.reconcile_window_days > c.retention_days) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["reconcile_window_days"],
+        message: "reconcile_window_days は retention_days 以下にしてください",
+      });
+    }
+  })
+  .default({});
+export type DiscordIndexConfig = z.infer<typeof discordIndexConfigSchema>;
+
 /** 設定ファイルの読み取り口。ファイルが無ければ null を返す(= 既定値を使う)。 */
 export interface ConfigReader {
   read(name: string): Promise<string | null>;
@@ -157,6 +196,12 @@ export async function loadVoice(reader: ConfigReader): Promise<VoiceConfig> {
   const text = await reader.read("voice.yaml");
   const data = text === null ? undefined : yaml.load(text);
   return voiceConfigSchema.parse(data ?? undefined);
+}
+
+export async function loadDiscordIndex(reader: ConfigReader): Promise<DiscordIndexConfig> {
+  const text = await reader.read("discord-index.yaml");
+  const data = text === null ? undefined : yaml.load(text);
+  return discordIndexConfigSchema.parse(data ?? undefined);
 }
 
 /**
