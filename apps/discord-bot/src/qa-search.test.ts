@@ -110,3 +110,43 @@ describe("STRUCTURED_PARSE の再試行(2026-10-01「test」回答の不具合�
     expect(shouldRetryAsk(new Error("x"))).toBe(false);
   });
 });
+
+describe("試行ごとの使用量の通知(段階 1-1: 費用は全試行の合計)", () => {
+  it("再試行を含む試行ごとに onAttempt を 1 回呼び、result の使用量(無ければ null)を渡す", async () => {
+    let calls = 0;
+    const runSearch = (async (opts: { onUsage?: (u: unknown) => void }) => {
+      calls += 1;
+      if (calls === 1) {
+        // 形式エラーの回も result は届いている(費用が発生している)。
+        opts.onUsage?.({ inputTokens: 1, outputTokens: 2, totalCostUsd: 0.01 });
+        throw new LlmError("STRUCTURED_PARSE", "x");
+      }
+      opts.onUsage?.({ inputTokens: 3, outputTokens: 4, totalCostUsd: 0.02 });
+      return ANSWER;
+    }) as unknown as AgentSearchFn;
+    const attempts: unknown[] = [];
+    await createQaSearch({ runSearch, maxRetries: 1 })({
+      ...INPUT,
+      onAttempt: (u) => attempts.push(u),
+    });
+    expect(attempts).toEqual([
+      { inputTokens: 1, outputTokens: 2, totalCostUsd: 0.01 },
+      { inputTokens: 3, outputTokens: 4, totalCostUsd: 0.02 },
+    ]);
+  });
+
+  it("result の無い失敗(タイムアウト)は null で通知し、onAttempt が無ければ onUsage も渡さない", async () => {
+    const seen: Record<string, unknown>[] = [];
+    const runSearch = (async (opts: Record<string, unknown>) => {
+      seen.push(opts);
+      throw new LlmError("TIMEOUT", "t");
+    }) as unknown as AgentSearchFn;
+    const attempts: unknown[] = [];
+    await expect(
+      createQaSearch({ runSearch })({ ...INPUT, onAttempt: (u) => attempts.push(u) }),
+    ).rejects.toThrow();
+    expect(attempts).toEqual([null]);
+    await expect(createQaSearch({ runSearch })(INPUT)).rejects.toThrow();
+    expect("onUsage" in (seen[1] ?? {})).toBe(false);
+  });
+});

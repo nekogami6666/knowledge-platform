@@ -24,6 +24,7 @@ import {
   qaAnswerSchema,
   recordSkippedAsk,
   sanitizeRepoDescription,
+  syncFailedMessage,
   timeoutMessage,
   validateCitations,
 } from "./ask.js";
@@ -31,7 +32,7 @@ import { SerialQueue } from "./concurrency.js";
 import { type BotStore, createMemoryStore } from "./db.js";
 import { createRepoRegistry, type RepoRegistry } from "./repo-registry.js";
 import type { ScopedRepo } from "./repo-scope.js";
-import type { RepoSyncer, SyncedRepo } from "./repos.js";
+import type { RepoSpec, RepoSyncer, SyncedRepo } from "./repos.js";
 
 const synced: SyncedRepo[] = [
   { repo: "org/minutes", absDir: "/clones/minutes", resolvedCommit: "sha-min" },
@@ -225,14 +226,16 @@ owner: yamada
 // --- synthetic 統合テスト(修正5: /ask パイプライン end-to-end・全SDKモック) ---
 
 function fakeSyncer(): RepoSyncer {
+  const notLegacy = async (): Promise<never> => {
+    throw new Error("従来モードではリポ単位の操作を呼ばない");
+  };
   return {
     sync: async () => synced,
-    syncEach: async () => {
-      throw new Error("従来モードでは syncEach を呼ばない");
-    },
-    resolveHead: async () => {
-      throw new Error("従来モードでは resolveHead を呼ばない");
-    },
+    syncEach: notLegacy,
+    resolveHead: notLegacy,
+    inspect: notLegacy,
+    restoreHead: notLegacy,
+    fetchTimeOnDisk: notLegacy,
   };
 }
 const repos: ScopedRepo[] = [
@@ -454,8 +457,7 @@ describe("handleAskRequest synthetic 統合(§6.2 受け入れ条件)", () => {
     expect(warnsSkipped).toHaveLength(0);
   });
 
-  it("工程別の時間と検索の観測値を AskResult.metrics で返し、logInfo には出さない(ADR-0035 D4・段階 1-1)", async () => {
-    const infos: Record<string, unknown>[] = [];
+  it("工程別の時間と検索の観測値を AskResult.metrics で返す(ADR-0035 D4・段階 1-1)", async () => {
     let t = 0;
     const { deps } = makeDeps({
       search: async () => ({
@@ -485,18 +487,16 @@ describe("handleAskRequest synthetic 統合(§6.2 受け入れ条件)", () => {
       }),
       // 呼ばれるたびに 1 秒進む(開始 → sync → prompt → search → recordQuery 直前 → validate)。
       monotonicMs: () => (t += 1000),
-      logInfo: (data) => infos.push(data),
     });
     const res = await handleAskRequest(req, deps);
     expect(res.status).toBe("answered");
-    // 完了ログは discord.ts が配送後に 1 行で出す(二重に出さない)。
-    expect(infos).toHaveLength(0);
     expect(res.metrics).toEqual({
       syncMs: 1000,
       promptMs: 1000,
       searchMs: 1000,
       validateMs: 2000,
       elapsedMs: 4000,
+      sync: null, // 従来の一括同期(perRepo 未指定)では件数を持たない
       failure: null,
       search: {
         numTurns: 9,
@@ -505,6 +505,12 @@ describe("handleAskRequest synthetic 統合(§6.2 受け入れ条件)", () => {
         notFound: false,
         citations: 1,
         validCitations: 1,
+        requestedModel: "m",
+        actualModel: "m",
+      },
+      // 試行ごとの通知をしない差し替えの検索は最終結果の値(試行回数は不明 = null)。
+      usage: {
+        searchAttempts: null,
         inputTokens: 3,
         outputTokens: 4,
         cacheCreationInputTokens: 100,
@@ -519,8 +525,6 @@ describe("handleAskRequest synthetic 統合(§6.2 受け入れ条件)", () => {
             costUsd: 0.05,
           },
         },
-        requestedModel: "m",
-        actualModel: "m",
       },
     });
     // 無ければ null(欠損と 0 を区別する)。未回答でも工程の時間は揃う。
@@ -531,15 +535,99 @@ describe("handleAskRequest synthetic 統合(§6.2 受け入れ条件)", () => {
       numTurns: null,
       durationApiMs: null,
       deniedToolCalls: null,
+      notFound: true,
+      validCitations: 0,
+    });
+    expect(res2.metrics?.usage).toMatchObject({
       cacheReadInputTokens: null,
       totalCostUsd: null,
       modelUsage: null,
-      notFound: true,
-      validCitations: 0,
     });
     for (const k of ["syncMs", "promptMs", "searchMs", "validateMs"] as const) {
       expect(typeof res2.metrics?.[k]).toBe("number");
     }
+  });
+
+  it("使用量は全試行(再試行された形式エラーの回を含む)の合計を出し、試行回数を searchAttempts に入れる", async () => {
+    const { deps } = makeDeps({
+      search: async (input) => {
+        // 1 回目: 形式エラーで再試行(費用は発生している)。2 回目: 成功。
+        input.onAttempt?.({
+          inputTokens: 5,
+          outputTokens: 50,
+          cacheReadInputTokens: 1000,
+          totalCostUsd: 0.02,
+          modelUsage: {
+            m: {
+              inputTokens: 5,
+              outputTokens: 50,
+              cacheReadInputTokens: 1000,
+              cacheCreationInputTokens: 0,
+              costUsd: 0.02,
+            },
+          },
+        });
+        input.onAttempt?.({
+          inputTokens: 7,
+          outputTokens: 70,
+          cacheReadInputTokens: 3000,
+          cacheCreationInputTokens: 200,
+          totalCostUsd: 0.03,
+          modelUsage: {
+            m: {
+              inputTokens: 7,
+              outputTokens: 70,
+              cacheReadInputTokens: 3000,
+              cacheCreationInputTokens: 200,
+              costUsd: 0.03,
+            },
+          },
+        });
+        return {
+          value: { answer: "回答", citations: [], notFound: true },
+          usage: { inputTokens: 7, outputTokens: 70 },
+          totalCostUsd: 0.03,
+        };
+      },
+    });
+    const res = await handleAskRequest(req, deps);
+    expect(res.metrics?.usage).toEqual({
+      searchAttempts: 2,
+      inputTokens: 12,
+      outputTokens: 120,
+      cacheCreationInputTokens: 200,
+      cacheReadInputTokens: 4000,
+      totalCostUsd: 0.05,
+      modelUsage: {
+        m: {
+          inputTokens: 12,
+          outputTokens: 120,
+          cacheReadInputTokens: 4000,
+          cacheCreationInputTokens: 200,
+          costUsd: 0.05,
+        },
+      },
+    });
+  });
+
+  it("検索が最終的に失敗しても、それまでの試行の使用量を出す(result の無い試行は回数だけ数える)", async () => {
+    const { deps } = makeDeps({
+      search: async (input) => {
+        input.onAttempt?.({ inputTokens: 1, outputTokens: 2, totalCostUsd: 0.01 });
+        input.onAttempt?.(null); // タイムアウト等で result が無い
+        throw new LlmError("TIMEOUT", "t");
+      },
+    });
+    const res = await handleAskRequest(req, deps);
+    expect(res.status).toBe("timeout");
+    expect(res.metrics?.search).toBeNull();
+    expect(res.metrics?.usage).toMatchObject({
+      searchAttempts: 2,
+      inputTokens: 1,
+      outputTokens: 2,
+      totalCostUsd: 0.01,
+      cacheReadInputTokens: null,
+    });
   });
 
   it("失敗した工程・経過・エラー種別を metrics.failure に入れる(本文は持たない)", async () => {
@@ -847,67 +935,113 @@ describe("期限切れ・再起動による中断(ADR-0035 追記)", () => {
 });
 
 // --- all_visible 有効時のリポ単位同期(ADR-0036 D5) ---
+// --- リポ単位同期(ADR-0036 D5)・TTL 再利用と前回データ利用(段階 1-2) ---
 
-describe("handleAskRequest リポ単位同期(ADR-0036 D5)", () => {
+describe("handleAskRequest リポ単位同期(ADR-0036 D5・段階 1-2)", () => {
   const kb: ScopedRepo = {
     repo: "org/knowledge-base",
     dir: "knowledge-base",
     syncOnAsk: true,
     managed: false,
   };
+  /** 手動指定(repos.yaml の repos:)の議事録。同期失敗の規則は厳格(AskSyncError)。 */
   const minutes: ScopedRepo = {
     repo: "org/biz-minutes",
     dir: "biz-minutes",
+    syncOnAsk: true,
+    managed: false,
+  };
+  /** 列挙由来(all_visible)で sync_on_ask に当たる議事録。使えなければ今回の対象から外す。 */
+  const enumMinutes: ScopedRepo = {
+    repo: "org/sales-minutes",
+    dir: "sales-minutes",
     syncOnAsk: true,
     managed: true,
   };
   const code: ScopedRepo = { repo: "org/app", dir: "app", syncOnAsk: false, managed: true };
   const fresh: ScopedRepo = { repo: "org/new", dir: "new", syncOnAsk: false, managed: true };
-  const sr = (r: ScopedRepo, sha: string): SyncedRepo => ({
+  const sr = (r: { repo: string; dir: string }, sha: string): SyncedRepo => ({
     repo: r.repo,
     absDir: `/clones/${r.dir}`,
     resolvedCommit: sha,
   });
+  const TTL = 60_000;
+  const MAX_STALE = 6 * 60 * 60 * 1000;
 
   interface Harness {
     syncer: RepoSyncer;
+    /** syncEach に渡された(= fetch を試みた)リポ。 */
     syncedSpecs: string[];
     headCalls: string[];
+    restored: string[];
+    /** clone の実 HEAD(無ければ clone 無し)。同期成功で new-<dir> に進む。 */
+    heads: Record<string, string>;
+    /** 作業ツリーが汚れているリポ。 */
+    dirty: Set<string>;
+    /** 同期に失敗させるリポ(テスト中に変えられる)。 */
+    fail: Set<string>;
+    /** clone の最終 fetch 時刻(ディスク上・fetchTimeOnDisk)。無ければ null。 */
+    disk: Record<string, number>;
   }
-  /**
-   * fail: 同期に失敗させる repo。heads: resolveHead の結果(無ければ null = clone 無し)。
-   * empty: 空リポとして返す repo。
-   */
   function harness(
-    fail: string[] = [],
-    heads: Record<string, string> = {},
-    empty: string[] = [],
+    opts: {
+      fail?: string[];
+      heads?: Record<string, string>;
+      empty?: string[];
+      dirty?: string[];
+      disk?: Record<string, number>;
+    } = {},
   ): Harness {
+    const empty = opts.empty ?? [];
     const h: Harness = {
       syncedSpecs: [],
       headCalls: [],
-      syncer: {
-        sync: async () => {
-          throw new Error("リポ単位モードでは sync を呼ばない");
-        },
-        syncEach: async (specs) =>
-          specs.map((spec) => {
-            h.syncedSpecs.push(spec.repo);
-            if (empty.includes(spec.repo)) return { status: "empty" as const, spec };
-            return fail.includes(spec.repo)
-              ? { status: "failed" as const, spec, error: new Error(`fetch failed ${spec.repo}`) }
-              : {
-                  status: "synced" as const,
-                  spec,
-                  synced: sr(spec as ScopedRepo, `new-${spec.dir}`),
-                };
-          }),
-        resolveHead: async (spec) => {
-          h.headCalls.push(spec.repo);
-          const sha = heads[spec.repo];
-          return sha === undefined ? null : sr(spec as ScopedRepo, sha);
-        },
+      restored: [],
+      heads: { ...opts.heads },
+      dirty: new Set(opts.dirty),
+      fail: new Set(opts.fail),
+      disk: { ...opts.disk },
+      syncer: undefined as unknown as RepoSyncer,
+    };
+    const state = (spec: RepoSpec) => {
+      const sha = h.heads[spec.repo];
+      return sha === undefined ? null : { synced: sr(spec, sha), clean: !h.dirty.has(spec.repo) };
+    };
+    h.syncer = {
+      sync: async () => {
+        throw new Error("リポ単位モードでは sync を呼ばない");
       },
+      syncEach: async (specs) =>
+        specs.map((spec) => {
+          h.syncedSpecs.push(spec.repo);
+          if (empty.includes(spec.repo)) return { status: "empty" as const, spec };
+          if (h.fail.has(spec.repo)) {
+            return {
+              status: "failed" as const,
+              spec,
+              error: Object.assign(new Error(`fetch failed ${spec.repo}`), {
+                cmd: `git -C /clones/${spec.dir} fetch --depth=1 https://github.com/${spec.repo}.git`,
+                stderr: "fatal: unable to access: Could not resolve host: github.com",
+              }),
+            };
+          }
+          const sha = `new-${spec.dir}`;
+          h.heads[spec.repo] = sha; // fetch → reset --hard → clean でクリーンな新 HEAD
+          h.dirty.delete(spec.repo);
+          return { status: "synced" as const, spec, synced: sr(spec, sha) };
+        }),
+      resolveHead: async (spec) => {
+        h.headCalls.push(spec.repo);
+        const sha = h.heads[spec.repo];
+        return sha === undefined ? null : sr(spec, sha);
+      },
+      inspect: async (spec) => state(spec),
+      restoreHead: async (spec) => {
+        h.restored.push(spec.repo);
+        h.dirty.delete(spec.repo);
+        return state(spec);
+      },
+      fetchTimeOnDisk: async (spec) => h.disk[spec.repo] ?? null,
     };
     return h;
   }
@@ -917,13 +1051,21 @@ describe("handleAskRequest リポ単位同期(ADR-0036 D5)", () => {
     h: Harness,
     answer: QaAnswer,
     over: Partial<AskDeps> = {},
-  ): { deps: AskDeps; store: BotStore; prompts: string[]; warns: Record<string, unknown>[] } {
+  ): {
+    deps: AskDeps;
+    store: BotStore;
+    prompts: string[];
+    warns: Record<string, unknown>[];
+    clock: { now: number };
+  } {
     const prompts: string[] = [];
     const warns: Record<string, unknown>[] = [];
+    // 壁時計(TTL・許容期間・脚注の時刻)。2026-10-01T00:12:00Z = JST 10/1 09:12。
+    const clock = { now: Date.parse("2026-10-01T00:12:00Z") };
     const { deps, store } = makeDeps({
       getRepos: () => registry.scope(),
       syncer: h.syncer,
-      perRepo: { registry, kbDir: "knowledge-base" },
+      perRepo: { registry, ttlMs: TTL, maxStalenessMs: MAX_STALE, nowMs: () => clock.now },
       search: async (input) => {
         prompts.push(input.systemPrompt);
         return { value: answer, usage: { inputTokens: 1, outputTokens: 1 } };
@@ -931,7 +1073,7 @@ describe("handleAskRequest リポ単位同期(ADR-0036 D5)", () => {
       logWarn: (data) => warns.push(data),
       ...over,
     });
-    return { deps, store, prompts, warns };
+    return { deps, store, prompts, warns, clock };
   }
 
   const citeCode: QaAnswer = {
@@ -939,6 +1081,17 @@ describe("handleAskRequest リポ単位同期(ADR-0036 D5)", () => {
     citations: [{ kind: "github_file", repo: "org/app", path: "src/a.ts", lines: "L1" }],
     notFound: false,
   };
+  const citeMinutes: QaAnswer = {
+    answer: "議事録にあります。",
+    citations: [{ kind: "github_file", repo: "org/biz-minutes", path: "2026/x.md" }],
+    notFound: false,
+  };
+  const citeKb: QaAnswer = {
+    answer: "ナレッジにあります。",
+    citations: [{ kind: "github_file", repo: "org/knowledge-base", path: "k/a.md" }],
+    notFound: false,
+  };
+  const noAnswer: QaAnswer = { answer: "x", citations: [], notFound: true };
 
   it("sync_on_ask のリポだけを同期し、今回同期しないリポへの引用は定期同期の SyncedRepo で検証を通す", async () => {
     const registry = createRepoRegistry([kb, minutes, code]);
@@ -952,11 +1105,20 @@ describe("handleAskRequest リポ単位同期(ADR-0036 D5)", () => {
     expect(res.answerText).toContain("https://github.com/org/app/blob/periodic-sha/src/a.ts#L1");
     // 今回同期分は registry に反映される(次の /ask・定期同期と共有)。
     expect(registry.lastSynced("org/biz-minutes")?.resolvedCommit).toBe("new-biz-minutes");
+    expect(res.metrics?.sync).toEqual({
+      reposInScope: 3,
+      reposAvailable: 3,
+      reposFetched: 2,
+      reposReused: 0,
+      reposStale: 0,
+      reposExcluded: 0,
+      staleAgeMs: null,
+    });
   });
 
   it("定期同期の記録が無いリポは rev-parse HEAD(resolveHead)で解決して引用を通す", async () => {
     const registry = createRepoRegistry([kb, code]);
-    const h = harness([], { "org/app": "head-sha" });
+    const h = harness({ heads: { "org/app": "head-sha" } });
     const { deps } = perRepoDeps(registry, h, citeCode);
     const res = await handleAskRequest(req, deps);
     expect(h.headCalls).toEqual(["org/app"]);
@@ -980,38 +1142,8 @@ describe("handleAskRequest リポ単位同期(ADR-0036 D5)", () => {
     expect(res.status).toBe("unanswered");
   });
 
-  it("KB 以外の同期失敗は warn して clone の現状で検索を続ける(/ask 全体は止めない)", async () => {
-    const registry = createRepoRegistry([kb, minutes]);
-    const h = harness(["org/biz-minutes"], { "org/biz-minutes": "old-sha" });
-    const { deps, warns } = perRepoDeps(registry, h, {
-      answer: "議事録にあります。",
-      citations: [{ kind: "github_file", repo: "org/biz-minutes", path: "2026/x.md" }],
-      notFound: false,
-    });
-    const res = await handleAskRequest(req, deps);
-    expect(res.status).toBe("answered");
-    expect(res.answerText).toContain("/org/biz-minutes/blob/old-sha/2026/x.md");
-    expect(warns).toHaveLength(1);
-    expect(warns[0]?.repo).toBe("org/biz-minutes");
-    expect(registry.lastError("org/biz-minutes")).toContain("fetch failed");
-  });
-
-  it("同期に失敗し clone も無いリポは今回の対象から外す", async () => {
-    const registry = createRepoRegistry([kb, minutes]);
-    const h = harness(["org/biz-minutes"]);
-    const { deps, prompts } = perRepoDeps(registry, h, {
-      answer: "x",
-      citations: [],
-      notFound: true,
-    });
-    const res = await handleAskRequest(req, deps);
-    expect(res.status).toBe("unanswered");
-    expect(prompts[0]).not.toContain("org/biz-minutes");
-    expect(prompts[0]).toContain("org/knowledge-base");
-  });
-
   it("空リポ(commit 無し)は warn せず manifest・allowlist から外す。定期同期で空と分かったリポは git を叩かない", async () => {
-    const emptyMin: ScopedRepo = { ...minutes, repo: "org/sales-minutes", dir: "sales-minutes" };
+    const emptyMin: ScopedRepo = enumMinutes;
     const emptyCode: ScopedRepo = {
       ...code,
       repo: "org/sales-management",
@@ -1019,7 +1151,7 @@ describe("handleAskRequest リポ単位同期(ADR-0036 D5)", () => {
     };
     const registry = createRepoRegistry([kb, emptyMin, emptyCode]);
     registry.recordEmpty("org/sales-management"); // 定期同期の結果
-    const h = harness([], {}, ["org/sales-minutes"]);
+    const h = harness({ empty: ["org/sales-minutes"] });
     const { deps, prompts, warns } = perRepoDeps(registry, h, {
       answer: "x",
       citations: [{ kind: "github_file", repo: "org/sales-minutes", path: "README.md" }],
@@ -1039,37 +1171,278 @@ describe("handleAskRequest リポ単位同期(ADR-0036 D5)", () => {
     const described: ScopedRepo = { ...code, description: "勤怠管理システムの実装" };
     const registry = createRepoRegistry([kb, described]);
     registry.recordSynced(sr(code, "periodic-sha"));
-    const { deps, prompts } = perRepoDeps(registry, harness(), {
-      answer: "x",
-      citations: [],
-      notFound: true,
-    });
+    const { deps, prompts } = perRepoDeps(registry, harness(), noAnswer);
     await handleAskRequest(req, deps);
     expect(prompts[0]).toContain("org/app → サブディレクトリ `app/` — 勤怠管理システムの実装");
   });
 
-  it("KB の同期失敗は従来どおり /ask 全体のエラー", async () => {
-    const registry = createRepoRegistry([kb, minutes]);
-    const h = harness(["org/knowledge-base"], { "org/knowledge-base": "old" });
-    const { deps, store } = perRepoDeps(registry, h, citeCode);
-    const res = await handleAskRequest(req, deps);
-    expect(res.status).toBe("error");
-    expect(store.getQuery(res.queryId)?.answerStatus).toBe("error");
-  });
-
   it("検索範囲は /ask のたびに getter で読む(定期同期での差し替えが次の /ask に効く)", async () => {
     const registry = createRepoRegistry([kb]);
-    const h = harness([], { "org/app": "h1" });
-    const { deps, prompts } = perRepoDeps(registry, h, {
-      answer: "x",
-      citations: [],
-      notFound: true,
-    });
+    const h = harness({ heads: { "org/app": "h1" } });
+    const { deps, prompts } = perRepoDeps(registry, h, noAnswer);
     await handleAskRequest(req, deps);
     registry.setScope([kb, code]);
     await handleAskRequest(req, deps);
     expect(prompts[0]).not.toContain("org/app");
     expect(prompts[1]).toContain("org/app → サブディレクトリ `app/`");
+  });
+
+  describe("TTL 再利用(段階 1-2)", () => {
+    it("TTL 内・クリーン・HEAD 一致なら fetch せず再利用し、引用は記録 SHA を使う", async () => {
+      const registry = createRepoRegistry([kb, minutes]);
+      const h = harness();
+      const { deps, clock } = perRepoDeps(registry, h, citeMinutes);
+      await handleAskRequest(req, deps);
+      expect(h.syncedSpecs).toEqual(["org/knowledge-base", "org/biz-minutes"]);
+      clock.now += TTL - 1;
+      const res = await handleAskRequest(req, deps);
+      expect(h.syncedSpecs).toHaveLength(2); // 2 回目は fetch しない
+      expect(res.answerText).toContain("/org/biz-minutes/blob/new-biz-minutes/2026/x.md");
+      expect(res.answerText).not.toContain("※ ナレッジは");
+      expect(res.metrics?.sync).toMatchObject({ reposFetched: 0, reposReused: 2 });
+    });
+
+    it("TTL を過ぎたら fetch する", async () => {
+      const registry = createRepoRegistry([kb]);
+      const h = harness();
+      const { deps, clock } = perRepoDeps(registry, h, noAnswer);
+      await handleAskRequest(req, deps);
+      clock.now += TTL;
+      await handleAskRequest(req, deps);
+      expect(h.syncedSpecs).toEqual(["org/knowledge-base", "org/knowledge-base"]);
+    });
+
+    it("作業ツリーが汚れている・HEAD が記録 SHA と違うなら TTL 内でも fetch する", async () => {
+      const registry = createRepoRegistry([kb, minutes]);
+      const h = harness();
+      const { deps, clock } = perRepoDeps(registry, h, noAnswer);
+      await handleAskRequest(req, deps);
+      h.dirty.add("org/knowledge-base"); // 例: 鮮度確認の書き込み・他プロセスの残骸
+      h.heads["org/biz-minutes"] = "moved-sha"; // 例: 別経路の同期で HEAD が動いた
+      clock.now += 1000;
+      const res = await handleAskRequest(req, deps);
+      expect(h.syncedSpecs.slice(2)).toEqual(["org/knowledge-base", "org/biz-minutes"]);
+      expect(res.metrics?.sync).toMatchObject({ reposFetched: 2, reposReused: 0 });
+    });
+
+    it("invalidate されたリポ(鮮度確認の KB 書き込み)は TTL 内・クリーンでも fetch する", async () => {
+      const registry = createRepoRegistry([kb]);
+      const h = harness();
+      const { deps, clock } = perRepoDeps(registry, h, noAnswer);
+      await handleAskRequest(req, deps);
+      registry.invalidate("org/knowledge-base");
+      clock.now += 1000;
+      await handleAskRequest(req, deps);
+      expect(h.syncedSpecs).toEqual(["org/knowledge-base", "org/knowledge-base"]);
+      expect(registry.isInvalidated("org/knowledge-base")).toBe(false); // 成功同期で解除
+      clock.now += 1000;
+      await handleAskRequest(req, deps);
+      expect(h.syncedSpecs).toHaveLength(2); // 解除後は再び TTL 再利用
+    });
+
+    it("直列キューで同時に来た /ask は、先頭だけが fetch し後続は再利用する", async () => {
+      const registry = createRepoRegistry([kb, minutes]);
+      const h = harness();
+      const { deps, store } = perRepoDeps(registry, h, citeMinutes);
+      const q = new SerialQueue();
+      const results = await Promise.all([
+        q.enqueue(() => handleAskRequest(req, deps)),
+        q.enqueue(() => handleAskRequest(req, deps)),
+        q.enqueue(() => handleAskRequest(req, deps)),
+      ]);
+      expect(results.map((r) => r.status)).toEqual(["answered", "answered", "answered"]);
+      expect(h.syncedSpecs).toEqual(["org/knowledge-base", "org/biz-minutes"]);
+      expect(results.map((r) => r.metrics?.sync?.reposReused)).toEqual([0, 2, 2]);
+      expect(store.listQueries()).toHaveLength(3);
+    });
+  });
+
+  describe("同期失敗時の前回データ利用と明確なエラー(段階 1-2)", () => {
+    it("最終成功が許容期間内なら前回データ(実 HEAD)で検索し、脚注に時点(JST)を付ける", async () => {
+      const registry = createRepoRegistry([kb, minutes]);
+      const h = harness();
+      const { deps, clock, warns, store } = perRepoDeps(registry, h, citeMinutes);
+      await handleAskRequest(req, deps); // 10/1 09:12 JST に同期成功
+      h.fail.add("org/biz-minutes");
+      clock.now += 2 * 60 * 60 * 1000; // 2 時間後(TTL 超え・許容期間内)
+      const res = await handleAskRequest(req, deps);
+      expect(res.status).toBe("answered");
+      expect(res.answerText).toContain("/org/biz-minutes/blob/new-biz-minutes/2026/x.md");
+      expect(res.answerText.endsWith("※ ナレッジは 10/1 09:12 時点の内容です(最新化に失敗)")).toBe(
+        true,
+      );
+      expect(store.getQuery(res.queryId)?.answer).toContain("時点の内容です");
+      expect(warns.some((w) => w.repo === "org/biz-minutes")).toBe(true);
+      expect(registry.lastError("org/biz-minutes")).toContain("fetch failed");
+      expect(res.metrics?.sync).toMatchObject({ reposStale: 1, staleAgeMs: 2 * 60 * 60 * 1000 });
+    });
+
+    it("未回答でも前回データで検索したことを脚注で明示する", async () => {
+      const registry = createRepoRegistry([kb]);
+      const h = harness();
+      const { deps, clock } = perRepoDeps(registry, h, noAnswer);
+      await handleAskRequest(req, deps);
+      h.fail.add("org/knowledge-base");
+      clock.now += TTL;
+      const res = await handleAskRequest(req, deps);
+      expect(res.status).toBe("unanswered");
+      expect(res.answerText).toBe(
+        `${NOT_FOUND_MESSAGE}\n\n※ ナレッジは 10/1 09:12 時点の内容です(最新化に失敗)`,
+      );
+    });
+
+    it("前回データの作業ツリーが汚れていれば HEAD に戻してから検索する(引用 SHA と内容を一致させる)", async () => {
+      const registry = createRepoRegistry([kb]);
+      const h = harness();
+      const { deps, clock } = perRepoDeps(registry, h, citeKb);
+      await handleAskRequest(req, deps);
+      h.dirty.add("org/knowledge-base");
+      h.fail.add("org/knowledge-base");
+      clock.now += TTL;
+      const res = await handleAskRequest(req, deps);
+      expect(h.restored).toEqual(["org/knowledge-base"]);
+      expect(res.status).toBe("answered");
+      expect(res.answerText).toContain("/org/knowledge-base/blob/new-knowledge-base/k/a.md");
+    });
+
+    it("KB も同じ規則: 許容期間を超えたら専用の文面でエラー(failedStage: sync)", async () => {
+      const registry = createRepoRegistry([kb, minutes]);
+      const h = harness();
+      const { deps, clock, store } = perRepoDeps(registry, h, citeKb);
+      await handleAskRequest(req, deps);
+      h.fail.add("org/knowledge-base");
+      clock.now += MAX_STALE + 1;
+      let searched = 0;
+      const res = await handleAskRequest(req, {
+        ...deps,
+        search: async () => {
+          searched += 1;
+          return { value: citeKb, usage: { inputTokens: 1, outputTokens: 1 } };
+        },
+      });
+      expect(searched).toBe(0); // 古さの分からないデータで答えない
+      expect(res.status).toBe("error");
+      expect(res.answerText).toBe(syncFailedMessage(["org/knowledge-base"]));
+      expect(res.answerText).not.toBe(ERROR_MESSAGE);
+      expect(store.getQuery(res.queryId)?.answerStatus).toBe("error");
+      expect(res.metrics?.failure).toMatchObject({
+        stage: "sync",
+        errorKind: "AskSyncError",
+        errorCode: "GIT_DNS",
+      });
+    });
+
+    it("初回同期の失敗(未同期)は clone があっても専用の文面でエラーにする", async () => {
+      const registry = createRepoRegistry([kb, minutes]);
+      // clone は残っている(再起動直後など)が、このプロセスでは一度も同期に成功していない。
+      const h = harness({ fail: ["org/biz-minutes"], heads: { "org/biz-minutes": "old-sha" } });
+      const { deps } = perRepoDeps(registry, h, citeMinutes);
+      const res = await handleAskRequest(req, deps);
+      expect(res.status).toBe("error");
+      expect(res.answerText).toBe(syncFailedMessage(["org/biz-minutes"]));
+      expect(res.answerText).toContain("org/biz-minutes");
+      expect(res.metrics?.failure?.stage).toBe("sync");
+    });
+  });
+
+  describe("列挙由来のリポは使えなければ対象から外す(手動指定は厳格なまま)", () => {
+    it("列挙由来のリポの初回同期失敗は /ask を止めず、manifest・引用の許可リストから外す", async () => {
+      const registry = createRepoRegistry([kb, enumMinutes]);
+      const h = harness({ fail: ["org/sales-minutes"], heads: { "org/sales-minutes": "old" } });
+      const { deps, prompts, warns } = perRepoDeps(registry, h, {
+        answer: "営業議事録と KB にあります。",
+        citations: [
+          { kind: "github_file", repo: "org/sales-minutes", path: "2026/x.md" },
+          { kind: "github_file", repo: "org/knowledge-base", path: "k/a.md" },
+        ],
+        notFound: false,
+      });
+      const res = await handleAskRequest(req, deps);
+      expect(res.status).toBe("answered");
+      expect(prompts[0]).not.toContain("org/sales-minutes");
+      expect(res.answerText).not.toContain("org/sales-minutes"); // 対象外リポへの引用は破棄
+      expect(res.answerText).toContain("/org/knowledge-base/blob/new-knowledge-base/k/a.md");
+      expect(res.answerText).not.toContain("※ ナレッジは"); // 前回データは使っていない
+      expect(warns).toContainEqual(
+        expect.objectContaining({ repo: "org/sales-minutes", reason: "never_synced" }),
+      );
+      expect(res.metrics?.sync).toMatchObject({ reposExcluded: 1, reposAvailable: 1 });
+      expect(res.metrics?.failure).toBeNull();
+    });
+
+    it("列挙由来のリポが許容期間を超えたら外す。許容期間内なら前回データで検索する", async () => {
+      const registry = createRepoRegistry([kb, enumMinutes]);
+      const h = harness();
+      const { deps, clock, warns } = perRepoDeps(registry, h, noAnswer);
+      await handleAskRequest(req, deps);
+      h.fail.add("org/sales-minutes");
+      clock.now += TTL;
+      const within = await handleAskRequest(req, deps);
+      expect(within.metrics?.sync).toMatchObject({ reposStale: 1, reposExcluded: 0 });
+      clock.now += MAX_STALE;
+      const beyond = await handleAskRequest(req, deps);
+      expect(beyond.status).toBe("unanswered");
+      expect(beyond.metrics?.sync).toMatchObject({ reposStale: 0, reposExcluded: 1 });
+      expect(warns).toContainEqual(
+        expect.objectContaining({ repo: "org/sales-minutes", reason: "too_stale" }),
+      );
+    });
+
+    it("同じ /ask で手動指定のリポも使えなければ、従来どおり専用の文面でエラー(列挙分は数えるだけ)", async () => {
+      const registry = createRepoRegistry([kb, minutes, enumMinutes]);
+      const h = harness({ fail: ["org/biz-minutes", "org/sales-minutes"] });
+      const { deps } = perRepoDeps(registry, h, noAnswer);
+      const res = await handleAskRequest(req, deps);
+      expect(res.status).toBe("error");
+      expect(res.answerText).toBe(syncFailedMessage(["org/biz-minutes"]));
+    });
+  });
+
+  describe("再起動直後の最終成功時刻(clone の FETCH_HEAD から補う)", () => {
+    it("プロセス内の記録が無くても、ディスク上の最終 fetch が許容期間内なら前回データで検索する", async () => {
+      const registry = createRepoRegistry([kb]);
+      const fetchedAt = Date.parse("2026-09-30T23:00:00Z"); // JST 10/1 08:00(1 時間 12 分前)
+      const h = harness({
+        fail: ["org/knowledge-base"],
+        heads: { "org/knowledge-base": "disk-sha" },
+        disk: { "org/knowledge-base": fetchedAt },
+      });
+      const { deps } = perRepoDeps(registry, h, citeKb);
+      const res = await handleAskRequest(req, deps);
+      expect(res.status).toBe("answered");
+      expect(res.answerText).toContain("/org/knowledge-base/blob/disk-sha/k/a.md");
+      expect(res.answerText).toContain("※ ナレッジは 10/1 08:00 時点の内容です(最新化に失敗)");
+    });
+
+    it("ディスク上の時刻も許容期間を超えている・読めないなら、手動指定は専用の文面でエラー", async () => {
+      const registry = createRepoRegistry([kb]);
+      const now = Date.parse("2026-10-01T00:12:00Z");
+      const old = harness({
+        fail: ["org/knowledge-base"],
+        heads: { "org/knowledge-base": "disk-sha" },
+        disk: { "org/knowledge-base": now - MAX_STALE - 1 },
+      });
+      const r1 = await handleAskRequest(req, perRepoDeps(registry, old, citeKb).deps);
+      expect(r1.answerText).toBe(syncFailedMessage(["org/knowledge-base"]));
+      const none = harness({
+        fail: ["org/knowledge-base"],
+        heads: { "org/knowledge-base": "disk-sha" },
+      });
+      const r2 = await handleAskRequest(req, perRepoDeps(registry, none, citeKb).deps);
+      expect(r2.answerText).toBe(syncFailedMessage(["org/knowledge-base"]));
+    });
+
+    it("プロセス内の記録があればディスクの時刻は使わない", async () => {
+      const registry = createRepoRegistry([kb]);
+      const h = harness({ disk: { "org/knowledge-base": 0 } }); // 使われれば許容期間超え
+      const { deps, clock } = perRepoDeps(registry, h, noAnswer);
+      await handleAskRequest(req, deps);
+      h.fail.add("org/knowledge-base");
+      clock.now += TTL;
+      const res = await handleAskRequest(req, deps);
+      expect(res.status).toBe("unanswered");
+      expect(res.metrics?.sync).toMatchObject({ reposStale: 1 });
+    });
   });
 });
 

@@ -19,6 +19,8 @@ import { type Client, Events, Routes } from "discord.js";
 import { setNotifySecrets } from "./ack.js";
 import {
   type AskDeps,
+  DEFAULT_ASK_SYNC_MAX_STALENESS_MS,
+  DEFAULT_ASK_SYNC_TTL_MS,
   DEFAULT_ASK_TIMEOUT_MS,
   handleAskRequest,
   INTERRUPTED_MESSAGE,
@@ -186,6 +188,8 @@ async function main(): Promise<void> {
       // KB clone を触る区間(sync → 書き込み → validate → commit)を /ask と直列化する。
       // syncKbClone は区間の内側で呼ばれるためキューに積まない(積むとデッドロック)。
       runExclusive: (task) => queue.enqueue(task),
+      // 段階 1-2: KB の作業ツリーを触ったら、次の /ask は TTL 内でも KB を同期し直す。
+      onKbTreeTouched: () => registry.invalidate(kbRepo),
       syncKbClone: async () => {
         const [synced] = await syncer.sync([kbSpec]);
         if (synced === undefined) throw new Error("KB clone の同期に失敗しました");
@@ -233,6 +237,19 @@ async function main(): Promise<void> {
       "/ask の探索ノブが env で上書きされています(ADR-0035 D6)",
     );
   }
+  // 段階 1-2: /ask の同期の TTL 再利用と、同期失敗時に前回データで検索してよい期間。
+  const askSyncTtlMs = parsePositiveIntEnv(
+    "ASK_SYNC_TTL_MS",
+    env.ASK_SYNC_TTL_MS,
+    DEFAULT_ASK_SYNC_TTL_MS,
+    (data, msg) => logger.warn(data, msg),
+  );
+  const askSyncMaxStalenessMs = parsePositiveIntEnv(
+    "ASK_SYNC_MAX_STALENESS_MS",
+    env.ASK_SYNC_MAX_STALENESS_MS,
+    DEFAULT_ASK_SYNC_MAX_STALENESS_MS,
+    (data, msg) => logger.warn(data, msg),
+  );
   const search = createQaSearch({
     usage: nullUsageRecorder,
     timeoutMs: effectiveAskTimeoutMs,
@@ -246,6 +263,10 @@ async function main(): Promise<void> {
       // 検索範囲は毎回 registry から読む(ADR-0036)。
       getRepos: () => registry.scope(),
       syncer,
+      // リポ単位の同期(ADR-0036 D5)を常に使う: TTL 内は fetch せず再利用し、同期に失敗しても
+      // 許容期間内なら前回データで検索する(段階 1-2)。同期・検索・鮮度確認の書き込みは同じ
+      // SerialQueue で直列化されている(discord.ts の handleAsk と freshness の runExclusive)。
+      perRepo: { registry, ttlMs: askSyncTtlMs, maxStalenessMs: askSyncMaxStalenessMs },
       promptStore,
       store,
       clonesDir: env.CLONES_DIR,
@@ -255,7 +276,6 @@ async function main(): Promise<void> {
       logError: (err) =>
         withCorrelation(logger, ctx.correlationId).error({ err }, "/ask pipeline error"),
       logWarn: (data, msg) => withCorrelation(logger, ctx.correlationId).warn(data, msg),
-      logInfo: (data, msg) => withCorrelation(logger, ctx.correlationId).info(data, msg),
       searchTimeoutMs: effectiveAskTimeoutMs,
       // ADR-0035 追記: 正常終了の猶予を超えたら検索を中断する。
       ...(ctx.signal !== undefined ? { signal: ctx.signal } : {}),

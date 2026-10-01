@@ -164,10 +164,13 @@
   - 工程: `queueWaitMs`(受付 → キューのタスク開始)/ `syncMs` / `promptMs`(プロンプト + manifest)/
     `searchMs`(再試行を含む)/ `validateMs`(引用の検証・整形・queries 記録)/ `deliveryMs` / `totalMs`。
     `elapsedMs` は従来どおり `queries.elapsed_ms` と同じ値。
-  - 検索の観測値: `numTurns` / `durationApiMs` / `deniedToolCalls` / `notFound` / `citations` /
-    `validCitations` / `inputTokens` / `outputTokens` / `cacheCreationInputTokens` / `cacheReadInputTokens` /
-    `totalCostUsd` / `modelUsage`(モデル別の入出力・キャッシュトークンと費用)/ `requestedModel` / `actualModel`。
-    `inputTokens`(SDK の `input_tokens`)はキャッシュ分を含まない点に注意する。
+  - 検索の観測値(最終結果): `numTurns` / `durationApiMs` / `deniedToolCalls` / `notFound` / `citations` /
+    `validCitations` / `requestedModel` / `actualModel`。
+  - 使用量(**全試行の合計**): `searchAttempts` / `inputTokens` / `outputTokens` / `cacheCreationInputTokens` /
+    `cacheReadInputTokens` / `totalCostUsd` / `modelUsage`(モデル別の入出力・キャッシュトークンと費用)。
+    形式エラー(STRUCTURED_PARSE)で再試行した回や最終的に失敗した回の費用も含める(`runAgentSearch` の
+    `onUsage` を試行ごとに `createQaSearch` が `onAttempt` で通知する)。`inputTokens`(SDK の `input_tokens`)は
+    キャッシュ分を含まない点に注意する。`queries.input_tokens` / `output_tokens` は従来どおり最終結果の値。
   - 失敗時: `failedStage`(`queue` / `sync` / `prompt` / `search` / `validate` / `delivery`)・
     `failedAtMs`(受付から失敗まで)・`errorKind` / `errorCode`(LlmError の code、git の失敗は
     `GIT_DNS` / `GIT_TIMEOUT` / `GIT_NETWORK` / `GIT_AUTH` / `GIT_NOT_FOUND` / `GIT_ERROR`、errno 系はその code)。
@@ -176,3 +179,45 @@
   エラーの詳細は従来どおり `/ask pipeline error` の error ログ(秘密値の伏字化あり)に出る。
 - **DB には保存しない(ログのみ)**。`queries` への列追加は bot.db のスキーマ上げを伴い、ホストのバッチと
   共有するため、他の変更とまとめて 1 回で行う。それまでは完了ログを集計に使う。
+
+## 追記(2026-10-01): 同期の再利用と前回データの利用(段階 1-2)
+
+/ask は受付のたびに全リポを同期しており、1 リポの DNS 失敗(2026-09-30 22:32)で /ask 全体がエラーになった。
+「却下した代替案」の TTL キャッシュは、鮮度確認の書き込みと permalink の食い違いを理由に却下していたが、
+ADR-0036 3b-1 で同期・検索・鮮度確認の書き込みが同じ `SerialQueue` で直列化されたため、条件付きで採用する。
+
+- **リポ単位の同期を常に使う。** 手動指定(`repos:`)だけの現構成でも `RepoRegistry` + `syncEach` の経路にする
+  (従来は all_visible 有効時のみ)。手動指定はすべて `sync_on_ask` 扱い。
+- **TTL 内の再利用**(env `ASK_SYNC_TTL_MS`・既定 60 秒): 最終成功同期(fetch)が TTL 内で、作業ツリーが
+  クリーン(`git status --porcelain` が空・未追跡も含む)かつ HEAD(`rev-parse HEAD`)が記録 SHA と一致すれば
+  fetch しない。確認は `RepoSyncer.inspect`(ネットワーク不要)。
+- **鮮度確認の書き込み後は必ず同期する。** `applyFreshnessReaction` は KB の作業ツリーに触る前に
+  `RepoRegistry.invalidate(KB)` を呼び、次の /ask は TTL 内でも KB を同期する(成功同期で解除)。
+  書き込みで汚れた作業ツリーはクリーン確認でも弾かれる(二重の防御)。
+- **失敗時の前回データ利用**(env `ASK_SYNC_MAX_STALENESS_MS`・既定 6 時間): 同期に失敗しても最終成功が
+  許容期間内なら、そのリポは前回データで検索する。作業ツリーが汚れていればローカルの HEAD に戻し
+  (`reset --hard HEAD` + `clean -fd`)、引用の ref は実 HEAD にする(検索した内容と SHA を一致させる)。
+  回答(未回答の文面を含む)の末尾に「※ ナレッジは 10/1 09:12 時点の内容です(最新化に失敗)」を付ける
+  (最も古いリポの最終成功時刻・JST)。
+- **再起動直後の最終成功時刻**: `RepoRegistry` の記録(プロセス内)が無いときは、clone の `.git/FETCH_HEAD` の
+  更新時刻で補う(`RepoSyncer.fetchTimeOnDisk`)。FETCH_HEAD の SHA が今の HEAD と一致する(fetch 後の reset まで
+  完了した)ときだけ信用し、一致しなければ未同期扱い。FETCH_HEAD が無い clone(clone してから一度も fetch して
+  いない)は `.git/HEAD` の更新時刻を使う: `git clone` は FETCH_HEAD を書かず、HEAD(symbolic ref)は clone 時に
+  書かれて以後の fetch / `reset --hard` では書き換わらないため、内容を取得した時刻と一致する。
+- **使えないリポの扱い(リポの由来で分ける)**: 許容期間超え・未同期(上記で補っても時刻が無い)・クリーンに
+  戻せない clone のリポは、
+  - 手動指定(repos.yaml の `repos:`。KB・議事録を含む)なら、検索せずに専用の文面(対象リポ名と
+    「ナレッジの最新化に失敗」)を返し、完了ログは `failedStage: sync`。
+  - all_visible の列挙由来なら、今回の /ask の対象から外す(manifest・引用の許可リストに載せない)。
+    /ask 全体は止めない。warn(リポ名と理由 `never_synced` / `too_stale` / `no_clean_clone`)と完了ログの
+    `reposExcluded` で観測する(新しいリポの初回 clone 失敗 1 件で全 /ask が止まるのを防ぐ)。
+- **KB の扱いを変える(ADR-0036 3b-1 からの変更)**: 3b-1 では「KB の同期失敗は常に /ask 全体のエラー、
+  KB 以外は古さに関係なく clone の現状で検索」だった。本追記で KB・KB 以外とも同じ規則
+  (許容期間内なら前回データ、超えたら手動指定はエラー・列挙由来は対象外)にそろえる。
+  古さの分からないデータで黙って答えることをやめる。
+- **トークン**: `.git/config` にトークンを残さない既存の対策(ADR-0013 D1(b))は変えない。再利用の確認と
+  HEAD への巻き戻しはネットワークに出ない。
+- **観測**: 完了ログに `reposInScope` / `reposAvailable` / `reposFetched` / `reposReused` / `reposStale` /
+  `reposExcluded` / `staleAgeMs` を載せる(旧 `/ask: 検索範囲(ADR-0036)` の info ログは完了ログへ統合)。
+- **定期同期**(ADR-0036 D5・3b-2)は全リポ化のときだけ使う。手動指定の 3 リポでは TTL 再利用で足りる見込みで、
+  完了ログの `syncMs` / `reposReused` で確かめる。

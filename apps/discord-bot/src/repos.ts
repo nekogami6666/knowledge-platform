@@ -20,7 +20,7 @@
  * (CLAUDE.md §12.2: native/外部プロセス依存のグルーは統合テストで代替)。
  */
 import { execFile } from "node:child_process";
-import { mkdir } from "node:fs/promises";
+import { mkdir, readFile, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { promisify } from "node:util";
 
@@ -36,6 +36,31 @@ export type GitExec = (args: readonly string[]) => Promise<{ stdout: string }>;
 export const GIT_EXEC_TIMEOUT_MS = 60_000;
 
 const defaultGitExec: GitExec = (args) => exec("git", [...args], { timeout: GIT_EXEC_TIMEOUT_MS });
+
+/** clone の最終 fetch 時刻を読むための最小 fs seam(注入でモック可能・段階 1-2)。 */
+export interface RepoFs {
+  /** ファイルの更新時刻(ms)。無い・読めないなら null。 */
+  mtimeMs(path: string): Promise<number | null>;
+  /** テキストを読む。無い・読めないなら null。 */
+  readText(path: string): Promise<string | null>;
+}
+
+const defaultRepoFs: RepoFs = {
+  mtimeMs: async (p) => {
+    try {
+      return (await stat(p)).mtimeMs;
+    } catch {
+      return null;
+    }
+  },
+  readText: async (p) => {
+    try {
+      return await readFile(p, "utf8");
+    } catch {
+      return null;
+    }
+  },
+};
 
 /** https URL から userinfo(user:token@)を除去する(トークンを .git/config に残さない)。 */
 export function stripCredentials(url: string): string {
@@ -90,6 +115,37 @@ export interface RepoSyncer {
    * 独立リポでない(親リポの内側)・commit が無い(空リポ)場合は null。
    */
   resolveHead(spec: RepoSpec): Promise<SyncedRepo | null>;
+  /**
+   * 既存 clone の HEAD と作業ツリーのクリーンさを fetch せずに返す(段階 1-2 の TTL 再利用・前回データ利用)。
+   * `rev-parse HEAD` と `status --porcelain`(未追跡も含む・除外なし)だけで確認する。
+   * clone が無い・独立リポでない・commit が無い場合は null。
+   */
+  inspect(spec: RepoSpec): Promise<LocalRepoState | null>;
+  /**
+   * 作業ツリーをローカルの HEAD に戻す(`reset --hard HEAD` + `clean -fd`・ネットワーク不要)。
+   * 同期に失敗したリポを前回データで検索するとき、鮮度確認の書き込み等の未コミット変更を捨て、
+   * 検索する内容と引用の SHA を一致させるために使う(段階 1-2)。戻した後の状態を返す。
+   */
+  restoreHead(spec: RepoSpec): Promise<LocalRepoState | null>;
+  /**
+   * clone の最終 fetch 時刻(壁時計 ms)をディスクから推定する(段階 1-2)。再起動直後で RepoRegistry に
+   * 最終成功同期の記録が無いとき、同期に失敗しても許容期間内なら前回データで検索できるようにする。
+   * - `.git/FETCH_HEAD` があれば、その先頭の SHA が今の HEAD と一致する(fetch 後の reset まで完了した)
+   *   ときだけ、その更新時刻を返す。一致しなければ null(内容がいつの時点か保証できない)。
+   * - FETCH_HEAD が無い = clone してから一度も fetch していない。`git clone` は FETCH_HEAD を書かず、
+   *   `.git/HEAD`(symbolic ref)は clone 時に書かれて以後の fetch / reset --hard では書き換わらないため、
+   *   その更新時刻 = 内容を取得した時刻として使う。
+   * clone が無い・独立リポでない・commit が無い場合は null。
+   */
+  fetchTimeOnDisk(spec: RepoSpec): Promise<number | null>;
+}
+
+/** clone の現状(inspect / restoreHead)。 */
+export interface LocalRepoState {
+  /** 実 HEAD(permalink の ref に使う)。 */
+  synced: SyncedRepo;
+  /** `git status --porcelain` が空(未コミットの変更・未追跡ファイルが無い)。 */
+  clean: boolean;
 }
 
 /**
@@ -110,6 +166,7 @@ export interface RepoSyncer {
 export function createGitRepoSyncer(
   clonesDir: string,
   gitExec: GitExec = defaultGitExec,
+  fs: RepoFs = defaultRepoFs,
 ): RepoSyncer {
   /**
    * 対象 dir が「自身が toplevel の独立リポ」か(cwd が toplevel のときだけ --git-dir は
@@ -193,6 +250,25 @@ export function createGitRepoSyncer(
     return { repo: spec.repo, absDir, resolvedCommit: stdout.trim() };
   }
 
+  async function resolveHead(spec: RepoSpec): Promise<SyncedRepo | null> {
+    const absDir = join(clonesDir, spec.dir);
+    if ((await probeGitDir(absDir)) !== ".git") return null;
+    try {
+      const { stdout } = await gitExec(["-C", absDir, "rev-parse", "HEAD"]);
+      return { repo: spec.repo, absDir, resolvedCommit: stdout.trim() };
+    } catch {
+      return null; // commit の無い clone(空リポ・clone 途中のクラッシュ等)
+    }
+  }
+
+  async function inspect(spec: RepoSpec): Promise<LocalRepoState | null> {
+    const synced = await resolveHead(spec);
+    if (synced === null) return null;
+    // 除外なし(-u の既定 = 未追跡も出す)。ignored は reset/clean でも消えないため対象外(git 既定)。
+    const { stdout } = await gitExec(["-C", synced.absDir, "status", "--porcelain"]);
+    return { synced, clean: stdout.trim() === "" };
+  }
+
   return {
     async sync(specs) {
       await mkdir(clonesDir, { recursive: true });
@@ -219,15 +295,26 @@ export function createGitRepoSyncer(
       }
       return out;
     },
-    async resolveHead(spec) {
+    resolveHead,
+    inspect,
+    async fetchTimeOnDisk(spec) {
+      const head = await resolveHead(spec);
+      if (head === null) return null;
+      const gitDir = join(head.absDir, ".git");
+      const fetchHead = await fs.readText(join(gitDir, "FETCH_HEAD"));
+      if (fetchHead !== null) {
+        const fetchedSha = fetchHead.trim().split(/\s+/)[0] ?? "";
+        return fetchedSha === head.resolvedCommit ? fs.mtimeMs(join(gitDir, "FETCH_HEAD")) : null;
+      }
+      return fs.mtimeMs(join(gitDir, "HEAD"));
+    },
+    async restoreHead(spec) {
       const absDir = join(clonesDir, spec.dir);
       if ((await probeGitDir(absDir)) !== ".git") return null;
-      try {
-        const { stdout } = await gitExec(["-C", absDir, "rev-parse", "HEAD"]);
-        return { repo: spec.repo, absDir, resolvedCommit: stdout.trim() };
-      } catch {
-        return null; // commit の無い clone(空リポ・clone 途中のクラッシュ等)
-      }
+      // syncOne と同じく symlink を通常ファイルとして展開する(ADR-0037)。
+      await gitExec(["-C", absDir, "-c", "core.symlinks=false", "reset", "--hard", "HEAD"]);
+      await gitExec(["-C", absDir, "clean", "-fd"]);
+      return inspect(spec);
     },
   };
 }

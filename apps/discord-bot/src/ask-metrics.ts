@@ -14,10 +14,16 @@
  *   - deliveryMs: 進捗表示の停止 → 回答の配送完了
  *   - elapsedMs: handleAskRequest の所要時間(queries.elapsed_ms と同じ値)
  *   - totalMs: 受付 → 配送完了
- * - 検索の観測値(検索まで進まなかった場合は null): numTurns / durationApiMs / deniedToolCalls /
- *   notFound / citations(モデルが返した数)/ validCitations(検証を通った数)/ inputTokens /
- *   outputTokens / cacheCreationInputTokens / cacheReadInputTokens / totalCostUsd / modelUsage /
- *   requestedModel / actualModel。inputTokens はキャッシュ分を含まない(agent.ts 参照)。
+ * - リポ同期(段階 1-2。リポ単位の同期でなければ null): reposInScope / reposAvailable /
+ *   reposFetched(今回 fetch)/ reposReused(TTL 内で再利用)/ reposStale(同期失敗 → 前回データ)/
+ *   reposExcluded(列挙由来のリポで同期失敗 → 今回の対象外)/ staleAgeMs(前回データのうち最も古いものの経過)
+ * - 検索の観測値(最終結果から・検索が成功しなかった場合は null): numTurns / durationApiMs /
+ *   deniedToolCalls / notFound / citations(モデルが返した数)/ validCitations(検証を通った数)/
+ *   requestedModel / actualModel
+ * - 使用量(**全試行の合計**。形式エラーで再試行した回・最終的に失敗した回も含む。試行が無ければ null):
+ *   searchAttempts(検索の試行回数)/ inputTokens / outputTokens / cacheCreationInputTokens /
+ *   cacheReadInputTokens / totalCostUsd / modelUsage(モデル別の合計)。inputTokens はキャッシュ分を
+ *   含まない(agent.ts 参照)。queries.input_tokens / output_tokens は従来どおり最終結果の値。
  * - 配送: expired(キュー待ちで interaction 失効 → DM 配送)/ fallbackChunks(DM で届けたチャンク数)
  * - 失敗時のみ: failedStage(queue | sync | prompt | search | validate | delivery)/ failedAtMs
  *   (受付から失敗までの ms)/ errorKind / errorCode(LlmError の code・git の分類・errno 等)
@@ -25,7 +31,12 @@
  * 質問本文・回答本文・社内文書の本文・秘密値は載せない。エラーの本文(message)も載せない
  * (git の stderr は URL を含みうる。詳細は従来どおり "/ask pipeline error" の error ログに出る)。
  */
-import { type AgentModelUsage, type AgentSearchResult, LlmError } from "@stratum/llm";
+import {
+  type AgentModelUsage,
+  type AgentRunUsage,
+  type AgentSearchResult,
+  LlmError,
+} from "@stratum/llm";
 
 /** /ask の工程(失敗した工程の記録に使う)。 */
 export type AskStage = "queue" | "sync" | "prompt" | "search" | "validate" | "delivery";
@@ -43,14 +54,88 @@ export interface AskSearchMetrics {
   citations: number;
   /** 検証を通った引用の数(notFound なら 0)。 */
   validCitations: number;
+  requestedModel: string | null;
+  actualModel: string | null;
+}
+
+/** 検索の使用量(全試行の合計)。キャッシュ・費用はどの試行にも無ければ null。 */
+export interface AskUsageMetrics {
+  /** 検索の試行回数(再試行を含む)。試行ごとの通知が無い検索(テスト用の差し替え等)では null。 */
+  searchAttempts: number | null;
   inputTokens: number;
   outputTokens: number;
   cacheCreationInputTokens: number | null;
   cacheReadInputTokens: number | null;
   totalCostUsd: number | null;
   modelUsage: Record<string, AgentModelUsage> | null;
-  requestedModel: string | null;
-  actualModel: string | null;
+}
+
+/** 試行ごとの使用量を合算する(QaSearchInput.onAttempt に add を渡す)。 */
+export function createUsageAccumulator(): {
+  add(u: AgentRunUsage | null): void;
+  /** 合計(試行が 0 回なら null)。 */
+  total(): AskUsageMetrics | null;
+} {
+  let attempts = 0;
+  let inputTokens = 0;
+  let outputTokens = 0;
+  let cacheCreation: number | null = null;
+  let cacheRead: number | null = null;
+  let cost: number | null = null;
+  let models: Record<string, AgentModelUsage> | null = null;
+  const plus = (a: number | null, b: number | undefined): number | null =>
+    b === undefined ? a : (a ?? 0) + b;
+  return {
+    add(u) {
+      attempts += 1;
+      if (u === null) return;
+      inputTokens += u.inputTokens;
+      outputTokens += u.outputTokens;
+      cacheCreation = plus(cacheCreation, u.cacheCreationInputTokens);
+      cacheRead = plus(cacheRead, u.cacheReadInputTokens);
+      cost = plus(cost, u.totalCostUsd);
+      for (const [model, m] of Object.entries(u.modelUsage ?? {})) {
+        models ??= {};
+        const prev = models[model];
+        models[model] =
+          prev === undefined
+            ? { ...m }
+            : {
+                inputTokens: prev.inputTokens + m.inputTokens,
+                outputTokens: prev.outputTokens + m.outputTokens,
+                cacheReadInputTokens: prev.cacheReadInputTokens + m.cacheReadInputTokens,
+                cacheCreationInputTokens:
+                  prev.cacheCreationInputTokens + m.cacheCreationInputTokens,
+                costUsd: prev.costUsd + m.costUsd,
+              };
+      }
+    },
+    total: () =>
+      attempts === 0
+        ? null
+        : {
+            searchAttempts: attempts,
+            inputTokens,
+            outputTokens,
+            cacheCreationInputTokens: cacheCreation,
+            cacheReadInputTokens: cacheRead,
+            totalCostUsd: cost,
+            modelUsage: models,
+          },
+  };
+}
+
+/** 試行ごとの通知が無い検索(テスト用の差し替え等)の使用量を最終結果から作る。 */
+export function usageOfResult(r: AgentSearchResult<unknown>): AskUsageMetrics {
+  return {
+    searchAttempts: null,
+    inputTokens: r.usage.inputTokens,
+    outputTokens: r.usage.outputTokens,
+    cacheCreationInputTokens: r.cacheCreationInputTokens ?? null,
+    cacheReadInputTokens: r.cacheReadInputTokens ?? null,
+    totalCostUsd: r.totalCostUsd ?? null,
+    modelUsage: r.modelUsage ?? null,
+  };
 }
 
 /** 失敗の記録(本文は持たない)。 */
@@ -62,6 +147,24 @@ export interface AskFailure {
   errorCode: string | null;
 }
 
+/** リポ同期の件数(段階 1-2。リポ単位の同期のときだけ)。 */
+export interface AskSyncMetrics {
+  /** 検索範囲のリポ数。 */
+  reposInScope: number;
+  /** 今回検索に使えたリポ数(clone のあるもの)。 */
+  reposAvailable: number;
+  /** 今回 fetch で同期したリポ数。 */
+  reposFetched: number;
+  /** TTL 内で fetch せずに再利用したリポ数。 */
+  reposReused: number;
+  /** 同期に失敗し前回データで検索したリポ数。 */
+  reposStale: number;
+  /** 列挙由来(all_visible)のリポで、同期に失敗し前回データも使えず今回の対象から外した数。 */
+  reposExcluded: number;
+  /** 前回データのうち最も古いものの経過 ms(無ければ null)。 */
+  staleAgeMs: number | null;
+}
+
 /** handleAskRequest が返す工程別の計測値(AskResult.metrics)。 */
 export interface AskPipelineMetrics {
   syncMs: number | null;
@@ -70,7 +173,11 @@ export interface AskPipelineMetrics {
   validateMs: number | null;
   /** handleAskRequest の所要時間(queries.elapsed_ms と同じ値)。 */
   elapsedMs: number;
+  /** リポ単位の同期の件数(従来の一括同期・同期前の失敗では null)。 */
+  sync: AskSyncMetrics | null;
   search: AskSearchMetrics | null;
+  /** 検索の使用量(全試行の合計・検索が失敗しても試行があれば入る)。 */
+  usage: AskUsageMetrics | null;
   failure: AskFailure | null;
 }
 
@@ -87,12 +194,6 @@ export function searchMetricsOf(
     notFound: r.value.notFound,
     citations: r.value.citations.length,
     validCitations,
-    inputTokens: r.usage.inputTokens,
-    outputTokens: r.usage.outputTokens,
-    cacheCreationInputTokens: r.cacheCreationInputTokens ?? null,
-    cacheReadInputTokens: r.cacheReadInputTokens ?? null,
-    totalCostUsd: r.totalCostUsd ?? null,
-    modelUsage: r.modelUsage ?? null,
     requestedModel: r.requestedModel ?? null,
     actualModel: r.actualModel ?? null,
   };
@@ -177,6 +278,7 @@ export interface AskCompletionInput {
 export function buildAskCompletionLog(input: AskCompletionInput): Record<string, unknown> {
   const m = input.metrics;
   const s = m?.search ?? null;
+  const u = m?.usage ?? null;
   const fields: Record<string, unknown> = {
     outcome: input.outcome,
     queryId: input.queryId,
@@ -188,18 +290,26 @@ export function buildAskCompletionLog(input: AskCompletionInput): Record<string,
     validateMs: m?.validateMs ?? null,
     deliveryMs: input.deliveryMs,
     elapsedMs: m?.elapsedMs ?? null,
+    reposInScope: m?.sync?.reposInScope ?? null,
+    reposAvailable: m?.sync?.reposAvailable ?? null,
+    reposFetched: m?.sync?.reposFetched ?? null,
+    reposReused: m?.sync?.reposReused ?? null,
+    reposStale: m?.sync?.reposStale ?? null,
+    reposExcluded: m?.sync?.reposExcluded ?? null,
+    staleAgeMs: m?.sync?.staleAgeMs ?? null,
     numTurns: s?.numTurns ?? null,
     durationApiMs: s?.durationApiMs ?? null,
     deniedToolCalls: s?.deniedToolCalls ?? null,
     notFound: s?.notFound ?? null,
     citations: s?.citations ?? null,
     validCitations: s?.validCitations ?? null,
-    inputTokens: s?.inputTokens ?? null,
-    outputTokens: s?.outputTokens ?? null,
-    cacheCreationInputTokens: s?.cacheCreationInputTokens ?? null,
-    cacheReadInputTokens: s?.cacheReadInputTokens ?? null,
-    totalCostUsd: s?.totalCostUsd ?? null,
-    modelUsage: s?.modelUsage ?? null,
+    searchAttempts: u?.searchAttempts ?? null,
+    inputTokens: u?.inputTokens ?? null,
+    outputTokens: u?.outputTokens ?? null,
+    cacheCreationInputTokens: u?.cacheCreationInputTokens ?? null,
+    cacheReadInputTokens: u?.cacheReadInputTokens ?? null,
+    totalCostUsd: u?.totalCostUsd ?? null,
+    modelUsage: u?.modelUsage ?? null,
     requestedModel: s?.requestedModel ?? null,
     actualModel: s?.actualModel ?? null,
     expired: input.expired,

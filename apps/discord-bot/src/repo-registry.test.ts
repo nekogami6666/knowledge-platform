@@ -65,4 +65,36 @@ describe("createRepoRegistry(ADR-0036 D5)", () => {
     r.forget("org/a");
     expect(r.lastSynced("org/a")).toBeUndefined();
   });
+
+  it("recordFetched は最終成功時刻を持ち、HEAD の解決(recordSynced)では更新しない(段階 1-2)", () => {
+    const r = createRepoRegistry([a]);
+    r.recordFetched({ repo: "org/a", absDir: "/c/a", resolvedCommit: "s1" }, 1000);
+    expect(r.lastFetchedAt("org/a")).toBe(1000);
+    expect(r.lastSynced("org/a")?.resolvedCommit).toBe("s1");
+    r.recordSynced({ repo: "org/a", absDir: "/c/a", resolvedCommit: "s2" });
+    expect(r.lastFetchedAt("org/a")).toBe(1000);
+    // 失敗しても最終成功時刻は残る(許容期間の判定に使う)。
+    r.recordError("org/a", "x");
+    expect(r.lastFetchedAt("org/a")).toBe(1000);
+  });
+
+  it("invalidate は次の成功同期まで残り、最終成功時刻は消さない。範囲外・空リポ化で状態ごと捨てる", () => {
+    const r = createRepoRegistry([a, b]);
+    r.recordFetched({ repo: "org/a", absDir: "/c/a", resolvedCommit: "s1" }, 1000);
+    r.invalidate("org/a");
+    expect(r.isInvalidated("org/a")).toBe(true);
+    expect(r.lastFetchedAt("org/a")).toBe(1000);
+    r.recordSynced({ repo: "org/a", absDir: "/c/a", resolvedCommit: "s1" });
+    expect(r.isInvalidated("org/a")).toBe(true); // HEAD の解決では解除しない
+    r.recordFetched({ repo: "org/a", absDir: "/c/a", resolvedCommit: "s2" }, 2000);
+    expect(r.isInvalidated("org/a")).toBe(false);
+
+    r.recordFetched({ repo: "org/b", absDir: "/c/b", resolvedCommit: "t1" }, 1000);
+    r.invalidate("org/b");
+    r.setScope([a]);
+    expect(r.lastFetchedAt("org/b")).toBeUndefined();
+    expect(r.isInvalidated("org/b")).toBe(false);
+    r.recordEmpty("org/a");
+    expect(r.lastFetchedAt("org/a")).toBeUndefined();
+  });
 });

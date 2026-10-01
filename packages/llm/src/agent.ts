@@ -141,6 +141,23 @@ export interface AgentSearchOptions<T> {
   effort?: AgentEffort;
   /** 拡張思考(未指定なら SDK 既定)。 */
   thinking?: AgentThinking;
+  /**
+   * 1 回の実行の使用量の購読(段階 1-1・費用の合算用)。result メッセージを受け取ったら成否に関係なく
+   * 1 回だけ呼ぶ(形式エラー等で throw する回の費用も拾えるように)。result が無い(タイムアウト等)
+   * なら呼ばない。listener の例外は握る。
+   */
+  onUsage?: (u: AgentRunUsage) => void;
+}
+
+/** 1 回の実行の使用量(onUsage)。キャッシュ・費用は result に無ければキー自体を持たない。 */
+export interface AgentRunUsage {
+  /** キャッシュ分を含まない入力トークン(input_tokens)。 */
+  inputTokens: number;
+  outputTokens: number;
+  cacheCreationInputTokens?: number;
+  cacheReadInputTokens?: number;
+  totalCostUsd?: number;
+  modelUsage?: Record<string, AgentModelUsage>;
 }
 
 export interface AgentSearchResult<T> {
@@ -443,6 +460,24 @@ export async function runAgentSearch<T>(
     outputTokens: result.usage?.output_tokens ?? 0,
   };
   usageRecorder.record({ app: opts.app, role: opts.role, usage });
+  // 観測用の使用量(1-1 計測)。input_tokens はキャッシュ分を含まないため、キャッシュ作成・読み取りを
+  // 別に持つ。無い(旧 SDK・テスト用の差し替え)ならキー自体を持たない。
+  const cacheCreationInputTokens = finiteOrUndefined(result.usage?.cache_creation_input_tokens);
+  const cacheReadInputTokens = finiteOrUndefined(result.usage?.cache_read_input_tokens);
+  const totalCostUsd = finiteOrUndefined(result.total_cost_usd);
+  const modelUsage = sanitizeModelUsage(result.modelUsage);
+  const extra = {
+    ...(cacheCreationInputTokens !== undefined ? { cacheCreationInputTokens } : {}),
+    ...(cacheReadInputTokens !== undefined ? { cacheReadInputTokens } : {}),
+    ...(totalCostUsd !== undefined ? { totalCostUsd } : {}),
+    ...(modelUsage !== undefined ? { modelUsage } : {}),
+  };
+  // 成否の判定より前に通知する(再試行される失敗回の費用も合算できるように)。
+  try {
+    opts.onUsage?.({ ...usage, ...extra });
+  } catch {
+    // 観測側の失敗で検索を止めない。
+  }
 
   if (result.subtype !== "success") {
     const code: LlmErrorCode =
@@ -463,19 +498,10 @@ export async function runAgentSearch<T>(
     );
   }
 
-  // 観測用の使用量(1-1 計測)。input_tokens はキャッシュ分を含まないため、キャッシュ作成・読み取りを
-  // 別に持つ。無い(旧 SDK・テスト用の差し替え)ならキー自体を持たない。
-  const cacheCreationInputTokens = finiteOrUndefined(result.usage?.cache_creation_input_tokens);
-  const cacheReadInputTokens = finiteOrUndefined(result.usage?.cache_read_input_tokens);
-  const totalCostUsd = finiteOrUndefined(result.total_cost_usd);
-  const modelUsage = sanitizeModelUsage(result.modelUsage);
   return {
     value: parsed.data,
     usage,
-    ...(cacheCreationInputTokens !== undefined ? { cacheCreationInputTokens } : {}),
-    ...(cacheReadInputTokens !== undefined ? { cacheReadInputTokens } : {}),
-    ...(totalCostUsd !== undefined ? { totalCostUsd } : {}),
-    ...(modelUsage !== undefined ? { modelUsage } : {}),
+    ...extra,
     ...(typeof result.num_turns === "number" ? { numTurns: result.num_turns } : {}),
     ...(typeof result.duration_api_ms === "number"
       ? { durationApiMs: result.duration_api_ms }

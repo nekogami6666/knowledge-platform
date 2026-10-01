@@ -1,6 +1,11 @@
 import { LlmError } from "@stratum/llm";
 import { describe, expect, it } from "vitest";
-import { type AskPipelineMetrics, buildAskCompletionLog, classifyAskError } from "./ask-metrics.js";
+import {
+  type AskPipelineMetrics,
+  buildAskCompletionLog,
+  classifyAskError,
+  createUsageAccumulator,
+} from "./ask-metrics.js";
 
 /** execFile(git)の失敗と同じ形のエラー。 */
 function gitError(stderr: string, extra: Record<string, unknown> = {}): Error {
@@ -61,6 +66,7 @@ describe("buildAskCompletionLog(1 行の完了ログ)", () => {
     searchMs: 30_000,
     validateMs: 5,
     elapsedMs: 31_208,
+    sync: null,
     search: {
       numTurns: 9,
       durationApiMs: 28_000,
@@ -68,14 +74,17 @@ describe("buildAskCompletionLog(1 行の完了ログ)", () => {
       notFound: false,
       citations: 2,
       validCitations: 1,
+      requestedModel: "m",
+      actualModel: "m",
+    },
+    usage: {
+      searchAttempts: 2,
       inputTokens: 10,
       outputTokens: 500,
       cacheCreationInputTokens: 3000,
       cacheReadInputTokens: 40_000,
       totalCostUsd: 0.07,
       modelUsage: null,
-      requestedModel: "m",
-      actualModel: "m",
     },
     failure: null,
   };
@@ -105,6 +114,7 @@ describe("buildAskCompletionLog(1 行の完了ログ)", () => {
       numTurns: 9,
       citations: 2,
       validCitations: 1,
+      searchAttempts: 2,
       cacheReadInputTokens: 40_000,
       totalCostUsd: 0.07,
       requestedModel: "m",
@@ -162,6 +172,24 @@ describe("buildAskCompletionLog(1 行の完了ログ)", () => {
       failedAtMs: 50,
       errorKind: "TypeError",
       errorCode: null,
+    });
+  });
+});
+
+describe("createUsageAccumulator(全試行の合計)", () => {
+  it("試行 0 回は null。キャッシュ・費用はどの試行にも無ければ null、あれば報告分だけ足す", () => {
+    const acc = createUsageAccumulator();
+    expect(acc.total()).toBeNull();
+    acc.add({ inputTokens: 1, outputTokens: 2 });
+    expect(acc.total()).toMatchObject({ searchAttempts: 1, totalCostUsd: null, modelUsage: null });
+    acc.add(null);
+    acc.add({ inputTokens: 3, outputTokens: 4, totalCostUsd: 0.5 });
+    expect(acc.total()).toMatchObject({
+      searchAttempts: 3,
+      inputTokens: 4,
+      outputTokens: 6,
+      totalCostUsd: 0.5,
+      cacheReadInputTokens: null,
     });
   });
 });

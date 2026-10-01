@@ -644,4 +644,58 @@ describe("SDK の使用量・費用の転記(段階 1-1 計測)", () => {
       },
     });
   });
+
+  it("onUsage は成否に関係なく result ごとに 1 回呼ばれる(再試行される失敗回の費用も拾える)", async () => {
+    const seen: unknown[] = [];
+    const bad = {
+      type: "result",
+      subtype: "success",
+      structured_output: { answer: 1 }, // スキーマ不一致 → STRUCTURED_PARSE
+      usage: { input_tokens: 2, output_tokens: 3, cache_read_input_tokens: 10 },
+      total_cost_usd: 0.01,
+    };
+    await expect(
+      runAgentSearch({ ...baseOpts, onUsage: (u) => seen.push(u) }, { queryFn: streamOf(bad) }),
+    ).rejects.toMatchObject({ code: "STRUCTURED_PARSE" });
+    await expect(
+      runAgentSearch(
+        { ...baseOpts, onUsage: (u) => seen.push(u) },
+        {
+          queryFn: streamOf({
+            type: "result",
+            subtype: "error_max_structured_output_retries",
+            usage: { input_tokens: 4, output_tokens: 5 },
+          }),
+        },
+      ),
+    ).rejects.toMatchObject({ code: "STRUCTURED_PARSE" });
+    expect(seen).toEqual([
+      { inputTokens: 2, outputTokens: 3, cacheReadInputTokens: 10, totalCostUsd: 0.01 },
+      { inputTokens: 4, outputTokens: 5 },
+    ]);
+  });
+
+  it("result が無ければ onUsage は呼ばれず、listener の例外は検索を止めない", async () => {
+    let calls = 0;
+    await expect(
+      runAgentSearch({ ...baseOpts, onUsage: () => calls++ }, { queryFn: streamOf() }),
+    ).rejects.toMatchObject({ code: "API_ERROR" });
+    expect(calls).toBe(0);
+    const res = await runAgentSearch(
+      {
+        ...baseOpts,
+        onUsage: () => {
+          throw new Error("observer down");
+        },
+      },
+      {
+        queryFn: streamOf({
+          type: "result",
+          subtype: "success",
+          structured_output: { answer: "A", notFound: false },
+        }),
+      },
+    );
+    expect(res.value.answer).toBe("A");
+  });
 });

@@ -10,6 +10,7 @@ export {
   type AgentModelUsage,
   type AgentProgressEvent,
   type AgentQueryFn,
+  type AgentRunUsage,
   type AgentSearchOptions,
   type AgentSearchResult,
   type AgentThinking,

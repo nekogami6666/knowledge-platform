@@ -13,6 +13,8 @@ import {
   freshnessReactionDecision,
   parseFreshnessRef,
 } from "./freshness-flow.js";
+import { createRepoRegistry } from "./repo-registry.js";
+import type { ScopedRepo } from "./repo-scope.js";
 
 const logger = {
   info: () => {},
@@ -352,5 +354,63 @@ describe("applyFreshnessReaction の直列化(ADR-0036 D5: /ask・定期同期�
     await expect(applyFreshnessReaction("trash", "act-1", deps)).resolves.toContain("stale");
     expect(pendingDuringSync).toBe(1); // 自タスクのみ
     expect(queue.pending).toBe(0);
+  });
+});
+
+describe("KB 作業ツリーの無効化(段階 1-2: 鮮度確認の書き込み後は次の /ask で必ず同期)", () => {
+  it("👍🗑✏️ は KB clone に触る前(同期・書き込みの前)に onKbTreeTouched を呼ぶ。validate 失敗でも呼ばれる", async () => {
+    for (const [kind, validateOk] of [
+      ["verify", true],
+      ["trash", true],
+      ["edit", true],
+      ["verify", false],
+    ] as const) {
+      const order: string[] = [];
+      const h = makeDeps({ validateOk });
+      const deps: FreshnessApplyDeps = {
+        ...h.deps,
+        onKbTreeTouched: () => order.push("invalidate"),
+        syncKbClone: async () => {
+          order.push("sync");
+          return "/kb";
+        },
+        writeFile: async () => {
+          order.push("write");
+        },
+      };
+      await applyFreshnessReaction(kind, "act-1", deps);
+      expect(order[0]).toBe("invalidate");
+      expect(order).toContain("sync");
+    }
+  });
+
+  it("処理済み(KB に触らない)なら無効化しない", async () => {
+    const h = makeDeps({ actions: [] });
+    let touched = 0;
+    await applyFreshnessReaction("verify", "act-1", {
+      ...h.deps,
+      onKbTreeTouched: () => {
+        touched += 1;
+      },
+    });
+    expect(touched).toBe(0);
+  });
+
+  it("RepoRegistry と組み合わせると、KB エントリが無効化される(最終成功時刻は残す)", async () => {
+    const kb: ScopedRepo = {
+      repo: "org/knowledge-base",
+      dir: "knowledge-base",
+      syncOnAsk: true,
+      managed: false,
+    };
+    const registry = createRepoRegistry([kb]);
+    registry.recordFetched({ repo: kb.repo, absDir: "/kb", resolvedCommit: "s1" }, 1000);
+    const h = makeDeps({});
+    await applyFreshnessReaction("verify", "act-1", {
+      ...h.deps,
+      onKbTreeTouched: () => registry.invalidate(h.deps.kbRepo),
+    });
+    expect(registry.isInvalidated("org/knowledge-base")).toBe(true);
+    expect(registry.lastFetchedAt("org/knowledge-base")).toBe(1000); // 許容期間の判定には残す
   });
 });

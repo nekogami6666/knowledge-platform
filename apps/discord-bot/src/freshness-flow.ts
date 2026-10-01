@@ -106,6 +106,12 @@ export interface FreshnessApplyDeps {
    * index.ts は /ask と同じ SerialQueue.enqueue を渡す。未指定ならそのまま実行する。
    */
   runExclusive?: <T>(task: () => Promise<T>) => Promise<T>;
+  /**
+   * KB の作業ツリーを触る直前に呼ぶ(段階 1-2)。index.ts は RepoRegistry の KB エントリを無効化し、
+   * 次の /ask が TTL 内でも必ず同期する(書き込み後の汚れた作業ツリーや、syncKbClone で動いた HEAD を
+   * 再利用しない)。未指定なら何もしない。
+   */
+  onKbTreeTouched?: () => void;
   readFile(absPath: string): Promise<string>;
   writeFile(absPath: string, content: string): Promise<void>;
   validate(kbRoot: string): Promise<{ ok: boolean; problems: readonly unknown[] }>;
@@ -156,6 +162,7 @@ async function commitVerdict(
   payload: FreshnessPayload,
   deps: FreshnessApplyDeps,
 ): Promise<string> {
+  deps.onKbTreeTouched?.();
   const kbRoot = await deps.syncKbClone();
   let raw: string;
   try {
@@ -220,6 +227,7 @@ async function createEditPr(
   payload: FreshnessPayload,
   deps: FreshnessApplyDeps,
 ): Promise<string> {
+  deps.onKbTreeTouched?.();
   const kbRoot = await deps.syncKbClone();
   let raw: string;
   try {

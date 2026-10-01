@@ -2,8 +2,8 @@
  * /ask オーケストレータ(design.md §6.2)。純関数寄りに保ち、依存は注入する(テスト容易性)。
  * フロー: RepoSyncer.sync → loadPrompt(qa/answer) → search(agentic) → citation 多層検証 →
  * permalink 化 → queries 記録 → notFound/出典全滅は pending_actions(question_queue)へ。
- * all_visible 有効時(ADR-0036 D5)は sync_on_ask 分だけをリポ単位で同期し、それ以外は
- * 定期同期の結果(RepoRegistry)を使う(syncForAskPerRepo)。
+ * 同期はリポ単位(ADR-0036 D5・syncForAskPerRepo): sync_on_ask 分だけを同期し(TTL 内は再利用・
+ * 失敗時は許容期間内の前回データ・段階 1-2)、それ以外は定期同期の結果(RepoRegistry)を使う。
  *
  * QaCitation は **discord-bot 側の引用ドメイン**で、kb-core の Source(KB エントリの provenance)
  * とは別物(修正2)。kb-core は検証・permalink 変換の道具としてのみ再利用する(format.ts)。
@@ -14,6 +14,7 @@ import { join, normalize } from "node:path";
 import { parseLineRange, safeParseEntry } from "@stratum/kb-core";
 import {
   type AgentProgressEvent,
+  type AgentRunUsage,
   type AgentSearchResult,
   isModelSubstituted,
   LlmError,
@@ -26,14 +27,19 @@ import {
   type AskPipelineMetrics,
   type AskSearchMetrics,
   type AskStage,
+  type AskSyncMetrics,
+  type AskUsageMetrics,
   classifyAskError,
+  createUsageAccumulator,
   searchMetricsOf,
+  usageOfResult,
 } from "./ask-metrics.js";
 import type { AnswerStatus, BotStore } from "./db.js";
 import { formatAnswer } from "./format.js";
 import type { RepoRegistry } from "./repo-registry.js";
 import type { ScopedRepo } from "./repo-scope.js";
 import type { RepoSpec, RepoSyncer, SyncedRepo } from "./repos.js";
+import { formatJstShort } from "./time.js";
 
 // discord ドメイン検証は kb-core と同一の permalink 規律(§9.5)に揃える。
 const DISCORD_PERMALINK_RE = /^https:\/\/discord\.com\/channels\/\d+\/\d+\/\d+$/;
@@ -292,6 +298,11 @@ export interface QaSearchInput {
   onProgress?: (ev: AgentProgressEvent) => void;
   /** 正常終了時の中断(ADR-0035 追記)。runAgentSearch へ透過する。 */
   signal?: AbortSignal;
+  /**
+   * 検索の試行ごとに 1 回呼ぶ(再試行を含む・段階 1-1)。usage はその回の使用量(result が無ければ null)。
+   * 完了ログの費用・トークンを全試行の合計にするために使う。
+   */
+  onAttempt?: (usage: AgentRunUsage | null) => void;
 }
 /** 戻りは runAgentSearch と同形(numTurns / durationApiMs を型で落とさない・ADR-0035 D4)。 */
 export type QaSearch = (input: QaSearchInput) => Promise<AgentSearchResult<QaAnswer>>;
@@ -304,14 +315,47 @@ export interface AskRequest {
   correlationId: string;
 }
 
+/** /ask の同期の TTL 再利用の既定(段階 1-2)。env ASK_SYNC_TTL_MS で上書き(index.ts)。 */
+export const DEFAULT_ASK_SYNC_TTL_MS = 60_000;
 /**
- * リポ単位の同期(ADR-0036 D5)。all_visible 有効時だけ注入する。
- * - registry: 検索範囲と最新の SyncedRepo(定期同期が更新する)。
- * - kbDir: KB の clone 先 dir。KB の同期失敗だけは従来どおり /ask 全体のエラーにする。
+ * 同期に失敗したリポを前回データで検索してよい期間の既定(段階 1-2・6 時間)。
+ * env ASK_SYNC_MAX_STALENESS_MS で上書き(index.ts)。
+ */
+export const DEFAULT_ASK_SYNC_MAX_STALENESS_MS = 6 * 60 * 60 * 1000;
+
+/**
+ * リポ単位の同期(ADR-0036 D5・段階 1-2)。index.ts は常に注入する(手動指定だけの構成も含む)。
+ * - registry: 検索範囲・最新の SyncedRepo・最終成功同期の時刻(/ask と定期同期が更新する)。
+ * - ttlMs: 最終成功同期からこの時間内なら fetch せず再利用する(作業ツリーがクリーンで HEAD が記録 SHA と
+ *   一致する場合だけ)。
+ * - maxStalenessMs: 同期に失敗しても、最終成功同期からこの時間内なら前回データで検索する(脚注で明示)。
  */
 export interface PerRepoSyncDeps {
   registry: RepoRegistry;
-  kbDir: string;
+  ttlMs?: number;
+  maxStalenessMs?: number;
+  /** 壁時計 ms(注入・既定 Date.now)。TTL・許容期間・脚注の時刻に使う。 */
+  nowMs?: () => number;
+}
+
+/** 前回データで検索したリポ(脚注の時刻に使う)。 */
+export interface StaleRepo {
+  repo: string;
+  /** 最終成功同期の時刻(壁時計 ms)。 */
+  fetchedAtMs: number;
+}
+
+/**
+ * 同期に失敗し、許容期間内の前回データも無い(初回同期の失敗・許容期間超え)ため /ask を続けられない
+ * (段階 1-2)。利用者には専用の文面(syncFailedMessage)を返す。cause は最初の失敗(git の失敗等)。
+ */
+export class AskSyncError extends Error {
+  override readonly name = "AskSyncError";
+  readonly repos: readonly string[];
+  constructor(repos: readonly string[], cause: unknown) {
+    super(`リポの同期に失敗し、利用できる前回データもありません: ${repos.join(", ")}`, { cause });
+    this.repos = repos;
+  }
 }
 
 export interface AskDeps {
@@ -319,8 +363,8 @@ export interface AskDeps {
   getRepos: () => readonly ScopedRepo[];
   syncer: RepoSyncer;
   /**
-   * 指定時はリポ単位の同期(ADR-0036 D5)。未指定 = 従来どおり全リポを /ask ごとに同期し、
-   * 1 リポでも失敗したら /ask 全体をエラーにする(all_visible が null の構成)。
+   * 指定時はリポ単位の同期(ADR-0036 D5・段階 1-2 の TTL 再利用と前回データ利用)。index.ts は常に指定する。
+   * 未指定 = 全リポを /ask ごとに同期し、1 リポでも失敗したら /ask 全体をエラーにする(テスト等の簡易構成)。
    */
   perRepo?: PerRepoSyncDeps;
   promptStore: PromptStore;
@@ -338,15 +382,12 @@ export interface AskDeps {
   fileExists?: (absPath: string) => boolean;
   /** 引用先ファイルの読み取り(stale KB 判定用。注入。既定 fs.readFileSync。失敗は null)。 */
   readFile?: (absPath: string) => string | null;
+  // 情報ログのフックは持たない: 所要時間・ターン数・トークン・同期の件数(ADR-0035 D4)は
+  // AskResult.metrics で返し、discord.ts が配送後に 1 行の完了ログで出す(段階 1-1)。
   /** エラー観測フック(§7.4。既定 no-op。PR-4b で相関 ID 付き pino を渡す)。 */
   logError?: (err: unknown) => void;
   /** 警告観測フック(§7.4。既定 no-op。「回答はあるのに全 citation が検証で破棄」等の診断用)。 */
   logWarn?: (data: Record<string, unknown>, msg: string) => void;
-  /**
-   * 情報観測フック(既定 no-op)。/ask 完了時の所要時間・ターン数・トークン(ADR-0035 D4)は
-   * ここではなく AskResult.metrics として返し、discord.ts が配送後に 1 行で出す(段階 1-1)。
-   */
-  logInfo?: (data: Record<string, unknown>, msg: string) => void;
   /** 進捗の購読(ADR-0035 D5。既定 no-op)。 */
   onProgress?: (ev: AskProgressEvent) => void;
   /** 実効の検索タイムアウト(ms)。タイムアウト文面の秒数表示に使う(既定 DEFAULT_ASK_TIMEOUT_MS)。 */
@@ -423,6 +464,24 @@ export function recordSkippedAsk(
   };
 }
 
+/**
+ * 同期に失敗し、利用できる前回データも無いときの文面(段階 1-2)。汎用の ERROR_MESSAGE と区別し、
+ * 原因(ナレッジの最新化の失敗)と対象リポを伝える。
+ */
+export function syncFailedMessage(repos: readonly string[]): string {
+  return (
+    `すみません、ナレッジの最新化(${repos.join("、")})に失敗し、利用できる直近のデータも無いため回答できませんでした。` +
+    "GitHub との通信に問題がある可能性があります。少し時間をおいて再度お試しください。"
+  );
+}
+
+/** 前回データで検索したときに回答の末尾へ付ける注記(最も古いリポの同期時刻・JST)。 */
+export function staleKnowledgeNote(stale: readonly StaleRepo[]): string | null {
+  if (stale.length === 0) return null;
+  const oldest = Math.min(...stale.map((r) => r.fetchedAtMs));
+  return `※ ナレッジは ${formatJstShort(new Date(oldest))} 時点の内容です(最新化に失敗)`;
+}
+
 /** §6.2 失敗時挙動の「上限 600 秒」の正典値(ADR-0035 D1)。env ASK_TIMEOUT_MS による上書きは index.ts。 */
 export const DEFAULT_ASK_TIMEOUT_MS = 600_000;
 
@@ -439,28 +498,121 @@ export function timeoutMessage(timeoutMs: number): string {
   );
 }
 
+/** syncForAskPerRepo の結果。 */
+export interface PerRepoSyncOutcome {
+  /** clone のあるリポ(manifest 用)。 */
+  available: ScopedRepo[];
+  /** available と同順の SyncedRepo(引用検証用。ref は検索する作業ツリーの SHA)。 */
+  synced: SyncedRepo[];
+  /** 前回データで検索するリポ(脚注用)。 */
+  stale: StaleRepo[];
+  /** 完了ログ用の件数。 */
+  metrics: AskSyncMetrics;
+}
+
 /**
- * all_visible 有効時の /ask 用同期(ADR-0036 D5)。
- * - sync_on_ask のリポだけをリポ単位で同期する。KB の失敗は throw(従来どおり /ask はエラー)、
- *   それ以外の失敗は warn して clone の現状(前回同期の状態)で検索する。clone が無ければ対象外。
- * - 今回同期しないリポは定期同期の SyncedRepo → 無ければ `rev-parse HEAD` で解決する。
+ * /ask 用のリポ単位同期(ADR-0036 D5・段階 1-2)。SerialQueue のタスク内で呼ぶ(同期・検索・鮮度確認の
+ * 書き込みは同じキューで直列化されている)。
+ * - sync_on_ask のリポ:
+ *   1. TTL 再利用: 最終成功同期が ttlMs 以内・無効化されていない・作業ツリーがクリーン・HEAD が記録 SHA と
+ *      一致(`status --porcelain` と `rev-parse` だけで確認)なら fetch しない。
+ *   2. それ以外はリポ単位で同期する(syncEach)。
+ *   3. 同期に失敗したら、最終成功同期が maxStalenessMs 以内なら前回データで検索する。作業ツリーが汚れて
+ *      いれば HEAD に戻してから使い、引用の ref は実 HEAD にする(脚注で時点を明示)。
+ *      最終成功時刻はプロセス内の記録を優先し、無ければ(再起動直後)clone の `.git/FETCH_HEAD` の
+ *      更新時刻から補う(RepoSyncer.fetchTimeOnDisk)。
+ *   4. 許容期間超え・未同期(初回同期の失敗)・クリーンに戻せない clone の扱いはリポの由来で分ける:
+ *      - 手動指定(repos.yaml の `repos:`・managed=false。KB・議事録を含む)は AskSyncError
+ *        (専用の文面で /ask をエラーにする)。KB も同じ規則(従来の「KB の失敗は常にエラー」から緩めた)。
+ *      - 列挙由来(all_visible・managed=true)は今回の対象から外す(manifest・引用の許可リストに載せない)。
+ *        /ask 全体は止めない(warn と完了ログの reposExcluded で観測する)。
+ * - 今回同期しないリポ(sync_on_ask 外)は定期同期の SyncedRepo → 無ければ `rev-parse HEAD` で解決する。
  *   引用の許可リストは「clone のある全対象リポ」から作る(今回同期分だけにするとコードのリポへの
  *   引用がすべて破棄される)。
- * 戻り: clone のあるリポ(manifest 用)と、その SyncedRepo(引用検証用)。同順。
  */
 export async function syncForAskPerRepo(
-  deps: Pick<AskDeps, "getRepos" | "syncer" | "logWarn" | "logInfo">,
+  deps: Pick<AskDeps, "getRepos" | "syncer" | "logWarn">,
   perRepo: PerRepoSyncDeps,
-): Promise<{ available: ScopedRepo[]; synced: SyncedRepo[] }> {
+): Promise<PerRepoSyncOutcome> {
   const { registry } = perRepo;
+  const nowMs = perRepo.nowMs ?? Date.now;
+  const ttlMs = perRepo.ttlMs ?? DEFAULT_ASK_SYNC_TTL_MS;
+  const maxStalenessMs = perRepo.maxStalenessMs ?? DEFAULT_ASK_SYNC_MAX_STALENESS_MS;
   const scope = deps.getRepos();
-  const results = await deps.syncer.syncEach(scope.filter((r) => r.syncOnAsk));
-  const fresh = new Map<string, SyncedRepo>();
-  const failed = new Set<string>();
+  /** sync_on_ask のリポのうち、今回使う SyncedRepo(再利用・同期・前回データ)。 */
+  const usable = new Map<string, SyncedRepo>();
+
+  // 1. TTL 再利用(確認の失敗は「再利用しない」に倒す)。
+  const reusable = async (spec: ScopedRepo): Promise<SyncedRepo | undefined> => {
+    const rec = registry.lastSynced(spec.repo);
+    const at = registry.lastFetchedAt(spec.repo);
+    if (rec === undefined || at === undefined || registry.isInvalidated(spec.repo))
+      return undefined;
+    if (nowMs() - at >= ttlMs) return undefined;
+    try {
+      const st = await deps.syncer.inspect(spec);
+      return st?.clean === true && st.synced.resolvedCommit === rec.resolvedCommit
+        ? rec
+        : undefined;
+    } catch {
+      return undefined;
+    }
+  };
+  const toSync: ScopedRepo[] = [];
+  let reused = 0;
+  for (const spec of scope.filter((r) => r.syncOnAsk)) {
+    const rec = await reusable(spec);
+    if (rec === undefined) {
+      toSync.push(spec);
+    } else {
+      usable.set(spec.repo, rec);
+      reused += 1;
+    }
+  }
+
+  // 3. 前回データ(許容期間内・クリーンな作業ツリー)。使えなければ理由を返す。
+  const lastSuccessAt = async (spec: ScopedRepo): Promise<number | undefined> => {
+    const recorded = registry.lastFetchedAt(spec.repo);
+    if (recorded !== undefined) return recorded;
+    // 再起動直後(プロセス内の記録が無い): clone の最終 fetch 時刻から補う。
+    try {
+      return (await deps.syncer.fetchTimeOnDisk(spec)) ?? undefined;
+    } catch {
+      return undefined;
+    }
+  };
+  const staleFallback = async (
+    spec: ScopedRepo,
+  ): Promise<
+    | { ok: true; stale: StaleRepo; s: SyncedRepo }
+    | { ok: false; reason: "never_synced" | "too_stale" | "no_clean_clone" }
+  > => {
+    const at = await lastSuccessAt(spec);
+    if (at === undefined) return { ok: false, reason: "never_synced" };
+    if (nowMs() - at > maxStalenessMs) return { ok: false, reason: "too_stale" };
+    try {
+      let st = await deps.syncer.inspect(spec);
+      // 鮮度確認の書き込み・同期途中の失敗で汚れた作業ツリーは HEAD に戻す(内容と引用 SHA を一致させる)。
+      if (st !== null && !st.clean) st = await deps.syncer.restoreHead(spec);
+      if (st === null || !st.clean) return { ok: false, reason: "no_clean_clone" };
+      return { ok: true, stale: { repo: spec.repo, fetchedAtMs: at }, s: st.synced };
+    } catch {
+      return { ok: false, reason: "no_clean_clone" };
+    }
+  };
+
+  // 2. 同期。
+  const results = await deps.syncer.syncEach(toSync);
+  const syncedAt = nowMs();
+  const stale: StaleRepo[] = [];
+  const unavailable: { repo: string; error: unknown }[] = [];
+  let fetched = 0;
+  let excluded = 0;
   for (const r of results) {
     if (r.status === "synced") {
-      registry.recordSynced(r.synced);
-      fresh.set(r.spec.repo, r.synced);
+      registry.recordFetched(r.synced, syncedAt);
+      usable.set(r.spec.repo, r.synced);
+      fetched += 1;
       continue;
     }
     if (r.status === "empty") {
@@ -469,13 +621,41 @@ export async function syncForAskPerRepo(
       continue;
     }
     registry.recordError(r.spec.repo, r.error);
-    if (r.spec.dir === perRepo.kbDir) throw r.error; // KB は members・鮮度確認の正本。従来どおりエラー
-    failed.add(r.spec.repo);
+    const spec = r.spec as ScopedRepo;
+    const fb = await staleFallback(spec);
+    if (!fb.ok) {
+      if (spec.managed) {
+        // 列挙由来のリポ 1 件の失敗で /ask 全体を止めない。今回の対象から外す(usable に入れない)。
+        excluded += 1;
+        deps.logWarn?.(
+          { repo: spec.repo, reason: fb.reason, err: r.error },
+          "/ask: 列挙由来のリポの同期に失敗し、前回データも使えないため今回の検索対象から外します(段階 1-2)",
+        );
+        continue;
+      }
+      unavailable.push({ repo: spec.repo, error: r.error });
+      deps.logWarn?.(
+        { repo: spec.repo, reason: fb.reason, err: r.error },
+        "/ask: リポの同期に失敗し、許容期間内の前回データもありません(/ask はエラー・段階 1-2)",
+      );
+      continue;
+    }
+    usable.set(spec.repo, fb.s);
+    stale.push(fb.stale);
     deps.logWarn?.(
-      { repo: r.spec.repo, err: r.error },
-      "/ask: リポの同期に失敗しました(clone の現状で検索します・ADR-0036 D5)",
+      { repo: spec.repo, err: r.error, staleAgeMs: syncedAt - fb.stale.fetchedAtMs },
+      "/ask: リポの同期に失敗しました(前回データで検索します・段階 1-2)",
     );
   }
+  // 4. 使えないリポがあれば検索しない(古さが分からないデータで答えない)。
+  const firstUnavailable = unavailable[0];
+  if (firstUnavailable !== undefined) {
+    throw new AskSyncError(
+      unavailable.map((u) => u.repo),
+      firstUnavailable.error,
+    );
+  }
+
   const head = async (spec: ScopedRepo): Promise<SyncedRepo | undefined> => {
     try {
       return (await deps.syncer.resolveHead(spec)) ?? undefined;
@@ -487,11 +667,8 @@ export async function syncForAskPerRepo(
   const synced: SyncedRepo[] = [];
   for (const spec of scope) {
     if (registry.isEmpty(spec.repo)) continue; // 空リポ(引用できるファイルが無い)
-    let s = fresh.get(spec.repo);
-    if (s === undefined && failed.has(spec.repo)) {
-      // 失敗が fetch 後(reset/clean の途中)でも permalink が作業ツリーとズレないよう実 HEAD を使う。
-      s = await head(spec);
-    } else if (s === undefined) {
+    let s = usable.get(spec.repo);
+    if (s === undefined && !spec.syncOnAsk) {
       s = registry.lastSynced(spec.repo);
       if (s === undefined) {
         s = await head(spec);
@@ -502,16 +679,21 @@ export async function syncForAskPerRepo(
     available.push(spec);
     synced.push(s);
   }
-  deps.logInfo?.(
-    {
-      inScope: scope.length,
-      available: available.length,
-      syncedNow: fresh.size,
-      failed: failed.size,
+  return {
+    available,
+    synced,
+    stale,
+    metrics: {
+      reposInScope: scope.length,
+      reposAvailable: available.length,
+      reposFetched: fetched,
+      reposReused: reused,
+      reposStale: stale.length,
+      reposExcluded: excluded,
+      staleAgeMs:
+        stale.length === 0 ? null : syncedAt - Math.min(...stale.map((x) => x.fetchedAtMs)),
     },
-    "/ask: 検索範囲(ADR-0036)",
-  );
-  return { available, synced };
+  };
 }
 
 /** 既定の単調クロック(§6.2 step5 の所要時間計測)。壁時計でなく monotonic を使う。 */
@@ -551,10 +733,16 @@ export async function handleAskRequest(req: AskRequest, deps: AskDeps): Promise<
     return ms;
   };
   let search: AskSearchMetrics | null = null;
+  // 段階 1-1: 検索の使用量は全試行(再試行・最終的に失敗した回を含む)の合計を出す。
+  const usageAcc = createUsageAccumulator();
+  let usageMetrics: AskUsageMetrics | null = null;
+  let syncMetrics: AskSyncMetrics | null = null;
   const metricsOf = (elapsedMs: number, failure: AskFailure | null): AskPipelineMetrics => ({
     ...timings,
     elapsedMs,
+    sync: syncMetrics,
     search,
+    usage: usageMetrics ?? usageAcc.total(),
     failure,
   });
   // 関数にするのは、await をまたいだ再判定を TS の型の絞り込みに潰されないようにするため。
@@ -585,13 +773,22 @@ export async function handleAskRequest(req: AskRequest, deps: AskDeps): Promise<
       }),
     };
   };
+  /** 前回データで検索したときの注記を末尾に付ける。 */
+  const withNote = (text: string, note: string | null): string =>
+    note === null ? text : `${text}\n\n${note}`;
   try {
     if (isAborted()) return interrupted();
     deps.onProgress?.({ kind: "sync" });
     let repos: readonly RepoSpec[];
     let synced: SyncedRepo[];
+    let staleNote: string | null = null;
     if (deps.perRepo !== undefined) {
-      ({ available: repos, synced } = await syncForAskPerRepo(deps, deps.perRepo));
+      const out = await syncForAskPerRepo(deps, deps.perRepo);
+      repos = out.available;
+      synced = out.synced;
+      syncMetrics = out.metrics;
+      // 段階 1-2: 前回データで検索したら、回答の末尾に時点を明示する。
+      staleNote = staleKnowledgeNote(out.stale);
     } else {
       // 従来挙動(all_visible 無し): 全リポを同期し、1 リポでも失敗したら /ask 全体をエラーにする。
       repos = deps.getRepos();
@@ -617,6 +814,7 @@ export async function handleAskRequest(req: AskRequest, deps: AskDeps): Promise<
       cwd: deps.clonesDir,
       ...(deps.onProgress !== undefined ? { onProgress: deps.onProgress } : {}),
       ...(deps.signal !== undefined ? { signal: deps.signal } : {}),
+      onAttempt: (u) => usageAcc.add(u),
     });
     timings.searchMs = endStage();
     const { value, usage, requestedModel, actualModel } = result;
@@ -639,6 +837,8 @@ export async function handleAskRequest(req: AskRequest, deps: AskDeps): Promise<
         );
     // ADR-0035 D4 / 段階 1-1: ターン数・トークン等は完了ログ(discord.ts)に載せる。
     search = searchMetricsOf(result, valid.length);
+    // 試行ごとの通知が無い検索(テスト用の差し替え等)は最終結果の値を使う。
+    usageMetrics = usageAcc.total() ?? usageOfResult(result);
 
     // 観測性(§7.4): モデルは回答+出典を返したのに検証で全滅したケースは、書式・allowlist 等の
     // 系統的問題のシグナルなので必ず痕跡を残す(2026-07-22 の lines 書式ゆれ調査で必要になった)。
@@ -672,14 +872,14 @@ export async function handleAskRequest(req: AskRequest, deps: AskDeps): Promise<
       });
       timings.validateMs = endStage();
       return {
-        answerText: NOT_FOUND_MESSAGE,
+        answerText: withNote(NOT_FOUND_MESSAGE, staleNote),
         status: "unanswered",
         queryId,
         metrics: metricsOf(elapsedMs, null),
       };
     }
 
-    const answerText = formatAnswer(value.answer, valid);
+    const answerText = withNote(formatAnswer(value.answer, valid), staleNote);
     const elapsedMs = Math.round(monoNow() - startedAt);
     deps.store.recordQuery({
       ...base,
@@ -719,7 +919,9 @@ export async function handleAskRequest(req: AskRequest, deps: AskDeps): Promise<
     return {
       answerText: timedOut
         ? timeoutMessage(deps.searchTimeoutMs ?? DEFAULT_ASK_TIMEOUT_MS)
-        : ERROR_MESSAGE,
+        : err instanceof AskSyncError
+          ? syncFailedMessage(err.repos)
+          : ERROR_MESSAGE,
       status: timedOut ? "timeout" : "error",
       queryId,
       metrics: metricsOf(elapsedMs, failure),

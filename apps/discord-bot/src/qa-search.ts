@@ -10,6 +10,7 @@
  */
 import {
   type AgentEffort,
+  type AgentRunUsage,
   type AgentSearchOptions,
   type AgentSearchResult,
   type AgentThinking,
@@ -88,25 +89,40 @@ export function createQaSearch(deps: QaSearchFactoryDeps = {}): QaSearch {
   const timeoutMs = deps.timeoutMs ?? DEFAULT_ASK_TIMEOUT_MS;
   return (input) =>
     withRetry(
-      () =>
-        runSearch<QaAnswer>(
-          {
-            app: "discord-bot",
-            role: "standard",
-            systemPrompt: input.systemPrompt,
-            prompt: input.question,
-            cwd: input.cwd,
-            outputSchema: qaAnswerSchema,
-            timeoutMs,
-            ...(input.onProgress !== undefined ? { onProgress: input.onProgress } : {}),
-            // 正常終了時の中断(ADR-0035 追記)。ABORTED は shouldRetryAsk の対象外なので再試行しない。
-            ...(input.signal !== undefined ? { signal: input.signal } : {}),
-            ...(deps.maxTurns !== undefined ? { maxTurns: deps.maxTurns } : {}),
-            ...(deps.effort !== undefined ? { effort: deps.effort } : {}),
-            ...(deps.thinking !== undefined ? { thinking: deps.thinking } : {}),
-          },
-          { usage },
-        ),
+      async () => {
+        // 段階 1-1: 試行ごとの使用量を input.onAttempt へ通知する(再試行された失敗回の費用も合算する
+        // ため)。result の無い失敗(タイムアウト等)は null。
+        let attemptUsage: AgentRunUsage | null = null;
+        try {
+          return await runSearch<QaAnswer>(
+            {
+              app: "discord-bot",
+              role: "standard",
+              systemPrompt: input.systemPrompt,
+              prompt: input.question,
+              cwd: input.cwd,
+              outputSchema: qaAnswerSchema,
+              timeoutMs,
+              ...(input.onProgress !== undefined ? { onProgress: input.onProgress } : {}),
+              // 正常終了時の中断(ADR-0035 追記)。ABORTED は shouldRetryAsk の対象外なので再試行しない。
+              ...(input.signal !== undefined ? { signal: input.signal } : {}),
+              ...(input.onAttempt !== undefined
+                ? {
+                    onUsage: (u: AgentRunUsage) => {
+                      attemptUsage = u;
+                    },
+                  }
+                : {}),
+              ...(deps.maxTurns !== undefined ? { maxTurns: deps.maxTurns } : {}),
+              ...(deps.effort !== undefined ? { effort: deps.effort } : {}),
+              ...(deps.thinking !== undefined ? { thinking: deps.thinking } : {}),
+            },
+            { usage },
+          );
+        } finally {
+          input.onAttempt?.(attemptUsage);
+        }
+      },
       // TIMEOUT は再送しない(所要時間は検索対象サイズ比例 — 再送は待ち時間を倍にするだけで、
       // ユーザーは interaction の 15 分期限内で待っている・2026-08-16 の教訓)。
       { maxRetries, shouldRetry: shouldRetryAsk },
