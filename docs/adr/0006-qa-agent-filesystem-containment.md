@@ -81,6 +81,12 @@ SDK の `settings`/`managedSettings` の `permissions.deny` で Read/Grep/Glob �
 コールバックは未設定(deny のみの hook は可)」へ、D4 の SDK レベル deny の評価は ADR-0037 D2 で
 完了とする。D1(OS/コンテナ層の隔離)は引き続き本丸であり、agent の別 uid 実行等は ADR-0037 の将来課題。
 
+## 追記(2026-10-01・ADR-0038)
+
+D2 の「`mcpServers` は未設定」に例外を 1 つ置いた: 呼び出し元が明示的に渡した**プロセス内ツール**
+(/ask の `discord_search`・読み取り専用・質問者の権限で絞り込み)だけを `mcpServers` に載せる。
+外部の MCP サーバ(stdio / HTTP / SSE)は引き続き未設定。理由と条件は ADR-0038 D6。
+
 ## 却下した代替案
 
 - **cwd を境界として信頼する(現状の暗黙前提)** → SDK の実挙動と矛盾し漏洩経路が残るため却下。

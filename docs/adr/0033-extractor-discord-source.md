@@ -68,6 +68,8 @@ subpath export**(`@stratum/discord-bot/collector`)する。gap-tracker/freshness
 ### D6. fetch → extract → discard(本文は永続しない)
 
 ADR-0017 D7 準拠。永続するのは KB エントリ + permalink + カーソル(snowflake ID)のみ。
+(2026-10-01 追記: ADR-0038 で bot が /ask の検索用に本文を別ファイルへ保存するようになったが、extractor は
+変更しない。extractor が REST の代わりに保存済み本文から読むかは ADR-0038 の未決事項。)
 §9.3 の 4 カテゴリ完全除外は prompt 節 + `applyCandidateGuards`(ADR-0027 D2)の二層。
 ADR-0029 の「自動抽出(人が明示的に選んでいない経路)は厳格側」を維持する。
 

@@ -93,6 +93,7 @@ evals)に一律で効く。
 能力を削ることしかできないため、この禁止の対象外とする。canUseTool は上記のとおり事前承認済みの Read で
 呼ばれずパス検査の場にならないため、引き続き未設定とする。`additionalDirectories`・`mcpServers`・
 `agents`・`toolAliases` は到達範囲・能力を広げうるため引き続き未設定。
+(2026-10-01 追記: `mcpServers` は ADR-0038 D6 の例外 — 呼び出し元が渡したプロセス内ツールのみ — を除き未設定。)
 
 ### D2. SDK 側の強制 `blockReadsOutsideWorkingDirectories`(独立の第 2 層)
 
