@@ -78,7 +78,7 @@ export function shouldRetryAsk(error: unknown): boolean {
 
 /**
  * 実 agentic search(runAgentSearch + §6.2 の 1 回リトライ)を {@link QaSearch} として組み立てる。
- * `app: "discord-bot"`・`role: "standard"`・`outputSchema: qaAnswerSchema` を固定する。
+ * `app: "discord-bot"`・`role: "qa"`(/ask 専用のモデル・ADR-0039)・`outputSchema: qaAnswerSchema` を固定する。
  * Claude on AWS の認証(CLAUDE_CODE_USE_ANTHROPIC_AWS / ANTHROPIC_AWS_* / AWS_REGION)は
  * Agent SDK が process.env から自動取得する(deps には渡さない・ADR-0009)。
  */
@@ -97,7 +97,7 @@ export function createQaSearch(deps: QaSearchFactoryDeps = {}): QaSearch {
           return await runSearch<QaAnswer>(
             {
               app: "discord-bot",
-              role: "standard",
+              role: "qa",
               systemPrompt: input.systemPrompt,
               prompt: input.question,
               cwd: input.cwd,

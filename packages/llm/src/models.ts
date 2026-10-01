@@ -4,7 +4,7 @@
  * モデルは更新されるため、四半期ごとに本ファイルを見直す(design.md §5.2)。
  */
 
-export type ModelRole = "fast" | "standard" | "deep";
+export type ModelRole = "fast" | "standard" | "deep" | "qa";
 
 /**
  * ロール → モデル ID(2026-06 時点。design.md §5.2 の表に一致)。
@@ -12,11 +12,15 @@ export type ModelRole = "fast" | "standard" | "deep";
  * - fast: 分類・ルーティング・💡スレッドの一次要約・鮮度確認文面生成
  * - standard: Q&A 回答生成・ナレッジ抽出・PR マイニング・矛盾検出
  * - deep: 月次の横断分析・インタビュー質問生成・専門性マップのトピック統合 + golden eval の judge
+ * - qa: /ask の回答生成(agentic search)だけ(ADR-0039)。2026-10-01 の比較実験で standard より約 2.5 倍速く
+ *   費用は約半分・未回答判定と引用は同等だったため先に切り替える。抽出などのバッチは standard のまま
+ *   (品質を確かめてから別途判断)。組織の Claude Code 設定は claude-sonnet-4-6 を許可していない点にも注意。
  */
 export const MODELS: Readonly<Record<ModelRole, string>> = {
   fast: "claude-haiku-4-5-20251001",
   standard: "claude-sonnet-4-6",
   deep: "claude-opus-4-8",
+  qa: "claude-sonnet-5-5",
 };
 
 /** ロールに対応するモデル ID を返す。Claude on AWS は本家パリティのため素の ID(ADR-0009)。 */

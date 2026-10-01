@@ -24,7 +24,7 @@ export interface PromptStore {
   read(app: string, name: string): Promise<string>;
 }
 
-const VALID_ROLES: readonly ModelRole[] = ["fast", "standard", "deep"];
+const VALID_ROLES: readonly ModelRole[] = ["fast", "standard", "deep", "qa"];
 
 /** prompts ルート配下の `<app>/<name>.md` を読む既定ストア。 */
 export function createFsPromptStore(promptsRoot: string): PromptStore {

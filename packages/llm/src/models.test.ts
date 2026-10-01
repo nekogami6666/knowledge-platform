@@ -3,7 +3,7 @@ import { MODELS, type ModelRole, modelIdFor } from "./models.js";
 
 describe("modelIdFor", () => {
   it("各ロールが非空のモデル ID を返す", () => {
-    for (const role of ["fast", "standard", "deep"] as ModelRole[]) {
+    for (const role of ["fast", "standard", "deep", "qa"] as ModelRole[]) {
       expect(modelIdFor(role).length).toBeGreaterThan(0);
     }
   });
@@ -14,7 +14,12 @@ describe("modelIdFor", () => {
     expect(modelIdFor("deep")).toBe("claude-opus-4-8");
   });
 
-  it("MODELS は fast / standard / deep の 3 ロールちょうどを持つ", () => {
-    expect(Object.keys(MODELS).sort()).toEqual(["deep", "fast", "standard"]);
+  it("qa(/ask の回答生成)は claude-sonnet-5-5(ADR-0039・バッチの standard とは別)", () => {
+    expect(modelIdFor("qa")).toBe("claude-sonnet-5-5");
+    expect(modelIdFor("qa")).not.toBe(modelIdFor("standard"));
+  });
+
+  it("MODELS は fast / standard / deep / qa の 4 ロールちょうどを持つ", () => {
+    expect(Object.keys(MODELS).sort()).toEqual(["deep", "fast", "qa", "standard"]);
   });
 });
