@@ -454,34 +454,177 @@ describe("handleAskRequest synthetic 統合(§6.2 受け入れ条件)", () => {
     expect(warnsSkipped).toHaveLength(0);
   });
 
-  it("検索完了ごとに logInfo へ elapsedMs / numTurns / durationApiMs を出す(ADR-0035 D4)", async () => {
+  it("工程別の時間と検索の観測値を AskResult.metrics で返し、logInfo には出さない(ADR-0035 D4・段階 1-1)", async () => {
     const infos: Record<string, unknown>[] = [];
     let t = 0;
     const { deps } = makeDeps({
       search: async () => ({
-        value: { answer: "回答", citations: [], notFound: true },
+        value: {
+          answer: "温度補正は入っています。",
+          citations: [{ kind: "github_file", repo: "org/minutes", path: "2026/x.md" }],
+          notFound: false,
+        },
         usage: { inputTokens: 3, outputTokens: 4 },
         numTurns: 9,
         durationApiMs: 41_000,
         deniedToolCalls: 2,
+        cacheCreationInputTokens: 100,
+        cacheReadInputTokens: 2000,
+        totalCostUsd: 0.05,
+        modelUsage: {
+          m: {
+            inputTokens: 3,
+            outputTokens: 4,
+            cacheReadInputTokens: 2000,
+            cacheCreationInputTokens: 100,
+            costUsd: 0.05,
+          },
+        },
+        requestedModel: "m",
+        actualModel: "m",
       }),
+      // 呼ばれるたびに 1 秒進む(開始 → sync → prompt → search → recordQuery 直前 → validate)。
       monotonicMs: () => (t += 1000),
       logInfo: (data) => infos.push(data),
     });
-    await handleAskRequest(req, deps);
-    expect(infos).toHaveLength(1);
-    expect(infos[0]).toMatchObject({
-      numTurns: 9,
-      durationApiMs: 41_000,
-      deniedToolCalls: 2, // ADR-0037: 拒否数も観測する
-      notFound: true,
+    const res = await handleAskRequest(req, deps);
+    expect(res.status).toBe("answered");
+    // 完了ログは discord.ts が配送後に 1 行で出す(二重に出さない)。
+    expect(infos).toHaveLength(0);
+    expect(res.metrics).toEqual({
+      syncMs: 1000,
+      promptMs: 1000,
+      searchMs: 1000,
+      validateMs: 2000,
+      elapsedMs: 4000,
+      failure: null,
+      search: {
+        numTurns: 9,
+        durationApiMs: 41_000,
+        deniedToolCalls: 2, // ADR-0037: 拒否数も観測する
+        notFound: false,
+        citations: 1,
+        validCitations: 1,
+        inputTokens: 3,
+        outputTokens: 4,
+        cacheCreationInputTokens: 100,
+        cacheReadInputTokens: 2000,
+        totalCostUsd: 0.05,
+        modelUsage: {
+          m: {
+            inputTokens: 3,
+            outputTokens: 4,
+            cacheReadInputTokens: 2000,
+            cacheCreationInputTokens: 100,
+            costUsd: 0.05,
+          },
+        },
+        requestedModel: "m",
+        actualModel: "m",
+      },
     });
-    expect(infos[0]?.elapsedMs).toBe(1000);
-    // 無ければ null(欠損と 0 を区別する)。
-    const infos2: Record<string, unknown>[] = [];
-    const { deps: deps2 } = makeDeps({ logInfo: (data) => infos2.push(data) });
-    await handleAskRequest(req, deps2);
-    expect(infos2[0]).toMatchObject({ numTurns: null, durationApiMs: null, deniedToolCalls: null });
+    // 無ければ null(欠損と 0 を区別する)。未回答でも工程の時間は揃う。
+    const { deps: deps2 } = makeDeps();
+    const res2 = await handleAskRequest(req, deps2);
+    expect(res2.status).toBe("unanswered");
+    expect(res2.metrics?.search).toMatchObject({
+      numTurns: null,
+      durationApiMs: null,
+      deniedToolCalls: null,
+      cacheReadInputTokens: null,
+      totalCostUsd: null,
+      modelUsage: null,
+      notFound: true,
+      validCitations: 0,
+    });
+    for (const k of ["syncMs", "promptMs", "searchMs", "validateMs"] as const) {
+      expect(typeof res2.metrics?.[k]).toBe("number");
+    }
+  });
+
+  it("失敗した工程・経過・エラー種別を metrics.failure に入れる(本文は持たない)", async () => {
+    const failAt = async (over: Partial<AskDeps>) => {
+      let t = 0;
+      const { deps } = makeDeps({ monotonicMs: () => (t += 10), ...over });
+      return handleAskRequest(req, deps);
+    };
+    const gitDns = Object.assign(
+      new Error("Command failed: git fetch --depth=1 https://github.com/org/x.git"),
+      {
+        cmd: "git -C /clones/x fetch --depth=1 https://github.com/org/x.git",
+        stderr:
+          "fatal: unable to access 'https://github.com/org/x.git/': Could not resolve host: github.com\n",
+        code: 128,
+      },
+    );
+    const sync = await failAt({
+      syncer: {
+        ...fakeSyncer(),
+        sync: async () => {
+          throw gitDns;
+        },
+      },
+    });
+    expect(sync.status).toBe("error");
+    expect(sync.metrics?.failure).toEqual({
+      stage: "sync",
+      atMs: 10,
+      errorKind: "GitError",
+      errorCode: "GIT_DNS",
+    });
+    expect(sync.metrics?.syncMs).toBeNull();
+    expect(sync.metrics?.search).toBeNull();
+
+    const prompt = await failAt({
+      promptStore: {
+        read: async () => {
+          throw new LlmError("PROMPT_NOT_FOUND", "x");
+        },
+      },
+    });
+    expect(prompt.metrics?.failure).toMatchObject({
+      stage: "prompt",
+      errorKind: "LlmError",
+      errorCode: "PROMPT_NOT_FOUND",
+    });
+    expect(prompt.metrics?.syncMs).toBe(10);
+
+    const search = await failAt({
+      search: async () => {
+        throw new LlmError("TIMEOUT", "t");
+      },
+    });
+    expect(search.status).toBe("timeout");
+    expect(search.metrics?.failure).toMatchObject({
+      stage: "search",
+      errorKind: "LlmError",
+      errorCode: "TIMEOUT",
+    });
+    expect(search.metrics?.promptMs).toBe(10);
+    expect(search.metrics?.searchMs).toBeNull();
+
+    const validate = await failAt({
+      search: async () => ({
+        value: {
+          answer: "温度補正は入っています。",
+          citations: [{ kind: "github_file", repo: "org/minutes", path: "2026/x.md" }],
+          notFound: false,
+        },
+        usage: { inputTokens: 1, outputTokens: 1 },
+      }),
+      fileExists: () => {
+        throw Object.assign(new Error("EACCES: permission denied"), { code: "EACCES" });
+      },
+    });
+    expect(validate.metrics?.failure).toMatchObject({
+      stage: "validate",
+      errorKind: "SystemError",
+      errorCode: "EACCES",
+    });
+    expect(typeof validate.metrics?.searchMs).toBe("number");
+    // 本文(質問・エラーの message)は計測値に入らない。
+    expect(JSON.stringify(validate.metrics)).not.toContain(req.question);
+    expect(JSON.stringify(sync.metrics)).not.toContain("Could not resolve");
   });
 
   it("onProgress は sync → search → (検索側の tool_use) の順で届き、search 入力へ透過する(ADR-0035 D5)", async () => {
@@ -557,12 +700,13 @@ describe("handleAskRequest synthetic 統合(§6.2 受け入れ条件)", () => {
   });
 
   it("§6.2 step5: elapsedMs を monotonic 差分で記録する(常に null ではない)", async () => {
-    // monotonicMs は startedAt(1回目)と recordQuery(2回目)で呼ばれる → 250-100=150ms。
-    const ticks = [100, 250];
+    // monotonicMs は開始・各工程の区切り(sync / prompt / search)・recordQuery 直前の順に呼ばれる。
+    const ticks = [100, 110, 120, 200, 250];
     let i = 0;
-    const { deps, store } = makeDeps({ monotonicMs: () => ticks[i++] ?? 0 });
+    const { deps, store } = makeDeps({ monotonicMs: () => ticks[i++] ?? 300 });
     const res = await handleAskRequest(req, deps);
     expect(store.getQuery(res.queryId)?.elapsedMs).toBe(150);
+    expect(res.metrics?.elapsedMs).toBe(150); // 完了ログと queries が同じ値
   });
 
   it("AC3: 直列キュー経由で 3 件同時に投げても全て解決しクラッシュしない", async () => {
@@ -1027,7 +1171,6 @@ describe("モデルの置き換え検出(2026-10-01)", () => {
   it("指定と違うモデルが応答したら logWarn する。一致・不明なら出さない", async () => {
     const run = async (requestedModel?: string, actualModel?: string) => {
       const warns: Array<{ data: Record<string, unknown>; msg: string }> = [];
-      const infos: Array<Record<string, unknown>> = [];
       const { deps } = makeDeps({
         search: async () => ({
           value: { answer: "回答", citations: [], notFound: true },
@@ -1036,10 +1179,9 @@ describe("モデルの置き換え検出(2026-10-01)", () => {
           ...(actualModel !== undefined ? { actualModel } : {}),
         }),
         logWarn: (data, msg) => warns.push({ data, msg }),
-        logInfo: (data) => infos.push(data),
       });
-      await handleAskRequest(req, deps);
-      return { warns, infos };
+      const res = await handleAskRequest(req, deps);
+      return { warns, search: res.metrics?.search };
     };
     const substituted = await run("claude-sonnet-4-6", "claude-sonnet-5");
     expect(substituted.warns).toHaveLength(1);
@@ -1047,7 +1189,8 @@ describe("モデルの置き換え検出(2026-10-01)", () => {
       requestedModel: "claude-sonnet-4-6",
       actualModel: "claude-sonnet-5",
     });
-    expect(substituted.infos[0]).toMatchObject({
+    // 両方とも完了ログ用の計測値に載る(段階 1-1)。
+    expect(substituted.search).toMatchObject({
       requestedModel: "claude-sonnet-4-6",
       actualModel: "claude-sonnet-5",
     });

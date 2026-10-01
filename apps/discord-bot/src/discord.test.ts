@@ -1,4 +1,5 @@
 import type { GhClient, PrDetail } from "@stratum/gh-client";
+import { LlmError } from "@stratum/llm";
 import type {
   ButtonInteraction,
   ChatInputCommandInteraction,
@@ -16,8 +17,14 @@ import {
 } from "discord.js";
 import type { Logger } from "pino";
 import { describe, expect, it, vi } from "vitest";
-import { DEADLINE_SKIPPED_MESSAGE, ERROR_MESSAGE, INTERRUPTED_MESSAGE } from "./ask.js";
+import {
+  type AskResult,
+  DEADLINE_SKIPPED_MESSAGE,
+  ERROR_MESSAGE,
+  INTERRUPTED_MESSAGE,
+} from "./ask.js";
 import { createAskLifecycle } from "./ask-lifecycle.js";
+import { ASK_COMPLETION_LOG_MSG } from "./ask-metrics.js";
 import { SerialQueue } from "./concurrency.js";
 import type { ChannelGateInput, ChannelsConfig, OpsConfig } from "./config.js";
 import type { BotStore, QueryRecord } from "./db.js";
@@ -123,21 +130,31 @@ describe("windowKey (10分バケット)", () => {
 });
 
 /** discord.js を起動せず handleButton の配線・例外封じ込めを検証するための最小 fake 群。 */
-function fakeLogger(): { logger: Logger; errors: unknown[]; warns: unknown[] } {
+function fakeLogger(): {
+  logger: Logger;
+  errors: unknown[];
+  warns: unknown[];
+  infos: { obj: Record<string, unknown>; msg: string | undefined }[];
+} {
   const errors: unknown[] = [];
   const warns: unknown[] = [];
+  const infos: { obj: Record<string, unknown>; msg: string | undefined }[] = [];
   const l = {
     child: () => l,
     error: (obj: unknown) => {
       errors.push(obj);
     },
-    info: () => {},
+    info: (obj: unknown, msg?: string) => {
+      if (typeof obj === "object" && obj !== null) {
+        infos.push({ obj: obj as Record<string, unknown>, msg });
+      }
+    },
     warn: (obj: unknown) => {
       warns.push(obj);
     },
     debug: () => {},
   };
-  return { logger: l as unknown as Logger, errors, warns };
+  return { logger: l as unknown as Logger, errors, warns, infos };
 }
 
 function fakeStore(
@@ -2032,6 +2049,175 @@ describe("InteractionCreate /ask の期限・再起動(ADR-0035 追記)", () => 
     await queue.enqueue(async () => {});
     expect(queued.edits.filter((e) => e === INTERRUPTED_MESSAGE)).toHaveLength(1);
     expect(store.listQueries()).toHaveLength(2);
+    await client.destroy();
+  });
+});
+
+describe("InteractionCreate /ask の完了ログ(段階 1-1: 1 件 1 行・工程別の時間)", () => {
+  function askInteraction(opts: { editThrows?: unknown } = {}): {
+    interaction: Interaction;
+    edits: string[];
+  } {
+    const edits: string[] = [];
+    const interaction = {
+      isChatInputCommand: () => true,
+      isButton: () => false,
+      isUserSelectMenu: () => false,
+      isStringSelectMenu: () => false,
+      isModalSubmit: () => false,
+      commandName: "ask",
+      inGuild: () => true,
+      channel: null,
+      channelId: "111",
+      appPermissions: { has: () => true },
+      user: { id: "u1", send: async () => {} },
+      options: { getString: () => "秘密の質問本文" },
+      deferReply: async () => {},
+      reply: async () => {},
+      editReply: async (o: string | { content: string }) => {
+        const content = typeof o === "string" ? o : o.content;
+        // 失敗させるのは回答の配送だけ(エラー通知・進捗は通す)。
+        if (opts.editThrows !== undefined && content === "回答本文") throw opts.editThrows;
+        edits.push(content);
+      },
+      followUp: async () => {},
+    };
+    return { interaction: interaction as unknown as Interaction, edits };
+  }
+  const completions = (infos: { obj: Record<string, unknown>; msg: string | undefined }[]) =>
+    infos.filter((i) => i.msg === ASK_COMPLETION_LOG_MSG).map((i) => i.obj);
+  /** 呼ばれるたびに 100ms 進む壁時計。 */
+  const ticking = () => {
+    let t = 0;
+    return () => (t += 100);
+  };
+  const okResult: AskResult = {
+    answerText: "回答本文",
+    status: "answered",
+    queryId: "q1",
+    metrics: {
+      syncMs: 1500,
+      promptMs: 2,
+      searchMs: 40_000,
+      validateMs: 3,
+      elapsedMs: 41_505,
+      search: null,
+      failure: null,
+    },
+  };
+
+  it("成功時はキュー待ち・配送を含む完了ログを 1 行だけ出す(質問本文は載せない)", async () => {
+    const { logger, infos } = fakeLogger();
+    const client = createBot({
+      logger,
+      channels: channels(),
+      store: createMemoryStore(),
+      now: ticking(),
+      onAsk: async () => okResult,
+    });
+    client.emit(Events.InteractionCreate, askInteraction().interaction);
+    await vi.waitFor(() => expect(completions(infos)).toHaveLength(1));
+    const log = completions(infos)[0] ?? {};
+    expect(log).toMatchObject({
+      outcome: "answered",
+      queryId: "q1",
+      syncMs: 1500,
+      promptMs: 2,
+      searchMs: 40_000,
+      validateMs: 3,
+      elapsedMs: 41_505,
+      expired: false,
+    });
+    expect(typeof log.queueWaitMs).toBe("number");
+    expect(typeof log.deliveryMs).toBe("number");
+    expect(log.totalMs as number).toBeGreaterThanOrEqual(
+      (log.queueWaitMs as number) + (log.deliveryMs as number),
+    );
+    expect("failedStage" in log).toBe(false);
+    expect(JSON.stringify(infos)).not.toContain("秘密の質問本文");
+    await client.destroy();
+  });
+
+  it("パイプライン内の失敗は metrics.failure の工程をそのまま載せる", async () => {
+    const { logger, infos } = fakeLogger();
+    const client = createBot({
+      logger,
+      channels: channels(),
+      store: createMemoryStore(),
+      now: ticking(),
+      onAsk: async () => ({
+        answerText: ERROR_MESSAGE,
+        status: "error",
+        queryId: "q2",
+        metrics: {
+          syncMs: null,
+          promptMs: null,
+          searchMs: null,
+          validateMs: null,
+          elapsedMs: 700,
+          search: null,
+          failure: { stage: "sync", atMs: 700, errorKind: "GitError", errorCode: "GIT_DNS" },
+        },
+      }),
+    });
+    client.emit(Events.InteractionCreate, askInteraction().interaction);
+    await vi.waitFor(() => expect(completions(infos)).toHaveLength(1));
+    const log = completions(infos)[0] ?? {};
+    expect(log).toMatchObject({
+      outcome: "error",
+      failedStage: "sync",
+      errorKind: "GitError",
+      errorCode: "GIT_DNS",
+    });
+    expect(log.failedAtMs).toBe((log.queueWaitMs as number) + 700);
+    await client.destroy();
+  });
+
+  it("onAsk 自体の失敗は最後に観測した工程を failedStage にする", async () => {
+    const { logger, infos } = fakeLogger();
+    const client = createBot({
+      logger,
+      channels: channels(),
+      store: createMemoryStore(),
+      now: ticking(),
+      onAsk: async (_q, ctx) => {
+        ctx.onProgress?.({ kind: "sync" });
+        ctx.onProgress?.({ kind: "search" });
+        throw new LlmError("API_ERROR", "down");
+      },
+    });
+    const { interaction, edits } = askInteraction();
+    client.emit(Events.InteractionCreate, interaction);
+    await vi.waitFor(() => expect(completions(infos)).toHaveLength(1));
+    expect(edits.at(-1)).toBe(ERROR_MESSAGE);
+    expect(completions(infos)[0]).toMatchObject({
+      outcome: "error",
+      queryId: null,
+      failedStage: "search",
+      errorKind: "LlmError",
+      errorCode: "API_ERROR",
+      deliveryMs: null,
+    });
+    await client.destroy();
+  });
+
+  it("配送の失敗(失効以外)は failedStage: delivery", async () => {
+    const { logger, infos } = fakeLogger();
+    const client = createBot({
+      logger,
+      channels: channels(),
+      store: createMemoryStore(),
+      now: ticking(),
+      onAsk: async () => okResult,
+    });
+    client.emit(
+      Events.InteractionCreate,
+      askInteraction({ editThrows: new Error("500 internal") }).interaction,
+    );
+    await vi.waitFor(() => expect(completions(infos)).toHaveLength(1));
+    const log = completions(infos)[0] ?? {};
+    expect(log).toMatchObject({ outcome: "answered", failedStage: "delivery", errorKind: "Error" });
+    expect(log.failedAtMs).toBe(log.totalMs);
     await client.destroy();
   });
 });

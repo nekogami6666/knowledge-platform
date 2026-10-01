@@ -48,6 +48,7 @@ import {
   interactionTokenUsable,
   safeErrorInfo,
 } from "./ask-lifecycle.js";
+import { ASK_COMPLETION_LOG_MSG, type AskStage, buildAskCompletionLog } from "./ask-metrics.js";
 import { handleLightbulb, jstDayKey } from "./capture.js";
 import { SerialQueue } from "./concurrency.js";
 import {
@@ -740,6 +741,10 @@ async function runAcceptedAsk(a: AcceptedAsk): Promise<void> {
   reporter.setQueueAhead(queue.pending);
 
   let result: AskResult;
+  // 段階 1-1: キュー待ち・配送の計測(残りの工程は handleAskRequest が AskResult.metrics で返す)。
+  // onAsk 自体が失敗したときの failedStage 用に、最後に観測した工程を持つ。
+  let taskStartedAt: number | null = null;
+  let lastStage: AskStage = "queue";
   try {
     // 順番待ちのまま中断されたら、キューの順番を待たずにここで中断処理をする(cancelledInQueue)。
     // その後に順番が来たタスクは何もせずに抜ける(二重に通知・記録しない)。
@@ -750,6 +755,8 @@ async function runAcceptedAsk(a: AcceptedAsk): Promise<void> {
       started = true;
       reporter.setQueueAhead(0);
       const startedAt = now();
+      taskStartedAt = startedAt;
+      lastStage = "sync";
       // ADR-0035 追記 D2': 順番が来た時点で全体期限を過ぎていたら検索しない。
       if (interactionLikelyExpired(acceptedAt, startedAt)) {
         log.warn(
@@ -762,7 +769,10 @@ async function runAcceptedAsk(a: AcceptedAsk): Promise<void> {
         userId: req.discordUserId,
         channelId: req.discordChannelId,
         correlationId,
-        onProgress: (ev) => reporter.onEvent(ev),
+        onProgress: (ev) => {
+          if (ev.kind === "sync" || ev.kind === "search") lastStage = ev.kind;
+          reporter.onEvent(ev);
+        },
         signal,
       });
     });
@@ -788,6 +798,7 @@ async function runAcceptedAsk(a: AcceptedAsk): Promise<void> {
       result = r;
     }
   } catch (err) {
+    const failedAt = now();
     await reporter.stop();
     // handleAskRequest は内部エラーを AskResult に畳んで返すため、ここに来るのは dispatch/infra 異常のみ。
     log.error({ err }, "/ask pipeline dispatch failed");
@@ -799,11 +810,55 @@ async function runAcceptedAsk(a: AcceptedAsk): Promise<void> {
     } catch (err2) {
       log.error({ err: err2 }, "/ask のエラー通知も送信できませんでした(interaction 失効の可能性)");
     }
+    log.info(
+      buildAskCompletionLog({
+        outcome: "error",
+        queryId: null,
+        metrics: undefined,
+        queueWaitMs: taskStartedAt === null ? null : taskStartedAt - acceptedAt,
+        deliveryMs: null,
+        totalMs: now() - acceptedAt,
+        expired: interactionLikelyExpired(acceptedAt, failedAt),
+        fallbackChunks: 0,
+        outerFailure: { stage: lastStage, atMs: failedAt - acceptedAt, err },
+      }),
+      ASK_COMPLETION_LOG_MSG,
+    );
     return;
   }
 
   await reporter.stop();
   const deliverAt = now();
+  /** 段階 1-1: /ask 1 件につき 1 行の完了ログ(工程別の時間・使用量・失敗工程。項目は ask-metrics.ts)。 */
+  const logCompletion = (
+    deliveredAt: number,
+    expired: boolean,
+    fallbackChunks: number,
+    deliveryError?: unknown,
+  ): void => {
+    log.info(
+      buildAskCompletionLog({
+        outcome: result.status,
+        queryId: result.queryId === "" ? null : result.queryId,
+        metrics: result.metrics,
+        queueWaitMs: taskStartedAt === null ? null : taskStartedAt - acceptedAt,
+        deliveryMs: deliveredAt - deliverAt,
+        totalMs: deliveredAt - acceptedAt,
+        expired,
+        fallbackChunks,
+        ...(deliveryError !== undefined
+          ? {
+              outerFailure: {
+                stage: "delivery" as const,
+                atMs: deliveredAt - acceptedAt,
+                err: deliveryError,
+              },
+            }
+          : {}),
+      }),
+      ASK_COMPLETION_LOG_MSG,
+    );
+  };
   // 検索しなかった(期限切れ)・中断した /ask は 1 通の通知で終える(ADR-0035 追記)。
   if (result.status === "timeout_skipped" || result.status === "interrupted") {
     await notifySkipped(
@@ -813,6 +868,7 @@ async function runAcceptedAsk(a: AcceptedAsk): Promise<void> {
       interactionTokenUsable(acceptedAt, deliverAt),
       log,
     );
+    logCompletion(now(), interactionLikelyExpired(acceptedAt, deliverAt), 0);
     return;
   }
   // ADR-0035 D2 (b): 検索が長引き配送時点で期限を過ぎていたら interaction を試みず DM で配送する。
@@ -856,6 +912,7 @@ async function runAcceptedAsk(a: AcceptedAsk): Promise<void> {
       "/ask のエラー通知も送信できませんでした(interaction 失効の可能性)",
     );
   }
+  logCompletion(now(), expired, outcome.fallbackChunks, outcome.error);
 }
 
 /** メッセージ本文から最初の GitHub PR URL を解析する(無ければ null)。 */

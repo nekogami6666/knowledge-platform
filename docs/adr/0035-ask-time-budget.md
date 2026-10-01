@@ -151,3 +151,28 @@
   検索が長引き配送時点で期限を過ぎた回答は本人 DM で配送」。再起動時は処理中の質問を最大 60 秒待ってから
   中断し `interrupted` で記録する旨(D7)と、強制終了後の起動時の書き換え(D8)を追記。
 - (追記分)§4.6 queries の answer_status に `timeout_skipped` / `interrupted`、bot.db に `inflight_asks` を追記。
+
+## 追記(2026-10-01): 工程別の計測(段階 1-1)
+
+本番 61 件の所要時間は中央値 57 秒・p90 124 秒だが、D4 のログ(`elapsedMs` / `numTurns` /
+`durationApiMs`)だけでは「待ち・同期・検索・配送のどこで時間を使ったか」が分からない。
+また SDK の result にあるキャッシュトークンと推定費用を捨てていた。
+
+- **D4 を改める: /ask 1 件につき 1 行の完了ログを出す。** msg は `/ask: 完了` で固定し、
+  相関 ID(`correlationId`)を付ける。配送まで含めるため `discord.ts`(handleAsk)が配送後に出し、
+  `ask.ts` は工程別の値を `AskResult.metrics` で返すだけにする(旧 `/ask: 検索完了` は廃止・二重に出さない)。
+  - 工程: `queueWaitMs`(受付 → キューのタスク開始)/ `syncMs` / `promptMs`(プロンプト + manifest)/
+    `searchMs`(再試行を含む)/ `validateMs`(引用の検証・整形・queries 記録)/ `deliveryMs` / `totalMs`。
+    `elapsedMs` は従来どおり `queries.elapsed_ms` と同じ値。
+  - 検索の観測値: `numTurns` / `durationApiMs` / `deniedToolCalls` / `notFound` / `citations` /
+    `validCitations` / `inputTokens` / `outputTokens` / `cacheCreationInputTokens` / `cacheReadInputTokens` /
+    `totalCostUsd` / `modelUsage`(モデル別の入出力・キャッシュトークンと費用)/ `requestedModel` / `actualModel`。
+    `inputTokens`(SDK の `input_tokens`)はキャッシュ分を含まない点に注意する。
+  - 失敗時: `failedStage`(`queue` / `sync` / `prompt` / `search` / `validate` / `delivery`)・
+    `failedAtMs`(受付から失敗まで)・`errorKind` / `errorCode`(LlmError の code、git の失敗は
+    `GIT_DNS` / `GIT_TIMEOUT` / `GIT_NETWORK` / `GIT_AUTH` / `GIT_NOT_FOUND` / `GIT_ERROR`、errno 系はその code)。
+  - 項目の一覧は `apps/discord-bot/src/ask-metrics.ts` の冒頭が正。
+- **ログに出さないもの**: 質問・回答・社内文書の本文、エラーの message(git の stderr は URL を含みうる)、秘密値。
+  エラーの詳細は従来どおり `/ask pipeline error` の error ログ(秘密値の伏字化あり)に出る。
+- **DB には保存しない(ログのみ)**。`queries` への列追加は bot.db のスキーマ上げを伴い、ホストのバッチと
+  共有するため、他の変更とまとめて 1 回で行う。それまでは完了ログを集計に使う。

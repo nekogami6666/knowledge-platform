@@ -21,6 +21,14 @@ import {
   type PromptStore,
 } from "@stratum/llm";
 import { z } from "zod";
+import {
+  type AskFailure,
+  type AskPipelineMetrics,
+  type AskSearchMetrics,
+  type AskStage,
+  classifyAskError,
+  searchMetricsOf,
+} from "./ask-metrics.js";
 import type { AnswerStatus, BotStore } from "./db.js";
 import { formatAnswer } from "./format.js";
 import type { RepoRegistry } from "./repo-registry.js";
@@ -335,8 +343,8 @@ export interface AskDeps {
   /** 警告観測フック(§7.4。既定 no-op。「回答はあるのに全 citation が検証で破棄」等の診断用)。 */
   logWarn?: (data: Record<string, unknown>, msg: string) => void;
   /**
-   * 情報観測フック(ADR-0035 D4。既定 no-op)。/ask 完了ごとに所要時間・ターン数を出し、
-   * 探索予算・カタログ・並列化の判断材料にする。
+   * 情報観測フック(既定 no-op)。/ask 完了時の所要時間・ターン数・トークン(ADR-0035 D4)は
+   * ここではなく AskResult.metrics として返し、discord.ts が配送後に 1 行で出す(段階 1-1)。
    */
   logInfo?: (data: Record<string, unknown>, msg: string) => void;
   /** 進捗の購読(ADR-0035 D5。既定 no-op)。 */
@@ -355,6 +363,8 @@ export interface AskResult {
   answerText: string;
   status: AnswerStatus;
   queryId: string;
+  /** 工程別の計測値(段階 1-1。discord.ts が完了ログに載せる。stub 等では省略可)。 */
+  metrics?: AskPipelineMetrics;
 }
 
 export const NOT_FOUND_MESSAGE =
@@ -523,6 +533,30 @@ export async function handleAskRequest(req: AskRequest, deps: AskDeps): Promise<
     question: req.question,
     createdAt,
   };
+  // 段階 1-1: 工程別の時間(ms)。到達しなかった工程は null のまま。完了ログは discord.ts が
+  // キュー待ち・配送と合わせて 1 行で出す(ask-metrics.ts)。
+  const timings: Pick<AskPipelineMetrics, "syncMs" | "promptMs" | "searchMs" | "validateMs"> = {
+    syncMs: null,
+    promptMs: null,
+    searchMs: null,
+    validateMs: null,
+  };
+  let stage: AskStage = "sync";
+  let stageStartedAt = startedAt;
+  /** 今の工程を締めて次の工程へ進む(締めた工程の ms を返す)。 */
+  const endStage = (): number => {
+    const t = monoNow();
+    const ms = Math.round(t - stageStartedAt);
+    stageStartedAt = t;
+    return ms;
+  };
+  let search: AskSearchMetrics | null = null;
+  const metricsOf = (elapsedMs: number, failure: AskFailure | null): AskPipelineMetrics => ({
+    ...timings,
+    elapsedMs,
+    search,
+    failure,
+  });
   // 関数にするのは、await をまたいだ再判定を TS の型の絞り込みに潰されないようにするため。
   const isAborted = (): boolean => deps.signal?.aborted === true;
   // ADR-0035 追記: 正常終了で中断された /ask は interrupted として記録する(キューには積まない)。
@@ -537,11 +571,19 @@ export async function handleAskRequest(req: AskRequest, deps: AskDeps): Promise<
       outputTokens: null,
       elapsedMs: Math.round(monoNow() - startedAt),
     });
-    deps.logInfo?.(
-      { elapsedMs: Math.round(monoNow() - startedAt) },
-      "/ask: 再起動のため中断しました(ADR-0035 追記)",
-    );
-    return { answerText: INTERRUPTED_MESSAGE, status: "interrupted", queryId };
+    const elapsedMs = Math.round(monoNow() - startedAt);
+    // 段階 1-1: 中断も完了ログ(discord.ts)に失敗工程つきで残す。
+    return {
+      answerText: INTERRUPTED_MESSAGE,
+      status: "interrupted",
+      queryId,
+      metrics: metricsOf(elapsedMs, {
+        stage,
+        atMs: elapsedMs,
+        errorKind: "Aborted",
+        errorCode: "ABORTED",
+      }),
+    };
   };
   try {
     if (isAborted()) return interrupted();
@@ -555,6 +597,9 @@ export async function handleAskRequest(req: AskRequest, deps: AskDeps): Promise<
       repos = deps.getRepos();
       synced = await deps.syncer.sync(repos);
     }
+    timings.syncMs = endStage();
+
+    stage = "prompt";
     const prompt = await loadPrompt("qa", "answer", deps.promptStore);
     // §6.2: repo 対応表を前置きし、モデルが正しい org/name で引用できるようにする(PR-6a)。
     // all_visible 有効時は clone のあるリポだけを載せる(ADR-0036)。
@@ -562,32 +607,19 @@ export async function handleAskRequest(req: AskRequest, deps: AskDeps): Promise<
     const systemPrompt = manifest === "" ? prompt.body : `${manifest}\n${prompt.body}`;
     // git sync は中断できない(1 コマンド 60 秒の上限つき)ため、同期後に一度確かめてから検索に入る。
     if (isAborted()) return interrupted();
+    timings.promptMs = endStage();
+
+    stage = "search";
     deps.onProgress?.({ kind: "search" });
-    const { value, usage, numTurns, durationApiMs, deniedToolCalls, requestedModel, actualModel } =
-      await deps.search({
-        systemPrompt,
-        question: req.question,
-        cwd: deps.clonesDir,
-        ...(deps.onProgress !== undefined ? { onProgress: deps.onProgress } : {}),
-        ...(deps.signal !== undefined ? { signal: deps.signal } : {}),
-      });
-    // ADR-0035 D4: 所要時間とターン数を必ず残す(タイムアウト頻発の原因分析・探索予算の調整に使う)。
-    deps.logInfo?.(
-      {
-        elapsedMs: Math.round(monoNow() - startedAt),
-        numTurns: numTurns ?? null,
-        durationApiMs: durationApiMs ?? null,
-        // ADR-0037: 拒否されたツール呼び出し数(cwd 外読み取りの試行等。0 超は注入の兆候として追跡)。
-        deniedToolCalls: deniedToolCalls ?? null,
-        notFound: value.notFound,
-        citations: value.citations.length,
-        inputTokens: usage.inputTokens,
-        outputTokens: usage.outputTokens,
-        requestedModel: requestedModel ?? null,
-        actualModel: actualModel ?? null,
-      },
-      "/ask: 検索完了",
-    );
+    const result = await deps.search({
+      systemPrompt,
+      question: req.question,
+      cwd: deps.clonesDir,
+      ...(deps.onProgress !== undefined ? { onProgress: deps.onProgress } : {}),
+      ...(deps.signal !== undefined ? { signal: deps.signal } : {}),
+    });
+    timings.searchMs = endStage();
+    const { value, usage, requestedModel, actualModel } = result;
     // 組織の制限などで指定モデルが無通知で別モデルに置き換わっていないか(2026-10-01 の不具合の直接原因)。
     if (isModelSubstituted(requestedModel, actualModel)) {
       deps.logWarn?.(
@@ -595,6 +627,8 @@ export async function handleAskRequest(req: AskRequest, deps: AskDeps): Promise<
         "/ask: 指定と異なるモデルが応答しました(組織のモデル制限による置き換えの可能性)",
       );
     }
+
+    stage = "validate";
     const valid = value.notFound
       ? []
       : validateCitations(
@@ -603,6 +637,8 @@ export async function handleAskRequest(req: AskRequest, deps: AskDeps): Promise<
           deps.fileExists ?? existsSync,
           deps.readFile ?? defaultReadFile,
         );
+    // ADR-0035 D4 / 段階 1-1: ターン数・トークン等は完了ログ(discord.ts)に載せる。
+    search = searchMetricsOf(result, valid.length);
 
     // 観測性(§7.4): モデルは回答+出典を返したのに検証で全滅したケースは、書式・allowlist 等の
     // 系統的問題のシグナルなので必ず痕跡を残す(2026-07-22 の lines 書式ゆれ調査で必要になった)。
@@ -614,6 +650,7 @@ export async function handleAskRequest(req: AskRequest, deps: AskDeps): Promise<
     }
     // P6 / 出典規律: notFound、または出典が全滅したら捏造せず未回答に倒す(修正5 step6)。
     if (value.notFound || valid.length === 0) {
+      const elapsedMs = Math.round(monoNow() - startedAt);
       deps.store.recordQuery({
         ...base,
         answer: null,
@@ -622,7 +659,7 @@ export async function handleAskRequest(req: AskRequest, deps: AskDeps): Promise<
         feedback: null,
         inputTokens: usage.inputTokens,
         outputTokens: usage.outputTokens,
-        elapsedMs: Math.round(monoNow() - startedAt),
+        elapsedMs,
       });
       // git には書かず SQLite キューへ(gap-tracker が Phase 3 で commit)。
       deps.store.queueAction({
@@ -633,10 +670,17 @@ export async function handleAskRequest(req: AskRequest, deps: AskDeps): Promise<
         state: "pending",
         createdAt,
       });
-      return { answerText: NOT_FOUND_MESSAGE, status: "unanswered", queryId };
+      timings.validateMs = endStage();
+      return {
+        answerText: NOT_FOUND_MESSAGE,
+        status: "unanswered",
+        queryId,
+        metrics: metricsOf(elapsedMs, null),
+      };
     }
 
     const answerText = formatAnswer(value.answer, valid);
+    const elapsedMs = Math.round(monoNow() - startedAt);
     deps.store.recordQuery({
       ...base,
       answer: answerText,
@@ -645,9 +689,10 @@ export async function handleAskRequest(req: AskRequest, deps: AskDeps): Promise<
       feedback: null,
       inputTokens: usage.inputTokens,
       outputTokens: usage.outputTokens,
-      elapsedMs: Math.round(monoNow() - startedAt),
+      elapsedMs,
     });
-    return { answerText, status: "answered", queryId };
+    timings.validateMs = endStage();
+    return { answerText, status: "answered", queryId, metrics: metricsOf(elapsedMs, null) };
   } catch (err) {
     // §6.2 失敗時: エラーを記録(unanswered とは区別=キューに積まない)。観測フックへ通知(§7.4)。
     // タイムアウトは文面と answerStatus で明示する(§6.2 失敗時挙動 / ADR-0030 D3)。ナレッジ欠落
@@ -657,6 +702,8 @@ export async function handleAskRequest(req: AskRequest, deps: AskDeps): Promise<
     if ((err instanceof LlmError && err.code === "ABORTED") || isAborted()) {
       return interrupted();
     }
+    const elapsedMs = Math.round(monoNow() - startedAt);
+    const failure: AskFailure = { stage, atMs: elapsedMs, ...classifyAskError(err) };
     const timedOut = err instanceof LlmError && err.code === "TIMEOUT";
     deps.logError?.(err);
     deps.store.recordQuery({
@@ -667,7 +714,7 @@ export async function handleAskRequest(req: AskRequest, deps: AskDeps): Promise<
       feedback: null,
       inputTokens: null,
       outputTokens: null,
-      elapsedMs: Math.round(monoNow() - startedAt),
+      elapsedMs,
     });
     return {
       answerText: timedOut
@@ -675,6 +722,7 @@ export async function handleAskRequest(req: AskRequest, deps: AskDeps): Promise<
         : ERROR_MESSAGE,
       status: timedOut ? "timeout" : "error",
       queryId,
+      metrics: metricsOf(elapsedMs, failure),
     };
   }
 }

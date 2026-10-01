@@ -165,6 +165,58 @@ export interface AgentSearchResult<T> {
    * 「test」回答の不具合の直接原因)。assistant メッセージが無ければ undefined。
    */
   actualModel?: string;
+  /**
+   * キャッシュ作成に回った入力トークン(result.usage.cache_creation_input_tokens・観測用)。
+   * 注意: `usage.inputTokens`(input_tokens)はキャッシュ分を**含まない**。プロンプト入力の総量は
+   * inputTokens + cacheCreationInputTokens + cacheReadInputTokens。result.usage は SDK の仕様上
+   * メインのエージェントループ分だけなので、費用・トークンの集計には modelUsage を優先する。
+   */
+  cacheCreationInputTokens?: number;
+  /** キャッシュから読んだ入力トークン(result.usage.cache_read_input_tokens・観測用)。 */
+  cacheReadInputTokens?: number;
+  /** SDK が見積もった合計費用 USD(result.total_cost_usd。請求額ではなく推定値)。 */
+  totalCostUsd?: number;
+  /** モデル別の使用量(result.modelUsage を必要な数値だけに絞ったもの・観測用)。 */
+  modelUsage?: Record<string, AgentModelUsage>;
+}
+
+/**
+ * モデル別の使用量(SDK の ModelUsage から数値だけを抜いたもの)。
+ * inputTokens はキャッシュ分を含まない(cacheReadInputTokens / cacheCreationInputTokens は別計上)。
+ */
+export interface AgentModelUsage {
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadInputTokens: number;
+  cacheCreationInputTokens: number;
+  costUsd: number;
+}
+
+/** 有限の数値だけを通す(SDK の値の型崩れ・NaN をログへ流さない)。 */
+function finiteOrUndefined(v: unknown): number | undefined {
+  return typeof v === "number" && Number.isFinite(v) ? v : undefined;
+}
+
+/**
+ * result.modelUsage を観測用に整える(SDK 0.3.285 の ModelUsage: inputTokens / outputTokens /
+ * cacheReadInputTokens / cacheCreationInputTokens / costUSD …)。数値以外のフィールド
+ * (provider・costBasis 等)は落とし、欠けた数値は 0 にする。形が違えば undefined。
+ */
+export function sanitizeModelUsage(raw: unknown): Record<string, AgentModelUsage> | undefined {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return undefined;
+  const out: Record<string, AgentModelUsage> = {};
+  for (const [model, u] of Object.entries(raw as Record<string, unknown>)) {
+    if (typeof u !== "object" || u === null) continue;
+    const r = u as Record<string, unknown>;
+    out[model] = {
+      inputTokens: finiteOrUndefined(r.inputTokens) ?? 0,
+      outputTokens: finiteOrUndefined(r.outputTokens) ?? 0,
+      cacheReadInputTokens: finiteOrUndefined(r.cacheReadInputTokens) ?? 0,
+      cacheCreationInputTokens: finiteOrUndefined(r.cacheCreationInputTokens) ?? 0,
+      costUsd: finiteOrUndefined(r.costUSD) ?? 0,
+    };
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
 }
 
 /**
@@ -201,10 +253,17 @@ interface ResultMessage {
   type: "result";
   subtype: string;
   structured_output?: unknown;
-  usage?: { input_tokens?: number; output_tokens?: number };
+  usage?: {
+    input_tokens?: number;
+    output_tokens?: number;
+    cache_creation_input_tokens?: number;
+    cache_read_input_tokens?: number;
+  };
   num_turns?: number;
   duration_api_ms?: number;
   permission_denials?: unknown[];
+  total_cost_usd?: number;
+  modelUsage?: unknown;
 }
 
 /** Agent SDK の assistant メッセージ(tool_use ブロック抽出に必要な部分のみ)。 */
@@ -404,9 +463,19 @@ export async function runAgentSearch<T>(
     );
   }
 
+  // 観測用の使用量(1-1 計測)。input_tokens はキャッシュ分を含まないため、キャッシュ作成・読み取りを
+  // 別に持つ。無い(旧 SDK・テスト用の差し替え)ならキー自体を持たない。
+  const cacheCreationInputTokens = finiteOrUndefined(result.usage?.cache_creation_input_tokens);
+  const cacheReadInputTokens = finiteOrUndefined(result.usage?.cache_read_input_tokens);
+  const totalCostUsd = finiteOrUndefined(result.total_cost_usd);
+  const modelUsage = sanitizeModelUsage(result.modelUsage);
   return {
     value: parsed.data,
     usage,
+    ...(cacheCreationInputTokens !== undefined ? { cacheCreationInputTokens } : {}),
+    ...(cacheReadInputTokens !== undefined ? { cacheReadInputTokens } : {}),
+    ...(totalCostUsd !== undefined ? { totalCostUsd } : {}),
+    ...(modelUsage !== undefined ? { modelUsage } : {}),
     ...(typeof result.num_turns === "number" ? { numTurns: result.num_turns } : {}),
     ...(typeof result.duration_api_ms === "number"
       ? { durationApiMs: result.duration_api_ms }

@@ -1,0 +1,223 @@
+/**
+ * /ask の工程別計測(段階 1-1・ADR-0035 追記)。完了時に 1 行の構造化ログを出すための型と整形。
+ * 値は DB に保存せずログだけに出す(bot.db のスキーマ上げはホストのバッチと共有のため見送り)。
+ *
+ * 完了ログ(msg は {@link ASK_COMPLETION_LOG_MSG} で固定・/ask 1 件につき 1 行・correlationId 付き)の項目:
+ * - outcome: answered | unanswered | timeout | error(AskResult.status。onAsk 自体の失敗は error)
+ * - queryId: queries の id(onAsk が失敗した場合は null)
+ * - 工程別の時間(ms・到達しなかった工程は null):
+ *   - queueWaitMs: 受付(deferReply 後)→ 直列キューのタスク開始
+ *   - syncMs: リポの同期(TTL 再利用の確認を含む)
+ *   - promptMs: プロンプト読み込み + manifest 組み立て
+ *   - searchMs: agentic search(再試行を含む)
+ *   - validateMs: 引用の検証・回答の整形・queries 記録
+ *   - deliveryMs: 進捗表示の停止 → 回答の配送完了
+ *   - elapsedMs: handleAskRequest の所要時間(queries.elapsed_ms と同じ値)
+ *   - totalMs: 受付 → 配送完了
+ * - 検索の観測値(検索まで進まなかった場合は null): numTurns / durationApiMs / deniedToolCalls /
+ *   notFound / citations(モデルが返した数)/ validCitations(検証を通った数)/ inputTokens /
+ *   outputTokens / cacheCreationInputTokens / cacheReadInputTokens / totalCostUsd / modelUsage /
+ *   requestedModel / actualModel。inputTokens はキャッシュ分を含まない(agent.ts 参照)。
+ * - 配送: expired(キュー待ちで interaction 失効 → DM 配送)/ fallbackChunks(DM で届けたチャンク数)
+ * - 失敗時のみ: failedStage(queue | sync | prompt | search | validate | delivery)/ failedAtMs
+ *   (受付から失敗までの ms)/ errorKind / errorCode(LlmError の code・git の分類・errno 等)
+ *
+ * 質問本文・回答本文・社内文書の本文・秘密値は載せない。エラーの本文(message)も載せない
+ * (git の stderr は URL を含みうる。詳細は従来どおり "/ask pipeline error" の error ログに出る)。
+ */
+import { type AgentModelUsage, type AgentSearchResult, LlmError } from "@stratum/llm";
+
+/** /ask の工程(失敗した工程の記録に使う)。 */
+export type AskStage = "queue" | "sync" | "prompt" | "search" | "validate" | "delivery";
+
+/** 完了ログの msg(固定。集計はこの文字列で絞る)。 */
+export const ASK_COMPLETION_LOG_MSG = "/ask: 完了";
+
+/** 検索結果から拾う観測値(ログ用)。 */
+export interface AskSearchMetrics {
+  numTurns: number | null;
+  durationApiMs: number | null;
+  deniedToolCalls: number | null;
+  notFound: boolean;
+  /** モデルが返した引用の数。 */
+  citations: number;
+  /** 検証を通った引用の数(notFound なら 0)。 */
+  validCitations: number;
+  inputTokens: number;
+  outputTokens: number;
+  cacheCreationInputTokens: number | null;
+  cacheReadInputTokens: number | null;
+  totalCostUsd: number | null;
+  modelUsage: Record<string, AgentModelUsage> | null;
+  requestedModel: string | null;
+  actualModel: string | null;
+}
+
+/** 失敗の記録(本文は持たない)。 */
+export interface AskFailure {
+  stage: AskStage;
+  /** handleAskRequest の開始から失敗までの ms。 */
+  atMs: number;
+  errorKind: string;
+  errorCode: string | null;
+}
+
+/** handleAskRequest が返す工程別の計測値(AskResult.metrics)。 */
+export interface AskPipelineMetrics {
+  syncMs: number | null;
+  promptMs: number | null;
+  searchMs: number | null;
+  validateMs: number | null;
+  /** handleAskRequest の所要時間(queries.elapsed_ms と同じ値)。 */
+  elapsedMs: number;
+  search: AskSearchMetrics | null;
+  failure: AskFailure | null;
+}
+
+/** 検索結果 → ログ用の観測値。欠けた値は null(0 と区別する)。 */
+export function searchMetricsOf(
+  r: AgentSearchResult<{ notFound: boolean; citations: readonly unknown[] }>,
+  validCitations: number,
+): AskSearchMetrics {
+  return {
+    numTurns: r.numTurns ?? null,
+    durationApiMs: r.durationApiMs ?? null,
+    // ADR-0037: 拒否されたツール呼び出し数(cwd 外読み取りの試行等。0 超は注入の兆候として追跡)。
+    deniedToolCalls: r.deniedToolCalls ?? null,
+    notFound: r.value.notFound,
+    citations: r.value.citations.length,
+    validCitations,
+    inputTokens: r.usage.inputTokens,
+    outputTokens: r.usage.outputTokens,
+    cacheCreationInputTokens: r.cacheCreationInputTokens ?? null,
+    cacheReadInputTokens: r.cacheReadInputTokens ?? null,
+    totalCostUsd: r.totalCostUsd ?? null,
+    modelUsage: r.modelUsage ?? null,
+    requestedModel: r.requestedModel ?? null,
+    actualModel: r.actualModel ?? null,
+  };
+}
+
+/** git の失敗の分類(stderr の定型文で判定。本文そのものはログに出さない)。 */
+function classifyGitFailure(e: { stderr?: unknown; message?: unknown; killed?: unknown }): string {
+  if (e.killed === true) return "GIT_TIMEOUT"; // execFile の timeout(GIT_EXEC_TIMEOUT_MS)で kill
+  const text = `${typeof e.stderr === "string" ? e.stderr : ""}\n${
+    typeof e.message === "string" ? e.message : ""
+  }`;
+  if (
+    /Could not resolve host|Temporary failure in name resolution|Name or service not known/i.test(
+      text,
+    )
+  )
+    return "GIT_DNS";
+  if (/timed out|Failed to connect|Connection refused|Connection reset|early EOF/i.test(text))
+    return "GIT_NETWORK";
+  if (
+    /Authentication failed|could not read Username|terminal prompts disabled|returned error: 403/i.test(
+      text,
+    )
+  )
+    return "GIT_AUTH";
+  if (/Repository not found|returned error: 404/i.test(text)) return "GIT_NOT_FOUND";
+  return "GIT_ERROR";
+}
+
+/**
+ * エラーの種別とコードを返す(ログ用。message は返さない)。
+ * - LlmError → { LlmError, code }
+ * - errno 系(ENOENT・ENOTFOUND 等の文字列 code)→ { SystemError, code }
+ * - git の実行失敗(execFile のエラーで cmd が git)→ { GitError, GIT_DNS | GIT_TIMEOUT | … }
+ * - cause を持つラッパ(同期失敗の AskSyncError 等)は kind を自身の名前、code を cause の分類にする
+ * - それ以外 → { エラー名, null }
+ */
+export function classifyAskError(err: unknown): { errorKind: string; errorCode: string | null } {
+  if (err instanceof LlmError) return { errorKind: "LlmError", errorCode: err.code };
+  if (typeof err !== "object" || err === null) return { errorKind: typeof err, errorCode: null };
+  const e = err as {
+    name?: unknown;
+    code?: unknown;
+    cmd?: unknown;
+    cause?: unknown;
+    stderr?: unknown;
+    message?: unknown;
+    killed?: unknown;
+  };
+  if (typeof e.code === "string" && /^E[A-Z0-9_]+$/.test(e.code)) {
+    return { errorKind: "SystemError", errorCode: e.code };
+  }
+  if (typeof e.cmd === "string" && /^git(\s|$)/.test(e.cmd)) {
+    return { errorKind: "GitError", errorCode: classifyGitFailure(e) };
+  }
+  const name = typeof e.name === "string" && e.name !== "" ? e.name : "Error";
+  if (e.cause !== undefined && e.cause !== err) {
+    return { errorKind: name, errorCode: classifyAskError(e.cause).errorCode };
+  }
+  return { errorKind: name, errorCode: null };
+}
+
+/** discord.ts が完了ログを組むための入力。 */
+export interface AskCompletionInput {
+  /** AskResult.status(onAsk 自体が失敗したら "error")。 */
+  outcome: string;
+  queryId: string | null;
+  metrics: AskPipelineMetrics | undefined;
+  queueWaitMs: number | null;
+  deliveryMs: number | null;
+  totalMs: number;
+  expired: boolean;
+  fallbackChunks: number;
+  /**
+   * handleAskRequest の外での失敗(onAsk の reject = dispatch 失敗、または配送失敗)。
+   * handleAskRequest 内の失敗は metrics.failure に入っている(そちらを優先する)。
+   */
+  outerFailure?: { stage: AskStage; atMs: number; err: unknown };
+}
+
+/** 完了ログの項目を組む(純関数。項目名は本ファイル冒頭の一覧どおり)。 */
+export function buildAskCompletionLog(input: AskCompletionInput): Record<string, unknown> {
+  const m = input.metrics;
+  const s = m?.search ?? null;
+  const fields: Record<string, unknown> = {
+    outcome: input.outcome,
+    queryId: input.queryId,
+    totalMs: input.totalMs,
+    queueWaitMs: input.queueWaitMs,
+    syncMs: m?.syncMs ?? null,
+    promptMs: m?.promptMs ?? null,
+    searchMs: m?.searchMs ?? null,
+    validateMs: m?.validateMs ?? null,
+    deliveryMs: input.deliveryMs,
+    elapsedMs: m?.elapsedMs ?? null,
+    numTurns: s?.numTurns ?? null,
+    durationApiMs: s?.durationApiMs ?? null,
+    deniedToolCalls: s?.deniedToolCalls ?? null,
+    notFound: s?.notFound ?? null,
+    citations: s?.citations ?? null,
+    validCitations: s?.validCitations ?? null,
+    inputTokens: s?.inputTokens ?? null,
+    outputTokens: s?.outputTokens ?? null,
+    cacheCreationInputTokens: s?.cacheCreationInputTokens ?? null,
+    cacheReadInputTokens: s?.cacheReadInputTokens ?? null,
+    totalCostUsd: s?.totalCostUsd ?? null,
+    modelUsage: s?.modelUsage ?? null,
+    requestedModel: s?.requestedModel ?? null,
+    actualModel: s?.actualModel ?? null,
+    expired: input.expired,
+    fallbackChunks: input.fallbackChunks,
+  };
+  const inner = m?.failure ?? null;
+  if (inner !== null) {
+    // 受付からの経過に直す(キュー待ち + パイプライン内の経過)。
+    fields.failedStage = inner.stage;
+    fields.failedAtMs = (input.queueWaitMs ?? 0) + inner.atMs;
+    fields.errorKind = inner.errorKind;
+    fields.errorCode = inner.errorCode;
+  } else if (input.outerFailure !== undefined) {
+    const c = classifyAskError(input.outerFailure.err);
+    fields.failedStage = input.outerFailure.stage;
+    fields.failedAtMs = input.outerFailure.atMs;
+    fields.errorKind = c.errorKind;
+    fields.errorCode = c.errorCode;
+  }
+  return fields;
+}

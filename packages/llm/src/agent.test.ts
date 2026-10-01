@@ -9,6 +9,7 @@ import {
   DEFAULT_DISALLOWED_TOOLS,
   isModelSubstituted,
   runAgentSearch,
+  sanitizeModelUsage,
 } from "./agent.js";
 import { LlmError } from "./errors.js";
 import type { Usage, UsageRecorder } from "./usage.js";
@@ -557,5 +558,90 @@ describe("実モデルの記録と会話記録の非保存(2026-10-01「test」�
     expect(isModelSubstituted("claude-sonnet-4-6", "claude-sonnet-5")).toBe(true);
     expect(isModelSubstituted("claude-sonnet-4-6", undefined)).toBe(false);
     expect(isModelSubstituted(undefined, "claude-sonnet-5")).toBe(false);
+  });
+});
+
+describe("SDK の使用量・費用の転記(段階 1-1 計測)", () => {
+  it("cache_creation / cache_read / total_cost_usd / modelUsage を結果に載せる(input_tokens とは別計上)", async () => {
+    const res = await runAgentSearch(baseOpts, {
+      queryFn: streamOf({
+        type: "result",
+        subtype: "success",
+        structured_output: { answer: "A", notFound: false },
+        usage: {
+          input_tokens: 12,
+          output_tokens: 340,
+          cache_creation_input_tokens: 5000,
+          cache_read_input_tokens: 42_000,
+        },
+        total_cost_usd: 0.1234,
+        modelUsage: {
+          "claude-sonnet-4-6": {
+            inputTokens: 12,
+            outputTokens: 340,
+            cacheReadInputTokens: 42_000,
+            cacheCreationInputTokens: 5000,
+            webSearchRequests: 0,
+            costUSD: 0.1234,
+            contextWindow: 200_000,
+            maxOutputTokens: 32_000,
+            provider: "anthropicAws",
+            costBasis: "list",
+          },
+        },
+      }),
+    });
+    // input_tokens はキャッシュ分を含まない(usage はそのまま・キャッシュは別フィールド)。
+    expect(res.usage).toEqual({ inputTokens: 12, outputTokens: 340 });
+    expect(res.cacheCreationInputTokens).toBe(5000);
+    expect(res.cacheReadInputTokens).toBe(42_000);
+    expect(res.totalCostUsd).toBe(0.1234);
+    // 数値以外(provider・costBasis)と観測に不要な数値(contextWindow 等)は落とす。
+    expect(res.modelUsage).toEqual({
+      "claude-sonnet-4-6": {
+        inputTokens: 12,
+        outputTokens: 340,
+        cacheReadInputTokens: 42_000,
+        cacheCreationInputTokens: 5000,
+        costUsd: 0.1234,
+      },
+    });
+  });
+
+  it("result に無ければキー自体を持たない(旧 SDK・差し替え)", async () => {
+    const res = await runAgentSearch(baseOpts, {
+      queryFn: streamOf({
+        type: "result",
+        subtype: "success",
+        structured_output: { answer: "A", notFound: false },
+        usage: { input_tokens: 1, output_tokens: 1 },
+      }),
+    });
+    for (const k of [
+      "cacheCreationInputTokens",
+      "cacheReadInputTokens",
+      "totalCostUsd",
+      "modelUsage",
+    ]) {
+      expect(k in res).toBe(false);
+    }
+  });
+
+  it("sanitizeModelUsage: 形が違えば undefined、欠けた・非数値のフィールドは 0", () => {
+    expect(sanitizeModelUsage(undefined)).toBeUndefined();
+    expect(sanitizeModelUsage([])).toBeUndefined();
+    expect(sanitizeModelUsage({})).toBeUndefined();
+    expect(sanitizeModelUsage({ m: null })).toBeUndefined();
+    expect(
+      sanitizeModelUsage({ m: { inputTokens: "x", costUSD: Number.NaN, outputTokens: 3 } }),
+    ).toEqual({
+      m: {
+        inputTokens: 0,
+        outputTokens: 3,
+        cacheReadInputTokens: 0,
+        cacheCreationInputTokens: 0,
+        costUsd: 0,
+      },
+    });
   });
 });

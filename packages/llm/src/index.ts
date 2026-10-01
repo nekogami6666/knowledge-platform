@@ -7,6 +7,7 @@
 // --- Agent SDK ラッパ(agentic search) ---
 export {
   type AgentEffort,
+  type AgentModelUsage,
   type AgentProgressEvent,
   type AgentQueryFn,
   type AgentSearchOptions,
@@ -18,6 +19,7 @@ export {
   isModelSubstituted,
   type LlmDeps,
   runAgentSearch,
+  sanitizeModelUsage,
 } from "./agent.js";
 // --- エラー ---
 export { LlmError, type LlmErrorCode, RETRYABLE_LLM_CODES } from "./errors.js";
