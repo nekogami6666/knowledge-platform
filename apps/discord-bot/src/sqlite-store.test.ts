@@ -1,6 +1,9 @@
+import { mkdtempSync, rmSync } from "node:fs";
 import { createRequire } from "node:module";
-import { beforeAll, describe, expect, it } from "vitest";
-import type { BotStore, QueryRecord } from "./db.js";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import type { BotStore, InflightAskStore, QueryRecord } from "./db.js";
 
 /**
  * better-sqlite3 の native バイナリが無い環境(= `pnpm approve-builds better-sqlite3` 未実施)では
@@ -42,7 +45,7 @@ function sampleQuery(over: Partial<QueryRecord> = {}): QueryRecord {
 }
 
 describe.skipIf(!sqliteAvailable())("createSqliteStore(:memory:)", () => {
-  let createStore: (path: string) => BotStore;
+  let createStore: (path: string) => BotStore & InflightAskStore;
   beforeAll(async () => {
     ({ createSqliteStore: createStore } = await import("./sqlite-store.js"));
   });
@@ -74,9 +77,16 @@ describe.skipIf(!sqliteAvailable())("createSqliteStore(:memory:)", () => {
     s.close();
   });
 
-  it("answered / unanswered / delivery_failed / timeout が round-trip する", () => {
+  it("answered / unanswered / delivery_failed / timeout / timeout_skipped / interrupted が round-trip する", () => {
     const s = createStore(":memory:");
-    for (const status of ["answered", "unanswered", "delivery_failed", "timeout"] as const) {
+    for (const status of [
+      "answered",
+      "unanswered",
+      "delivery_failed",
+      "timeout",
+      "timeout_skipped",
+      "interrupted",
+    ] as const) {
       s.recordQuery(sampleQuery({ id: status, answerStatus: status }));
       expect(s.getQuery(status)?.answerStatus).toBe(status);
     }
@@ -165,5 +175,96 @@ describe.skipIf(!sqliteAvailable())("createSqliteStore(:memory:)", () => {
     s.setActionPayload("unknown", "{}");
     expect(s.listPendingActions()).toHaveLength(1);
     s.close();
+  });
+});
+
+describe.skipIf(!sqliteAvailable())("inflight_asks(ADR-0035 追記・強制終了からの後始末)", () => {
+  let createStore: (path: string) => BotStore & InflightAskStore;
+  type RawDb = {
+    exec(sql: string): void;
+    pragma(s: string, o?: { simple: boolean }): unknown;
+    close(): void;
+  };
+  let openRaw: (path: string) => RawDb;
+  let dir: string;
+  beforeAll(async () => {
+    ({ createSqliteStore: createStore } = await import("./sqlite-store.js"));
+    const Database = createRequire(import.meta.url)("better-sqlite3") as new (
+      path: string,
+    ) => RawDb;
+    openRaw = (p) => new Database(p);
+    dir = mkdtempSync(join(tmpdir(), "inflight-"));
+  });
+  afterAll(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+  const row = (id: string, acceptedAtMs = 1000) => ({
+    id,
+    applicationId: "app-1",
+    token: `tok-${id}`,
+    acceptedAtMs,
+    correlationId: `corr-${id}`,
+  });
+
+  it("add → list(受付順)→ remove(未知 id は no-op)", () => {
+    const s = createStore(":memory:");
+    s.addInflightAsk(row("b", 2000));
+    s.addInflightAsk(row("a", 1000));
+    expect(s.listInflightAsks()).toEqual([row("a", 1000), row("b", 2000)]);
+    s.removeInflightAsk("a");
+    s.removeInflightAsk("unknown");
+    expect(s.listInflightAsks().map((r) => r.id)).toEqual(["b"]);
+    s.close();
+  });
+
+  it("既存の v1 DB(旧コードが作成・データあり)を開くと表が追加され、user_version とデータは変わらない", () => {
+    const p = join(dir, "v1.db");
+    // 旧コード相当: 版 1 のスキーマだけの DB(inflight_asks は無い)を作る。
+    const old = createStore(p);
+    old.recordQuery(sampleQuery({ id: "old-q" }));
+    old.close();
+    const raw = openRaw(p);
+    raw.exec("DROP TABLE inflight_asks");
+    expect(raw.pragma("user_version", { simple: true })).toBe(1);
+    raw.close();
+
+    const s = createStore(p);
+    s.addInflightAsk(row("x"));
+    expect(s.listInflightAsks()).toHaveLength(1);
+    expect(s.getQuery("old-q")?.question).toBe("?");
+    s.close();
+    const after = openRaw(p);
+    // 版番号は消費しない(3b-2 の v2 managed_clones と番号が衝突しない)。
+    expect(after.pragma("user_version", { simple: true })).toBe(1);
+    after.close();
+  });
+
+  it("同じファイルを何度開いても冪等(行も保持)・ホスト側バッチが同時に開いても壊れない", () => {
+    const p = join(dir, "idem.db");
+    const a = createStore(p);
+    a.addInflightAsk(row("keep"));
+    // bot が開いたまま、別プロセス相当(gap-tracker 等)がもう一度開く。
+    const b = createStore(p);
+    expect(b.listInflightAsks().map((r) => r.id)).toEqual(["keep"]);
+    b.close();
+    a.close();
+    const c = createStore(p);
+    expect(c.listInflightAsks().map((r) => r.id)).toEqual(["keep"]);
+    c.close();
+  });
+
+  it("countRecentInflight(update.sh 用): 15 分以内の行だけ数え、表が無い DB は 0", async () => {
+    const { countRecentInflight } = await import("./inflight-count.js");
+    const now = 100 * 60_000;
+    const p = join(dir, "count.db");
+    const s = createStore(p);
+    s.addInflightAsk(row("recent", now - 60_000));
+    s.addInflightAsk(row("stale", now - 20 * 60_000));
+    s.close();
+    const raw = openRaw(p) as unknown as Parameters<typeof countRecentInflight>[0] & RawDb;
+    expect(countRecentInflight(raw, now)).toBe(1);
+    raw.exec("DROP TABLE inflight_asks");
+    expect(countRecentInflight(raw, now)).toBe(0);
+    raw.close();
   });
 });

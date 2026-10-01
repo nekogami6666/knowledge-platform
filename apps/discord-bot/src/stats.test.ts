@@ -98,6 +98,27 @@ describe("aggregateStats", () => {
     expect(s.window.errors).toBe(1);
   });
 
+  it("timeout_skipped / interrupted は errors と別に数え、非ゼロのときだけ表示する(ADR-0035 追記)", () => {
+    const s = aggregateStats(
+      [
+        q({ id: "1", createdAt: IN, answerStatus: "timeout_skipped" }),
+        q({ id: "2", createdAt: IN, answerStatus: "interrupted" }),
+        q({ id: "3", createdAt: IN, answerStatus: "interrupted" }),
+        q({ id: "4", createdAt: IN, answerStatus: "error" }),
+      ],
+      NOW,
+    );
+    expect(s.window.timeoutSkipped).toBe(1);
+    expect(s.window.interrupted).toBe(2);
+    expect(s.window.errors).toBe(1);
+    const msg = formatStatsMessage(s);
+    expect(msg).toContain("混雑で未検索 1");
+    expect(msg).toContain("再起動で中断 2");
+    const without = formatStatsMessage(aggregateStats([q({ createdAt: IN })], NOW));
+    expect(without).not.toContain("混雑で未検索");
+    expect(without).not.toContain("再起動で中断");
+  });
+
   it("avgElapsedMs は elapsedMs 非 null の平均(null は無視)", () => {
     const s = aggregateStats(
       [

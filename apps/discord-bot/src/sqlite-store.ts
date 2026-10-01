@@ -7,7 +7,14 @@
  * 常駐プロセス向けの最小堅牢化: WAL / busy_timeout / user_version(マイグレーション)/ index。
  */
 import Database from "better-sqlite3";
-import type { BotStore, PendingAction, QueryRecord, RateLimitResult } from "./db.js";
+import type {
+  BotStore,
+  InflightAsk,
+  InflightAskStore,
+  PendingAction,
+  QueryRecord,
+  RateLimitResult,
+} from "./db.js";
 
 type DB = Database.Database;
 
@@ -57,6 +64,30 @@ function migrate(db: DB): void {
     );
   `);
   db.pragma(`user_version = ${SCHEMA_VERSION}`);
+}
+
+/**
+ * 処理中 /ask の表(強制終了からの後始末・ADR-0035 追記)。**user_version を消費しない**。
+ *
+ * - 追加のみ・冪等(IF NOT EXISTS)で、開くたびに実行する。行は最長 15 分しか生きない揮発データで、
+ *   列の移行が要らないため版番号で管理する必要が無い。
+ * - bot.db はホスト側バッチ(gap-tracker / freshness / stats / recordings-cleanup)と共有しており、
+ *   各バッチも同じ createSqliteStore を通る。古いコードのバッチは本表を知らないまま素通りし
+ *   (`current >= SCHEMA_VERSION` で migrate を抜ける)、新しいコードのバッチが先に開いても同じ表を作るだけ。
+ * - 並行する 3b-2(ADR-0036 D4)が SCHEMA_VERSION 2 で managed_clones を足す予定のため、
+ *   本表は版番号を取らずに独立させた(どちらが先にマージされても番号の付け直しが要らない)。
+ *   将来 migrate の版に畳む場合も、この文は冪等なのでそのまま任意の vN 段へ移せる。
+ */
+function ensureInflightAsksTable(db: DB): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS inflight_asks (
+      id TEXT PRIMARY KEY,
+      application_id TEXT NOT NULL,
+      interaction_token TEXT NOT NULL,
+      accepted_at_ms INTEGER NOT NULL,
+      correlation_id TEXT NOT NULL
+    );
+  `);
 }
 
 // sqlite の行は snake_case。`SELECT *` を `as QueryRecord`(camelCase)へ素キャストすると
@@ -118,11 +149,12 @@ function toPendingAction(r: ActionRow): PendingAction {
 }
 
 /** better-sqlite3 による BotStore。path はファイルパス(":memory:" も可)。 */
-export function createSqliteStore(path: string): BotStore {
+export function createSqliteStore(path: string): BotStore & InflightAskStore {
   const db: DB = new Database(path);
   db.pragma("journal_mode = WAL");
   db.pragma("busy_timeout = 5000");
   migrate(db);
+  ensureInflightAsksTable(db);
 
   // @feedback を列・VALUES の双方に含めること。QueryRecord に feedback がある以上、
   // 列を欠くと better-sqlite3 の named-param 厳密一致で recordQuery が実行時に throw する。
@@ -153,6 +185,12 @@ export function createSqliteStore(path: string): BotStore {
     ON CONFLICT (subject, kind, window_start) DO UPDATE SET count = count + 1
     RETURNING count
   `);
+  const insertInflight = db.prepare(`
+    INSERT OR REPLACE INTO inflight_asks (id, application_id, interaction_token, accepted_at_ms, correlation_id)
+    VALUES (@id, @applicationId, @token, @acceptedAtMs, @correlationId)
+  `);
+  const deleteInflight = db.prepare("DELETE FROM inflight_asks WHERE id = ?");
+  const selectInflight = db.prepare("SELECT * FROM inflight_asks ORDER BY accepted_at_ms");
 
   return {
     recordQuery(q: QueryRecord) {
@@ -189,6 +227,28 @@ export function createSqliteStore(path: string): BotStore {
     hitRateLimit(subject, kind, windowStart, limit): RateLimitResult {
       const row = upsertRate.get(subject, kind, windowStart) as { count: number };
       return { count: row.count, allowed: row.count <= limit };
+    },
+    addInflightAsk(row: InflightAsk) {
+      insertInflight.run(row);
+    },
+    removeInflightAsk(id) {
+      deleteInflight.run(id);
+    },
+    listInflightAsks(): InflightAsk[] {
+      const rows = selectInflight.all() as Array<{
+        id: string;
+        application_id: string;
+        interaction_token: string;
+        accepted_at_ms: number;
+        correlation_id: string;
+      }>;
+      return rows.map((r) => ({
+        id: r.id,
+        applicationId: r.application_id,
+        token: r.interaction_token,
+        acceptedAtMs: r.accepted_at_ms,
+        correlationId: r.correlation_id,
+      }));
     },
     close() {
       db.close();

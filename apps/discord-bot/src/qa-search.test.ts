@@ -49,6 +49,23 @@ describe("createQaSearch(タイムアウトの明示・㉞ 失敗耐性)", () =>
     expect(seen).toBeUndefined();
   });
 
+  it("signal を runAgentSearch の opts へ透過し、ABORTED は再試行しない(ADR-0035 追記)", async () => {
+    const seen: unknown[] = [];
+    let calls = 0;
+    const runSearch = (async (opts: { signal?: unknown }) => {
+      calls += 1;
+      seen.push(opts.signal);
+      throw new LlmError("ABORTED", "中断");
+    }) as unknown as AgentSearchFn;
+    const ctl = new AbortController();
+    await expect(
+      createQaSearch({ runSearch, maxRetries: 1 })({ ...INPUT, signal: ctl.signal }),
+    ).rejects.toMatchObject({ code: "ABORTED" });
+    expect(calls).toBe(1);
+    expect(seen[0]).toBe(ctl.signal);
+    expect(shouldRetryAsk(new LlmError("ABORTED", "x"))).toBe(false);
+  });
+
   it("maxTurns / effort / thinking を指定時だけ透過し、未指定なら opts に載せない(ADR-0035 D6)", async () => {
     const seen: Record<string, unknown>[] = [];
     const runSearch = (async (opts: Record<string, unknown>) => {

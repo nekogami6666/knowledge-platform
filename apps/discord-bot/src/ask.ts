@@ -282,6 +282,8 @@ export interface QaSearchInput {
   cwd: string;
   /** 進捗の購読(ADR-0035 D5)。runAgentSearch へ透過する。 */
   onProgress?: (ev: AgentProgressEvent) => void;
+  /** 正常終了時の中断(ADR-0035 追記)。runAgentSearch へ透過する。 */
+  signal?: AbortSignal;
 }
 /** 戻りは runAgentSearch と同形(numTurns / durationApiMs を型で落とさない・ADR-0035 D4)。 */
 export type QaSearch = (input: QaSearchInput) => Promise<AgentSearchResult<QaAnswer>>;
@@ -341,6 +343,11 @@ export interface AskDeps {
   onProgress?: (ev: AskProgressEvent) => void;
   /** 実効の検索タイムアウト(ms)。タイムアウト文面の秒数表示に使う(既定 DEFAULT_ASK_TIMEOUT_MS)。 */
   searchTimeoutMs?: number;
+  /**
+   * bot の正常終了による中断(ADR-0035 追記)。abort されたら同期後・検索中のどこでも打ち切り、
+   * `interrupted` として記録して INTERRUPTED_MESSAGE を返す。
+   */
+  signal?: AbortSignal;
 }
 
 export interface AskResult {
@@ -354,6 +361,57 @@ export const NOT_FOUND_MESSAGE =
   "根拠が見つからなかったため、推測での回答は控えます。質問は記録し、詳しい人に確認を依頼します(§6.2 / P6)。";
 export const ERROR_MESSAGE =
   "すみません、回答中にエラーが発生しました。時間をおいて再度お試しください。";
+
+/** 受付からの期限を過ぎてから順番が来たとき(検索しない・ADR-0035 追記 D2')。 */
+export const DEADLINE_SKIPPED_MESSAGE =
+  "混雑のため時間内に回答できませんでした。お手数ですがもう一度質問してください。";
+/** bot の再起動で中断したとき(正常終了・強制終了後の後始末とも同じ文面・ADR-0035 追記)。 */
+export const INTERRUPTED_MESSAGE =
+  "再起動のため中断しました。お手数ですがもう一度質問してください。";
+
+/** 検索せずに終える /ask の状態(ADR-0035 追記)。 */
+export type SkippedAskStatus = Extract<AnswerStatus, "timeout_skipped" | "interrupted">;
+
+/**
+ * 検索を行わずに終える /ask を記録して、利用者向けの結果を返す(ADR-0035 追記)。
+ * - timeout_skipped: 受付からの期限を過ぎてから順番が来た(混雑)。
+ * - interrupted: 再起動で順番待ちのまま終えた / 検索を中断した。
+ * どちらもナレッジの欠落ではないので question_queue には積まない。記録の失敗は結果を変えない
+ * (利用者への通知を優先する)。
+ */
+export function recordSkippedAsk(
+  req: AskRequest,
+  deps: Pick<AskDeps, "store" | "newId" | "now" | "logError">,
+  status: SkippedAskStatus,
+  elapsedMs: number | null = null,
+): AskResult {
+  const queryId = deps.newId();
+  try {
+    deps.store.recordQuery({
+      id: queryId,
+      correlationId: req.correlationId,
+      discordUserId: req.discordUserId,
+      discordChannelId: req.discordChannelId,
+      threadId: req.threadId,
+      question: req.question,
+      createdAt: deps.now(),
+      answer: null,
+      sourcesJson: null,
+      answerStatus: status,
+      feedback: null,
+      inputTokens: null,
+      outputTokens: null,
+      elapsedMs,
+    });
+  } catch (err) {
+    deps.logError?.(err);
+  }
+  return {
+    answerText: status === "interrupted" ? INTERRUPTED_MESSAGE : DEADLINE_SKIPPED_MESSAGE,
+    status,
+    queryId,
+  };
+}
 
 /** §6.2 失敗時挙動の「上限 600 秒」の正典値(ADR-0035 D1)。env ASK_TIMEOUT_MS による上書きは index.ts。 */
 export const DEFAULT_ASK_TIMEOUT_MS = 600_000;
@@ -465,7 +523,28 @@ export async function handleAskRequest(req: AskRequest, deps: AskDeps): Promise<
     question: req.question,
     createdAt,
   };
+  // 関数にするのは、await をまたいだ再判定を TS の型の絞り込みに潰されないようにするため。
+  const isAborted = (): boolean => deps.signal?.aborted === true;
+  // ADR-0035 追記: 正常終了で中断された /ask は interrupted として記録する(キューには積まない)。
+  const interrupted = (): AskResult => {
+    deps.store.recordQuery({
+      ...base,
+      answer: null,
+      sourcesJson: null,
+      answerStatus: "interrupted",
+      feedback: null,
+      inputTokens: null,
+      outputTokens: null,
+      elapsedMs: Math.round(monoNow() - startedAt),
+    });
+    deps.logInfo?.(
+      { elapsedMs: Math.round(monoNow() - startedAt) },
+      "/ask: 再起動のため中断しました(ADR-0035 追記)",
+    );
+    return { answerText: INTERRUPTED_MESSAGE, status: "interrupted", queryId };
+  };
   try {
+    if (isAborted()) return interrupted();
     deps.onProgress?.({ kind: "sync" });
     let repos: readonly RepoSpec[];
     let synced: SyncedRepo[];
@@ -481,6 +560,8 @@ export async function handleAskRequest(req: AskRequest, deps: AskDeps): Promise<
     // all_visible 有効時は clone のあるリポだけを載せる(ADR-0036)。
     const manifest = buildRepoManifest(repos);
     const systemPrompt = manifest === "" ? prompt.body : `${manifest}\n${prompt.body}`;
+    // git sync は中断できない(1 コマンド 60 秒の上限つき)ため、同期後に一度確かめてから検索に入る。
+    if (isAborted()) return interrupted();
     deps.onProgress?.({ kind: "search" });
     const { value, usage, numTurns, durationApiMs, deniedToolCalls, requestedModel, actualModel } =
       await deps.search({
@@ -488,6 +569,7 @@ export async function handleAskRequest(req: AskRequest, deps: AskDeps): Promise<
         question: req.question,
         cwd: deps.clonesDir,
         ...(deps.onProgress !== undefined ? { onProgress: deps.onProgress } : {}),
+        ...(deps.signal !== undefined ? { signal: deps.signal } : {}),
       });
     // ADR-0035 D4: 所要時間とターン数を必ず残す(タイムアウト頻発の原因分析・探索予算の調整に使う)。
     deps.logInfo?.(
@@ -571,6 +653,10 @@ export async function handleAskRequest(req: AskRequest, deps: AskDeps): Promise<
     // タイムアウトは文面と answerStatus で明示する(§6.2 失敗時挙動 / ADR-0030 D3)。ナレッジ欠落
     // ではないので error 同様キューには積まない。code 直判定にするのは、isTransient だと withRetry
     // 済みの 429/529 まで拾ってしまい ERROR_MESSAGE(時間をおいて再度)のままが適切なため。
+    // 中断(ABORTED)や、中断と同時に起きた失敗はエラーではなく interrupted として扱う。
+    if ((err instanceof LlmError && err.code === "ABORTED") || isAborted()) {
+      return interrupted();
+    }
     const timedOut = err instanceof LlmError && err.code === "TIMEOUT";
     deps.logError?.(err);
     deps.store.recordQuery({

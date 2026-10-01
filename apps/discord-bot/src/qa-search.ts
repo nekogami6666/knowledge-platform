@@ -99,6 +99,8 @@ export function createQaSearch(deps: QaSearchFactoryDeps = {}): QaSearch {
             outputSchema: qaAnswerSchema,
             timeoutMs,
             ...(input.onProgress !== undefined ? { onProgress: input.onProgress } : {}),
+            // 正常終了時の中断(ADR-0035 追記)。ABORTED は shouldRetryAsk の対象外なので再試行しない。
+            ...(input.signal !== undefined ? { signal: input.signal } : {}),
             ...(deps.maxTurns !== undefined ? { maxTurns: deps.maxTurns } : {}),
             ...(deps.effort !== undefined ? { effort: deps.effort } : {}),
             ...(deps.thinking !== undefined ? { thinking: deps.thinking } : {}),

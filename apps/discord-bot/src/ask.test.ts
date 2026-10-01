@@ -10,16 +10,19 @@ import {
   type AskDeps,
   type AskRequest,
   buildRepoManifest,
+  DEADLINE_SKIPPED_MESSAGE,
   DEFAULT_ASK_TIMEOUT_MS,
   degenerateAnswerReason,
   ERROR_MESSAGE,
   handleAskRequest,
+  INTERRUPTED_MESSAGE,
   MANIFEST_DESCRIPTION_MAX_CHARS,
   NOT_FOUND_MESSAGE,
   normalizeLineRange,
   type QaAnswer,
   type QaCitation,
   qaAnswerSchema,
+  recordSkippedAsk,
   sanitizeRepoDescription,
   timeoutMessage,
   validateCitations,
@@ -578,6 +581,124 @@ describe("handleAskRequest synthetic 統合(§6.2 受け入れ条件)", () => {
     expect(results).toHaveLength(3);
     expect(results.every((r) => r.queryId !== "")).toBe(true);
     expect(store.listQueries()).toHaveLength(3);
+  });
+});
+
+describe("期限切れ・再起動による中断(ADR-0035 追記)", () => {
+  it("recordSkippedAsk(timeout_skipped): 検索せずに記録し、混雑の文面を返す(キューには積まない)", () => {
+    const store = createMemoryStore();
+    const res = recordSkippedAsk(
+      req,
+      { store, newId: counterId(), now: () => "2026-10-01T10:00:00+09:00" },
+      "timeout_skipped",
+      900_000,
+    );
+    expect(res).toEqual({
+      answerText: DEADLINE_SKIPPED_MESSAGE,
+      status: "timeout_skipped",
+      queryId: "id-1",
+    });
+    expect(store.getQuery("id-1")).toMatchObject({
+      answerStatus: "timeout_skipped",
+      question: req.question,
+      discordUserId: "u1",
+      elapsedMs: 900_000,
+      answer: null,
+    });
+    expect(store.listPendingActions()).toHaveLength(0);
+  });
+
+  it("recordSkippedAsk(interrupted): 中断の文面。記録に失敗しても通知用の結果は返す", () => {
+    const errors: unknown[] = [];
+    const store = createMemoryStore();
+    store.recordQuery = () => {
+      throw new Error("db locked");
+    };
+    const res = recordSkippedAsk(
+      req,
+      { store, newId: counterId(), now: () => "t", logError: (e) => errors.push(e) },
+      "interrupted",
+    );
+    expect(res.status).toBe("interrupted");
+    expect(res.answerText).toBe(INTERRUPTED_MESSAGE);
+    expect(errors).toHaveLength(1);
+  });
+
+  it("開始前に abort 済みなら同期も検索もせず interrupted を記録する", async () => {
+    let synced = 0;
+    let searched = 0;
+    const ctl = new AbortController();
+    ctl.abort();
+    const { deps, store } = makeDeps({
+      syncer: {
+        ...fakeSyncer(),
+        sync: async () => {
+          synced += 1;
+          return [];
+        },
+      },
+      search: async () => {
+        searched += 1;
+        throw new Error("呼ばれない");
+      },
+      signal: ctl.signal,
+    });
+    const res = await handleAskRequest(req, deps);
+    expect(res).toMatchObject({ status: "interrupted", answerText: INTERRUPTED_MESSAGE });
+    expect(store.getQuery(res.queryId)?.answerStatus).toBe("interrupted");
+    expect(synced).toBe(0);
+    expect(searched).toBe(0);
+  });
+
+  it("同期中に abort されたら検索に入らず interrupted", async () => {
+    let searched = 0;
+    const ctl = new AbortController();
+    const { deps, store } = makeDeps({
+      syncer: {
+        ...fakeSyncer(),
+        sync: async () => {
+          ctl.abort(); // git sync は中断できないため、終わってから判定される
+          return synced;
+        },
+      },
+      search: async () => {
+        searched += 1;
+        throw new Error("呼ばれない");
+      },
+      signal: ctl.signal,
+    });
+    const res = await handleAskRequest(req, deps);
+    expect(res.status).toBe("interrupted");
+    expect(store.getQuery(res.queryId)?.answerStatus).toBe("interrupted");
+    expect(searched).toBe(0);
+  });
+
+  it("検索に signal を渡し、ABORTED は error ではなく interrupted(logError しない・キューに積まない)", async () => {
+    const errors: unknown[] = [];
+    let seen: AbortSignal | undefined;
+    const ctl = new AbortController();
+    const { deps, store } = makeDeps({
+      search: async (input) => {
+        seen = input.signal;
+        ctl.abort();
+        throw new LlmError("ABORTED", "中断");
+      },
+      signal: ctl.signal,
+      logError: (e) => errors.push(e),
+    });
+    const res = await handleAskRequest(req, deps);
+    expect(seen).toBe(ctl.signal);
+    expect(res).toMatchObject({ status: "interrupted", answerText: INTERRUPTED_MESSAGE });
+    expect(store.getQuery(res.queryId)?.answerStatus).toBe("interrupted");
+    expect(store.listPendingActions()).toHaveLength(0);
+    expect(errors).toHaveLength(0);
+  });
+
+  it("abort されなければ従来どおり(signal を渡しても結果は変わらない)", async () => {
+    const ctl = new AbortController();
+    const { deps } = makeDeps({ signal: ctl.signal });
+    const res = await handleAskRequest(req, deps);
+    expect(res.status).toBe("unanswered");
   });
 });
 

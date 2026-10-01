@@ -132,6 +132,11 @@ export interface AgentSearchOptions<T> {
   timeoutMs?: number;
   /** 進捗の購読(ADR-0035 D5)。listener の例外は握って検索を止めない。 */
   onProgress?: (ev: AgentProgressEvent) => void;
+  /**
+   * 呼び出し側からの中断(bot の正常終了・ADR-0035 追記)。abort されると検索を打ち切り
+   * LlmError("ABORTED") を投げる。内部のタイムアウト(TIMEOUT)とは区別する。
+   */
+  signal?: AbortSignal;
   /** 努力度(未指定なら SDK 既定)。所要時間と回答品質のトレードオフ調整用(ADR-0035 D6)。 */
   effort?: AgentEffort;
   /** 拡張思考(未指定なら SDK 既定)。 */
@@ -282,8 +287,20 @@ export async function runAgentSearch<T>(
     unknown
   >;
 
+  // 呼び出し側の中断は検索を始める前に判定する(subprocess を起動しない)。
+  if (opts.signal?.aborted === true) {
+    throw new LlmError("ABORTED", "Agent SDK query は開始前に中断されました");
+  }
+  // 内部の AbortController はタイムアウトと呼び出し側の中断の両方で abort する。
+  // どちらで止めたかは abortedByCaller で区別する(TIMEOUT と ABORTED で文面・記録が違うため)。
   const abortController = new AbortController();
   const timer = setTimeout(() => abortController.abort(), timeoutMs);
+  let abortedByCaller = false;
+  const onCallerAbort = (): void => {
+    abortedByCaller = true;
+    abortController.abort();
+  };
+  opts.signal?.addEventListener("abort", onCallerAbort, { once: true });
 
   // ツール能力の封じ込め: permissionMode:"dontAsk"(未承認ツールはプロンプトせず拒否)+ allowedTools 許可リスト
   // + tools で基本ツール集合自体を allowedTools に絞る(allowedTools:[] でも既定では cwd 配下の Read/Grep/Glob が
@@ -339,6 +356,9 @@ export async function runAgentSearch<T>(
       }
     }
   } catch (cause) {
+    if (abortedByCaller) {
+      throw new LlmError("ABORTED", "Agent SDK query を中断しました", { cause });
+    }
     if (abortController.signal.aborted) {
       throw new LlmError("TIMEOUT", `Agent SDK query が ${timeoutMs}ms でタイムアウトしました`, {
         cause,
@@ -347,8 +367,13 @@ export async function runAgentSearch<T>(
     throw new LlmError("API_ERROR", "Agent SDK query が失敗しました", { cause });
   } finally {
     clearTimeout(timer);
+    opts.signal?.removeEventListener("abort", onCallerAbort);
   }
 
+  // SDK が abort で例外を投げずに反復を終えた場合も、中断として扱う(部分的な result を採用しない)。
+  if (abortedByCaller) {
+    throw new LlmError("ABORTED", "Agent SDK query を中断しました");
+  }
   if (!result) {
     throw new LlmError("API_ERROR", "Agent SDK から result メッセージが返りませんでした");
   }

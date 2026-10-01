@@ -115,6 +115,11 @@ cd ~/stratum/knowledge-platform && ./docs/deploy/update.sh
 ```
 (git pull → ホスト側 build(gap-tracker 用)→ `docker compose build` → `up -d`)
 
+`up -d` の前に回答中の /ask の件数を表示します(0 件でなければ警告。止めはしません)。
+bot は SIGTERM で新規 /ask を「再起動中です」と断り、処理中の質問を最大 `SHUTDOWN_GRACE_MS`
+(既定 60 秒)待ってから中断し、質問者に再質問を案内します(compose の `stop_grace_period: 90s`)。
+強制終了(OOM 等)で中断した質問は、次回起動時に 15 分以内のものだけ表示を書き換えます(ADR-0035 追記)。
+
 ## 運用(ADR-0010 D4 / ADR-0016 D5)
 
 - **タイマー失敗の通知**: 各 stratum-*.service は失敗時に `stratum-notify-failure@` 経由で

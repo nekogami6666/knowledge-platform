@@ -35,10 +35,19 @@ import type { Logger } from "pino";
 import { ackReaction, noticeAllowedOnce } from "./ack.js";
 import {
   type AskProgressEvent,
+  type AskRequest,
   type AskResult,
   DEFAULT_ASK_TIMEOUT_MS,
   ERROR_MESSAGE,
+  recordSkippedAsk,
 } from "./ask.js";
+import {
+  type AskLifecycle,
+  createAskLifecycle,
+  interactionLikelyExpired,
+  interactionTokenUsable,
+  safeErrorInfo,
+} from "./ask-lifecycle.js";
 import { handleLightbulb, jstDayKey } from "./capture.js";
 import { SerialQueue } from "./concurrency.js";
 import {
@@ -130,6 +139,8 @@ export type AskHandler = (
     correlationId: string;
     /** 進捗の購読(ADR-0035 D5)。index.ts が AskDeps.onProgress へ渡す。 */
     onProgress?: (ev: AskProgressEvent) => void;
+    /** 正常終了時の中断(ADR-0035 追記)。index.ts が AskDeps.signal へ渡す。 */
+    signal?: AbortSignal;
   },
 ) => Promise<AskResult>;
 
@@ -152,6 +163,11 @@ export interface BotDeps {
    * (ADR-0036 D5)。未指定なら createBot 内で生成する。
    */
   queue?: SerialQueue;
+  /**
+   * /ask の受付・追跡・正常終了(ADR-0035 追記)。index.ts が SIGTERM と共有するために注入する
+   * (inflight_asks への記録も持つ)。未指定なら createBot 内で記録なしのものを生成する。
+   */
+  lifecycle?: AskLifecycle;
   /**
    * スラッシュコマンドの登録先ギルド(env DISCORD_GUILD_ID)。指定時はそのギルドへ即時反映、
    * 未指定はグローバル登録(全サーバーに反映されるが最大 1 時間かかる)。テストサーバーでは指定推奨。
@@ -282,6 +298,7 @@ export function createBot(deps: BotDeps): Client {
   const onAsk = deps.onAsk ?? stubHandler;
   // §6.2: /ask は直列処理(同時多発でもクラッシュしない)。定期同期・鮮度確認と共有(ADR-0036 D5)。
   const queue = deps.queue ?? new SerialQueue();
+  const lifecycle = deps.lifecycle ?? createAskLifecycle({ newId: randomUUID });
 
   // 起動時に /ask を Discord へ登録する。guildId 指定ならそのギルドへ即時、未指定はグローバル
   // (反映に最大 1 時間)。登録失敗は致命ではないのでログのみで起動を続ける。
@@ -321,7 +338,7 @@ export function createBot(deps: BotDeps): Client {
 
   client.on(Events.InteractionCreate, async (interaction: Interaction) => {
     if (interaction.isChatInputCommand() && interaction.commandName === "ask") {
-      await handleAsk(interaction, onAsk, deps, queue);
+      await handleAsk(interaction, onAsk, deps, queue, lifecycle);
     } else if (interaction.isChatInputCommand() && interaction.commandName === "stats") {
       await handleStats(interaction, deps);
     } else if (interaction.isChatInputCommand() && interaction.commandName === "interview") {
@@ -409,28 +426,27 @@ export const SEND_FAILED_MESSAGE = "すみません、回答の送信に失敗�
 export const SEND_PARTIAL_FAILED_MESSAGE =
   "(回答の続きを送信できませんでした。上の回答は途中までです)";
 
-/** Discord interaction token の寿命(15 分)。超えると editReply/followUp は UnknownInteraction になる。 */
-export const INTERACTION_TOKEN_MS = 15 * 60_000;
-/** 失効判定の余裕。受付からこれを差し引いた時刻を超えて処理を開始したら interaction を使わない。 */
-export const INTERACTION_DEADLINE_MARGIN_MS = 60_000;
+// 期限の定数と判定は ask-lifecycle.ts に置く(強制終了からの後始末と共有・ADR-0035 追記)。
+export {
+  INTERACTION_DEADLINE_MARGIN_MS,
+  INTERACTION_TOKEN_MS,
+  interactionLikelyExpired,
+} from "./ask-lifecycle.js";
 
-/**
- * 受付(acceptedAt)からの経過で interaction token が失効済み(または配送完了前に失効しうる)と
- * 判定する純関数(ADR-0035 D2)。true なら最初から DM で配送する。
- */
-export function interactionLikelyExpired(acceptedAtMs: number, nowMs: number): boolean {
-  return nowMs - acceptedAtMs > INTERACTION_TOKEN_MS - INTERACTION_DEADLINE_MARGIN_MS;
-}
+/** 再起動(正常終了)中に届いた /ask への応答(ADR-0035 追記)。検索も記録もしない。 */
+export const SHUTTING_DOWN_MESSAGE = "再起動中です。少し待ってからもう一度お試しください。";
 
 /**
  * interaction が失効・二重応答で使えないことを示す Discord API エラーか(ADR-0035 D3)。
  * コードは discord.js の RESTJSONErrorCodes で参照する(数値の直書き禁止・CLAUDE.md)。
+ * InvalidWebhookToken は 15 分を過ぎた interaction webhook(editReply/followUp)で返る(ADR-0035 追記)。
  */
 export function isExpiredInteractionError(err: unknown): boolean {
   return (
     err instanceof DiscordAPIError &&
     (err.code === RESTJSONErrorCodes.UnknownInteraction ||
-      err.code === RESTJSONErrorCodes.InteractionHasAlreadyBeenAcknowledged)
+      err.code === RESTJSONErrorCodes.InteractionHasAlreadyBeenAcknowledged ||
+      err.code === RESTJSONErrorCodes.InvalidWebhookToken)
   );
 }
 
@@ -533,6 +549,7 @@ async function handleAsk(
   onAsk: AskHandler,
   deps: BotDeps,
   queue: SerialQueue,
+  lifecycle: AskLifecycle,
 ): Promise<void> {
   const { logger, channels, store } = deps;
   const now = deps.now ?? Date.now;
@@ -572,6 +589,14 @@ async function handleAsk(
     return;
   }
 
+  // ADR-0035 追記: 再起動(正常終了)中は新規受付を止める。レート制限より前に判定し予算を消費させない。
+  if (!lifecycle.accepting) {
+    await ackOrBail(() =>
+      interaction.reply({ content: SHUTTING_DOWN_MESSAGE, flags: MessageFlags.Ephemeral }),
+    );
+    return;
+  }
+
   // §6.2/§13 rate-limit: user/channel 別の 10 分バケット。超過は ephemeral 拒否。
   // user を先に評価し、超過時は `||` 短絡で channel を増やさない(連打が channel 予算を前借りしない)。
   const win = windowKey(Date.now());
@@ -591,14 +616,118 @@ async function handleAsk(
   // ADR-0034: 応答一式(考え中・回答・出典・エラー・👍👎)は実行者本人にだけ見せる。
   // editReply はこの defer のエフェメラル性を継承する。followUp は継承しないため配送アダプタ側で毎回 flags を付す。
   if (!(await ackOrBail(() => interaction.deferReply({ flags: MessageFlags.Ephemeral })))) return;
-  // ADR-0035 D2: 受付時刻。直列キューで長く待ち token が失効していたら最初から DM で配送する。
+  // ADR-0035 D2: 受付時刻。/ask の全体期限(受付 + 15 分 − 余裕)の起点。
   const acceptedAt = now();
-  // 本人 DM(失効時の代替経路)。ephemeral 同様、本人以外には見えない(ADR-0034 の趣旨を維持)。
-  const dm = (m: { content: string; components: ActionRowBuilder<ButtonBuilder>[] }) =>
+  // ADR-0035 追記: 処理中として追跡する(正常終了の待機・中断、強制終了後の後始末の対象)。
+  const ticket = lifecycle.begin({
+    applicationId: interaction.applicationId,
+    token: interaction.token,
+    correlationId,
+    acceptedAtMs: acceptedAt,
+  });
+  if (ticket === null) {
+    // defer と停止開始が競合した(受付停止の直後)。検索も記録もしない。
+    try {
+      await interaction.editReply(SHUTTING_DOWN_MESSAGE);
+    } catch (err) {
+      log.warn({ err: safeErrorInfo(err) }, "/ask: 再起動中の案内を送れませんでした");
+    }
+    return;
+  }
+  try {
+    await runAcceptedAsk({
+      interaction,
+      onAsk,
+      deps,
+      queue,
+      log,
+      now,
+      question,
+      correlationId,
+      acceptedAt,
+      signal: ticket.signal,
+    });
+  } finally {
+    // 完了・失敗・中断のいずれでも記録(interaction token)を即削除する。
+    ticket.finish();
+  }
+}
+
+/** 本人 DM(失効時の代替経路)。ephemeral 同様、本人以外には見えない(ADR-0034 の趣旨を維持)。 */
+type DmSend = (m: {
+  content: string;
+  components: ActionRowBuilder<ButtonBuilder>[];
+}) => Promise<unknown>;
+
+/**
+ * 検索せずに終えた /ask(期限切れ・再起動による中断)の通知(ADR-0035 追記)。
+ * token がまだ使える(受付から 15 分未満)なら ephemeral の進捗表示を書き換え、失敗したら DM。
+ * 使えなければ最初から DM。1 通だけの短い通知なので、失敗の種類を問わず DM へ切り替える。
+ */
+async function notifySkipped(
+  interaction: ChatInputCommandInteraction,
+  dm: DmSend,
+  content: string,
+  useInteraction: boolean,
+  log: Logger,
+): Promise<void> {
+  if (useInteraction) {
+    try {
+      await interaction.editReply({ content, components: [] });
+      return;
+    } catch (err) {
+      log.warn(
+        { err: safeErrorInfo(err) },
+        "/ask: 進捗表示を書き換えられないため DM で通知します(ADR-0035 D2)",
+      );
+    }
+  }
+  try {
+    await dm({ content, components: [] });
+  } catch (err) {
+    log.error(
+      { err: safeErrorInfo(err) },
+      "/ask の通知を送信できませんでした(interaction 失効・DM 拒否の可能性)",
+    );
+  }
+}
+
+interface AcceptedAsk {
+  interaction: ChatInputCommandInteraction;
+  onAsk: AskHandler;
+  deps: BotDeps;
+  queue: SerialQueue;
+  log: Logger;
+  now: () => number;
+  question: string;
+  correlationId: string;
+  acceptedAt: number;
+  signal: AbortSignal;
+}
+
+/** 受付済み /ask の順番待ち → 期限判定 → 検索 → 配送(handleAsk の後半)。 */
+async function runAcceptedAsk(a: AcceptedAsk): Promise<void> {
+  const { interaction, onAsk, deps, queue, log, now, question, correlationId, acceptedAt, signal } =
+    a;
+  const dm: DmSend = (m) =>
     interaction.user.send({ content: m.content, components: [...m.components] });
+  const req: AskRequest = {
+    question,
+    discordUserId: interaction.user.id,
+    discordChannelId: interaction.channelId,
+    threadId: null,
+    correlationId,
+  };
+  const skipDeps = {
+    store: deps.store,
+    newId: randomUUID,
+    now: () => isoJst(),
+    logError: (err: unknown) => log.error({ err }, "/ask: 記録に失敗しました"),
+  };
 
   // ADR-0035 D5: 「考え中」を一定間隔で更新する(順番待ち → 最新化 → 調べています…)。
   // 最終回答の配送前に必ず stop() し、進行中の edit を待つ(古い tick が回答を上書きしない)。
+  // 中断(signal)でも止まり、終了時にタイマを残さない(ADR-0035 追記)。
   const reporter = startProgressReporter({
     edit: (content) => interaction.editReply(content),
     timeoutMs: deps.askTimeoutMs ?? DEFAULT_ASK_TIMEOUT_MS,
@@ -606,35 +735,66 @@ async function handleAsk(
     now,
     onError: (err) => log.warn({ err }, "/ask: 進捗表示の更新に失敗しました(処理は継続)"),
     isExpired: isExpiredInteractionError,
+    signal,
   });
   reporter.setQueueAhead(queue.pending);
 
   let result: AskResult;
-  let expired = false;
   try {
-    result = await queue.enqueue(() => {
+    // 順番待ちのまま中断されたら、キューの順番を待たずにここで中断処理をする(cancelledInQueue)。
+    // その後に順番が来たタスクは何もせずに抜ける(二重に通知・記録しない)。
+    let started = false;
+    let cancelledInQueue = false;
+    const task = queue.enqueue(async (): Promise<AskResult | null> => {
+      if (cancelledInQueue) return null;
+      started = true;
       reporter.setQueueAhead(0);
-      expired = interactionLikelyExpired(acceptedAt, now());
-      if (expired) {
+      const startedAt = now();
+      // ADR-0035 追記 D2': 順番が来た時点で全体期限を過ぎていたら検索しない。
+      if (interactionLikelyExpired(acceptedAt, startedAt)) {
         log.warn(
-          { waitedMs: now() - acceptedAt },
-          "/ask: キュー待ちで interaction token が失効したため DM で配送します(ADR-0035 D2)",
+          { waitedMs: startedAt - acceptedAt },
+          "/ask: 受付からの期限を過ぎて順番が来たため検索せずに終えます(ADR-0035 追記)",
         );
+        return recordSkippedAsk(req, skipDeps, "timeout_skipped", startedAt - acceptedAt);
       }
       return onAsk(question, {
-        userId: interaction.user.id,
-        channelId: interaction.channelId,
+        userId: req.discordUserId,
+        channelId: req.discordChannelId,
         correlationId,
         onProgress: (ev) => reporter.onEvent(ev),
+        signal,
       });
     });
+    // 中断側が先に決着した場合でも task の失敗を unhandled rejection にしない。
+    task.catch(() => {});
+    const cancelled = new Promise<null>((resolve) => {
+      const onAbort = (): void => {
+        if (started) return; // 検索中の中断は handleAskRequest が interrupted を返す
+        cancelledInQueue = true;
+        resolve(null);
+      };
+      if (signal.aborted) onAbort();
+      else signal.addEventListener("abort", onAbort, { once: true });
+    });
+    const r = await Promise.race([task, cancelled]);
+    if (r === null) {
+      log.info(
+        { waitedMs: now() - acceptedAt },
+        "/ask: 順番待ちのまま再起動のため中断しました(ADR-0035 追記)",
+      );
+      result = recordSkippedAsk(req, skipDeps, "interrupted", now() - acceptedAt);
+    } else {
+      result = r;
+    }
   } catch (err) {
     await reporter.stop();
     // handleAskRequest は内部エラーを AskResult に畳んで返すため、ここに来るのは dispatch/infra 異常のみ。
     log.error({ err }, "/ask pipeline dispatch failed");
     // 二次失敗でハンドラごと落とさない(async リスナの unhandled rejection 防止)。
     try {
-      if (expired) await dm({ content: ERROR_MESSAGE, components: [] });
+      if (interactionLikelyExpired(acceptedAt, now()))
+        await dm({ content: ERROR_MESSAGE, components: [] });
       else await interaction.editReply(ERROR_MESSAGE);
     } catch (err2) {
       log.error({ err: err2 }, "/ask のエラー通知も送信できませんでした(interaction 失効の可能性)");
@@ -643,6 +803,20 @@ async function handleAsk(
   }
 
   await reporter.stop();
+  const deliverAt = now();
+  // 検索しなかった(期限切れ)・中断した /ask は 1 通の通知で終える(ADR-0035 追記)。
+  if (result.status === "timeout_skipped" || result.status === "interrupted") {
+    await notifySkipped(
+      interaction,
+      dm,
+      result.answerText,
+      interactionTokenUsable(acceptedAt, deliverAt),
+      log,
+    );
+    return;
+  }
+  // ADR-0035 D2 (b): 検索が長引き配送時点で期限を過ぎていたら interaction を試みず DM で配送する。
+  const expired = interactionLikelyExpired(acceptedAt, deliverAt);
   // 出典付き回答にのみ 👍👎 を付ける(未回答/エラーには付けない)。
   const components =
     result.status === "answered" && result.queryId !== "" ? [feedbackButtons(result.queryId)] : [];
@@ -667,7 +841,7 @@ async function handleAsk(
         chunks,
         components,
       );
-  if (outcome.fallbackChunks > 0) {
+  if (expired || outcome.fallbackChunks > 0) {
     log.warn(
       { sentChunks: outcome.sentChunks, fallbackChunks: outcome.fallbackChunks },
       "/ask: interaction 失効のため回答を DM で配送しました(ADR-0035 D2)",

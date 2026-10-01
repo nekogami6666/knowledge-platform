@@ -27,6 +27,10 @@ export interface StatsWindow {
   errors: number;
   /** 検索タイムアウト(§6.2 失敗時挙動。ASK_TIMEOUT_MS 調整の判断材料として errors と別掲)。 */
   timeouts: number;
+  /** 期限切れで検索しなかった件数(混雑の指標・ADR-0035 追記)。errors と別掲。 */
+  timeoutSkipped: number;
+  /** 再起動で中断した件数(ADR-0035 追記)。errors と別掲。 */
+  interrupted: number;
   up: number;
   down: number;
   unrated: number;
@@ -62,6 +66,8 @@ export function aggregateStats(
   let unanswered = 0;
   let errors = 0;
   let timeouts = 0;
+  let timeoutSkipped = 0;
+  let interrupted = 0;
   let up = 0;
   let down = 0;
   let elapsedSum = 0;
@@ -70,6 +76,8 @@ export function aggregateStats(
     if (r.answerStatus === "answered") answered += 1;
     else if (r.answerStatus === "unanswered") unanswered += 1;
     else if (r.answerStatus === "timeout") timeouts += 1;
+    else if (r.answerStatus === "timeout_skipped") timeoutSkipped += 1;
+    else if (r.answerStatus === "interrupted") interrupted += 1;
     else errors += 1; // error / delivery_failed
     if (r.feedback === "up") up += 1;
     else if (r.feedback === "down") down += 1;
@@ -95,6 +103,8 @@ export function aggregateStats(
       unanswered,
       errors,
       timeouts,
+      timeoutSkipped,
+      interrupted,
       up,
       down,
       unrated: win.length - up - down,
@@ -124,7 +134,7 @@ export function formatStatsMessage(s: StatsSummary): string {
     "**利用状況**",
     `- /ask: ${w.asks} 件${asksWarn}(目標 週 ${WEEKLY_ASKS_TARGET} 件)`,
     `- 回答 ${w.answered} / 未回答 ${w.unanswered}(回答率 ${pct(w.answerRate)})`,
-    `- 平均応答 ${avgSec}${w.timeouts > 0 ? ` / タイムアウト ${w.timeouts}` : ""}${w.errors > 0 ? ` / エラー ${w.errors}` : ""}`,
+    `- 平均応答 ${avgSec}${w.timeouts > 0 ? ` / タイムアウト ${w.timeouts}` : ""}${w.errors > 0 ? ` / エラー ${w.errors}` : ""}${w.timeoutSkipped > 0 ? ` / 混雑で未検索 ${w.timeoutSkipped}` : ""}${w.interrupted > 0 ? ` / 再起動で中断 ${w.interrupted}` : ""}`,
     "",
     "**回答の評価**",
     `- 👍 ${w.up} / 👎 ${w.down} / 未評価 ${w.unrated}`,

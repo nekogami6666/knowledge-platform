@@ -155,4 +155,57 @@ describe("startProgressReporter", () => {
     expect(calls).toBe(2);
     await r.stop();
   });
+
+  it("signal の abort でタイマを解除し以後 edit しない・stop() は進行中の edit を待つ(ADR-0035 追記)", async () => {
+    let release: () => void = () => {};
+    const t = fakeTimer();
+    let calls = 0;
+    const ctl = new AbortController();
+    const r = startProgressReporter({
+      edit: () => {
+        calls += 1;
+        return new Promise<void>((res) => {
+          release = res;
+        });
+      },
+      timeoutMs: 1,
+      onError: () => {},
+      signal: ctl.signal,
+      ...t.deps,
+    });
+    t.fire();
+    expect(calls).toBe(1);
+    ctl.abort();
+    expect(t.cleared()).toBe(true); // 終了時にタイマを残さない
+    let stopped = false;
+    const stopping = r.stop().then(() => {
+      stopped = true;
+    });
+    await Promise.resolve();
+    expect(stopped).toBe(false); // 進行中の edit を待つ(中断通知を古い tick が上書きしない)
+    release();
+    await stopping;
+    t.fire();
+    r.onEvent({ kind: "search" });
+    expect(calls).toBe(1);
+  });
+
+  it("開始時点で abort 済みの signal なら最初から tick しない", () => {
+    const t = fakeTimer();
+    const ctl = new AbortController();
+    ctl.abort();
+    let calls = 0;
+    startProgressReporter({
+      edit: async () => {
+        calls += 1;
+      },
+      timeoutMs: 1,
+      onError: () => {},
+      signal: ctl.signal,
+      ...t.deps,
+    });
+    expect(t.cleared()).toBe(true);
+    t.fire();
+    expect(calls).toBe(0);
+  });
 });

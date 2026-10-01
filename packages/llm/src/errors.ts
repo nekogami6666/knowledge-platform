@@ -7,6 +7,7 @@ export type LlmErrorCode =
   | "RATE_LIMITED" // 429。リトライ対象(§7.1)
   | "OVERLOADED" // 529。リトライ対象(§7.1)
   | "TIMEOUT" // タイムアウト。リトライ対象(§7.1)
+  | "ABORTED" // 呼び出し側の中断(bot の正常終了など・ADR-0035 追記)。リトライ対象外
   | "API_ERROR" // その他の API / ネットワーク失敗(リトライ対象外)
   | "BUDGET_EXCEEDED" // アプリ別の日次トークン上限超過(§7.3)
   | "STRUCTURED_PARSE" // 構造化出力の zod 再 parse 失敗(§7.2。client/agent 実装で使用)

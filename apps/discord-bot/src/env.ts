@@ -38,6 +38,11 @@ const envSchema = z
     ASK_EFFORT: z.enum(["low", "medium", "high"]).optional(),
     /** /ask の拡張思考(adaptive/disabled。未設定 = SDK 既定・ADR-0035 D6 の実験ノブ)。 */
     ASK_THINKING: z.enum(["adaptive", "disabled"]).optional(),
+    /**
+     * 正常終了(SIGTERM)で処理中の /ask を待つ上限 ms(既定 60000・ADR-0035 追記)。
+     * compose の stop_grace_period(90 秒)より十分短くする(中断後の後処理に最大 15 秒使う)。
+     */
+    SHUTDOWN_GRACE_MS: z.string().optional(),
     /** VC 録音 sidecar の URL(ADR-0020。compose 内部ネットワーク・例 http://recorder:9488)。未設定なら VC 入口 OFF。 */
     RECORDER_URL: z.string().optional(),
     /** 録音ファイルの共有マウント(sidecar と同一パス・ADR-0020 D4)。 */

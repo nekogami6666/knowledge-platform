@@ -51,6 +51,11 @@ export interface ProgressReporterDeps {
   onError: (err: unknown) => void;
   /** 失効エラー判定。true なら以後の tick を止める(既定: 止めない)。 */
   isExpired?: (err: unknown) => boolean;
+  /**
+   * 中断(bot の正常終了・ADR-0035 追記)。abort されたら以後の tick を止めてタイマを解除する
+   * (中断通知を古い tick が上書きしない・終了時にタイマを残さない)。進行中の edit は stop() で待つ。
+   */
+  signal?: AbortSignal;
   /** タイマ注入(テスト用・既定 setInterval / clearInterval)。 */
   setTimer?: (fn: () => void, ms: number) => unknown;
   clearTimer?: (handle: unknown) => void;
@@ -87,10 +92,7 @@ export function startProgressReporter(deps: ProgressReporterDeps): ProgressRepor
       .edit(renderProgress(state))
       .catch((err: unknown) => {
         deps.onError(err);
-        if (deps.isExpired?.(err) ?? false) {
-          stopped = true;
-          clearTimer(handle);
-        }
+        if (deps.isExpired?.(err) ?? false) halt();
       })
       .finally(() => {
         inFlight = null;
@@ -98,6 +100,13 @@ export function startProgressReporter(deps: ProgressReporterDeps): ProgressRepor
     inFlight = p;
   };
   const handle = setTimer(tick, deps.intervalMs ?? DEFAULT_PROGRESS_INTERVAL_MS);
+  const halt = (): void => {
+    if (stopped) return;
+    stopped = true;
+    clearTimer(handle);
+  };
+  if (deps.signal?.aborted === true) halt();
+  else deps.signal?.addEventListener("abort", halt, { once: true });
 
   return {
     onEvent(ev) {
@@ -110,8 +119,8 @@ export function startProgressReporter(deps: ProgressReporterDeps): ProgressRepor
       state.queueAhead = n;
     },
     async stop() {
-      stopped = true;
-      clearTimer(handle);
+      halt();
+      deps.signal?.removeEventListener("abort", halt);
       if (inFlight !== null) await inFlight;
     },
   };

@@ -11,8 +11,18 @@
  * 回答状態。unanswered=NOT_FOUND(出典なし)、delivery_failed=Discord 送信失敗、
  * timeout=検索タイムアウト(§6.2 失敗時挙動。ASK_TIMEOUT_MS 調整の判断材料として error と区別)、
  * error=検索/同期などの内部エラー(いずれも未回答とは区別。timeout/error はキューに積まない)。
+ * timeout_skipped=受付からの期限を過ぎてから順番が来たため検索しなかった(ADR-0035 追記 D2')、
+ * interrupted=bot の再起動(正常終了)で検索を中断した・順番待ちのまま終了した(ADR-0035 追記)。
+ * いずれもナレッジの欠落ではないため question_queue には積まない。
  */
-export type AnswerStatus = "answered" | "unanswered" | "delivery_failed" | "timeout" | "error";
+export type AnswerStatus =
+  | "answered"
+  | "unanswered"
+  | "delivery_failed"
+  | "timeout"
+  | "error"
+  | "timeout_skipped"
+  | "interrupted";
 
 /** 回答への評価(👍👎、§4.6 queries)。未評価は null。 */
 export type Feedback = "up" | "down" | null;
@@ -93,8 +103,32 @@ export interface BotStore {
   close(): void;
 }
 
+/**
+ * 処理中の /ask 1 件(強制終了からの後始末用・ADR-0035 追記)。受付時に入れ、完了時に消す。
+ * token は interaction の webhook token(その ephemeral 応答を 15 分間だけ編集できる)。
+ * **ログ・例外文言に出さない**(§9.1)。質問本文は持たない。
+ */
+export interface InflightAsk {
+  /** 行 ID(受付ごとに発番)。 */
+  id: string;
+  applicationId: string;
+  token: string;
+  /** 受付時刻(epoch ms)。起動時の後始末で 15 分以内かを判定する。 */
+  acceptedAtMs: number;
+  correlationId: string;
+}
+
+/** 処理中 /ask の記録(BotStore とは別の口。bot 本体だけが使う)。 */
+export interface InflightAskStore {
+  addInflightAsk(row: InflightAsk): void;
+  /** 未知 id は no-op。 */
+  removeInflightAsk(id: string): void;
+  listInflightAsks(): InflightAsk[];
+}
+
 /** インメモリ実装(テスト/開発用。native 依存なし)。プロセス終了で消える。 */
-export function createMemoryStore(): BotStore {
+export function createMemoryStore(): BotStore & InflightAskStore {
+  const inflight = new Map<string, InflightAsk>();
   const queries: QueryRecord[] = [];
   const actions: PendingAction[] = [];
   const counters = new Map<string, number>();
@@ -136,6 +170,15 @@ export function createMemoryStore(): BotStore {
       const count = (counters.get(key) ?? 0) + 1;
       counters.set(key, count);
       return { count, allowed: count <= limit };
+    },
+    addInflightAsk(row) {
+      inflight.set(row.id, { ...row });
+    },
+    removeInflightAsk(id) {
+      inflight.delete(id);
+    },
+    listInflightAsks() {
+      return [...inflight.values()].map((r) => ({ ...r }));
     },
     close() {},
   };

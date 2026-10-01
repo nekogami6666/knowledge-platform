@@ -15,9 +15,21 @@ import {
   type Transcriber,
 } from "@stratum/llm";
 import { withCloneToken } from "@stratum/shared";
-import { type Client, Events } from "discord.js";
+import { type Client, Events, Routes } from "discord.js";
 import { setNotifySecrets } from "./ack.js";
-import { type AskDeps, DEFAULT_ASK_TIMEOUT_MS, handleAskRequest } from "./ask.js";
+import {
+  type AskDeps,
+  DEFAULT_ASK_TIMEOUT_MS,
+  handleAskRequest,
+  INTERRUPTED_MESSAGE,
+} from "./ask.js";
+import {
+  createAskLifecycle,
+  createShutdownHandler,
+  DEFAULT_SHUTDOWN_GRACE_MS,
+  recoverInterruptedAsks,
+  safeErrorInfo,
+} from "./ask-lifecycle.js";
 import { SerialQueue } from "./concurrency.js";
 import { createFsConfigReader, loadChannels, loadOps, loadRepos, loadVoice } from "./config.js";
 import {
@@ -134,6 +146,25 @@ async function main(): Promise<void> {
   }
 
   const store = createSqliteStore(env.DB_PATH);
+  // ADR-0035 追記: 前回プロセスが強制終了で残した処理中 /ask。新規受付より前に読んでおき、
+  // ClientReady で書き換えてから id 単位で消す(起動後に受け付けた行は対象にしない)。
+  const strandedAsks = store.listInflightAsks();
+  // ADR-0035 追記: /ask の受付・追跡・正常終了。SIGTERM のハンドラと createBot が共有する。
+  const lifecycleLog = {
+    info: (data: Record<string, unknown>, msg: string) => logger.info(data, msg),
+    warn: (data: Record<string, unknown>, msg: string) => logger.warn(data, msg),
+  };
+  const askLifecycle = createAskLifecycle({
+    store,
+    newId: () => randomUUID(),
+    graceMs: parsePositiveIntEnv(
+      "SHUTDOWN_GRACE_MS",
+      env.SHUTDOWN_GRACE_MS,
+      DEFAULT_SHUTDOWN_GRACE_MS,
+      (data, msg) => logger.warn(data, msg),
+    ),
+    log: lifecycleLog,
+  });
   const syncer = createGitRepoSyncer(env.CLONES_DIR);
   const promptStore = createFsPromptStore(env.PROMPTS_DIR);
   // §6.2 /ask の直列キュー。鮮度確認の KB 書き込みも同じキューに載せ、検索中の reset --hard・
@@ -226,6 +257,8 @@ async function main(): Promise<void> {
       logWarn: (data, msg) => withCorrelation(logger, ctx.correlationId).warn(data, msg),
       logInfo: (data, msg) => withCorrelation(logger, ctx.correlationId).info(data, msg),
       searchTimeoutMs: effectiveAskTimeoutMs,
+      // ADR-0035 追記: 正常終了の猶予を超えたら検索を中断する。
+      ...(ctx.signal !== undefined ? { signal: ctx.signal } : {}),
       // ADR-0035 D5: discord 側の進捗表示へ sync/search/tool_use を流す。
       ...(ctx.onProgress !== undefined ? { onProgress: ctx.onProgress } : {}),
     };
@@ -308,6 +341,7 @@ async function main(): Promise<void> {
   const bot = createBot({
     logger,
     queue,
+    lifecycle: askLifecycle,
     channels,
     store,
     onAsk,
@@ -421,9 +455,26 @@ async function main(): Promise<void> {
   // checker は日次(平日 11:00 JST)なので、起動時 + 定期ポーリングで拾えば十分。
   const freshnessWorker = createFreshnessDmWorker({ logger, store, dm: messenger.dm });
   const FRESHNESS_POLL_MS = 10 * 60 * 1000;
-  setInterval(() => freshnessWorker.kick(), FRESHNESS_POLL_MS).unref();
+  const freshnessTimer = setInterval(() => freshnessWorker.kick(), FRESHNESS_POLL_MS);
+  freshnessTimer.unref();
   // 起動時レジューム(ADR-0015 D5): 再起動前に受け付けた pending を拾う。
   bot.once(Events.ClientReady, () => {
+    // ADR-0035 追記: 強制終了で残った /ask の進捗表示を「中断しました」に書き換える(15 分以内のみ)。
+    // interaction webhook は bot の認証を使わない(auth:false)。token はログに出さない。
+    void recoverInterruptedAsks({
+      rows: strandedAsks,
+      store,
+      nowMs: () => Date.now(),
+      editOriginal: (applicationId, token, content) =>
+        bot.rest.patch(Routes.webhookMessage(applicationId, token, "@original"), {
+          body: { content, components: [] },
+          auth: false,
+        }),
+      content: INTERRUPTED_MESSAGE,
+      log: lifecycleLog,
+    }).catch((err) =>
+      logger.warn({ err: safeErrorInfo(err) }, "/ask: 中断した質問の後始末に失敗しました"),
+    );
     voiceWorker?.kick();
     freshnessWorker.kick();
     // ADR-0028 D1: state:"recording" の interview セッションを復元(冪等 finalize → 次チャンク/完了)。
@@ -434,6 +485,23 @@ async function main(): Promise<void> {
     // (warmDmChannels の docblock 参照)。再起動前に送った DM への 👍✏️🗑 応答を生かす。
     void warmDmChannels(bot, getMembers, logger);
   });
+
+  // ADR-0035 追記: 正常終了(docker stop の SIGTERM・Ctrl-C の SIGINT)。/ask の受付を止めて
+  // 最大 SHUTDOWN_GRACE_MS 待ち、残りを中断して通知・記録してから切断する。compose の
+  // stop_grace_period(90 秒)は grace(既定 60 秒)+ 中断後の後処理(15 秒)より長くしておく。
+  const onShutdownSignal = createShutdownHandler({
+    lifecycle: askLifecycle,
+    stopTimers: () => clearInterval(freshnessTimer),
+    destroyClient: () => bot.destroy(),
+    closeStore: () => store.close(),
+    exit: (code) => process.exit(code),
+    log: lifecycleLog,
+  });
+  for (const sig of ["SIGTERM", "SIGINT"] as const) {
+    process.on(sig, () => {
+      void onShutdownSignal(sig);
+    });
+  }
 
   await bot.login(env.DISCORD_TOKEN);
   logger.info("discord-bot started");

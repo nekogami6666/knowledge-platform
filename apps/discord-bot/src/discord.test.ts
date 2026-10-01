@@ -16,7 +16,9 @@ import {
 } from "discord.js";
 import type { Logger } from "pino";
 import { describe, expect, it, vi } from "vitest";
-import { ERROR_MESSAGE } from "./ask.js";
+import { DEADLINE_SKIPPED_MESSAGE, ERROR_MESSAGE, INTERRUPTED_MESSAGE } from "./ask.js";
+import { createAskLifecycle } from "./ask-lifecycle.js";
+import { SerialQueue } from "./concurrency.js";
 import type { ChannelGateInput, ChannelsConfig, OpsConfig } from "./config.js";
 import type { BotStore, QueryRecord } from "./db.js";
 import { createMemoryStore } from "./db.js";
@@ -53,6 +55,7 @@ import {
   proxyMergeRejectMessage,
   SEND_FAILED_MESSAGE,
   SEND_PARTIAL_FAILED_MESSAGE,
+  SHUTTING_DOWN_MESSAGE,
   shouldExplainProxyMergeReject,
   statsCommand,
   warmDmChannels,
@@ -1444,8 +1447,18 @@ describe("interactionLikelyExpired / isExpiredInteractionError (ADR-0035 D2/D3)"
     expect(interactionLikelyExpired(t0, t0 + limit + 1)).toBe(true);
   });
 
-  it("UnknownInteraction / InteractionHasAlreadyBeenAcknowledged だけを失効エラーと判定する", () => {
+  it("UnknownInteraction / InteractionHasAlreadyBeenAcknowledged / InvalidWebhookToken だけを失効エラーと判定する", () => {
     expect(isExpiredInteractionError(unknownInteractionError())).toBe(true);
+    // 15 分を過ぎた interaction webhook の編集で返る(ADR-0035 追記)。
+    const invalidToken = new DiscordAPIError(
+      { message: "Invalid Webhook Token", code: RESTJSONErrorCodes.InvalidWebhookToken },
+      RESTJSONErrorCodes.InvalidWebhookToken,
+      401,
+      "PATCH",
+      "u",
+      {},
+    );
+    expect(isExpiredInteractionError(invalidToken)).toBe(true);
     const acked = new DiscordAPIError(
       { message: "already acked", code: RESTJSONErrorCodes.InteractionHasAlreadyBeenAcknowledged },
       RESTJSONErrorCodes.InteractionHasAlreadyBeenAcknowledged,
@@ -1599,25 +1612,30 @@ describe("InteractionCreate /ask の失効封じ込め(ADR-0035 D2/D3)", () => {
     await client.destroy();
   });
 
-  it("キュー待ちで 15 分を超えて開始したら editReply を試みず DM で配送する", async () => {
+  it("キュー待ちで 15 分を超えて順番が来たら検索せず、editReply を試みず DM で通知する(ADR-0035 追記)", async () => {
     const { logger } = fakeLogger();
     let t = 0;
+    let asked = 0;
     const client = createBot({
       logger,
       channels: channels(),
       store: createMemoryStore(),
-      // 受付時 t=0、タスク開始時 t=15 分(失効確定)。
+      // 呼ぶたびに 15 分進む(受付 → 進捗開始 → 順番 → 配送のいずれも 15 分以上離れる)。
       now: () => {
         t += INTERACTION_TOKEN_MS;
         return t;
       },
-      onAsk: async () => ({ answerText: "回答本文", status: "answered", queryId: "q9" }),
+      onAsk: async () => {
+        asked += 1;
+        return { answerText: "回答本文", status: "answered", queryId: "q9" };
+      },
     });
     const fake = fakeAskInteraction();
     client.emit(Events.InteractionCreate, fake.interaction);
     await vi.waitFor(() => expect(fake.dms).toHaveLength(1));
+    expect(asked).toBe(0);
     expect(fake.edits).toEqual([]);
-    expect(fake.dms[0]).toEqual({ content: `${DM_FALLBACK_NOTE}\n回答本文`, components: 1 });
+    expect(fake.dms[0]).toEqual({ content: DEADLINE_SKIPPED_MESSAGE, components: 0 });
     await client.destroy();
   });
 
@@ -1688,6 +1706,332 @@ describe("InteractionCreate /ask の進捗ライブ表示(ADR-0035 D5)", () => {
     const finalIdx = edits.length;
     await new Promise((res) => setTimeout(res, 30));
     expect(edits.length).toBe(finalIdx); // stop 後に古い tick が回答を上書きしない
+    await client.destroy();
+  });
+});
+
+describe("InteractionCreate /ask の期限・再起動(ADR-0035 追記)", () => {
+  interface AskFake {
+    interaction: Interaction;
+    edits: string[];
+    dms: string[];
+    replies: { content: string; flags?: number }[];
+    defers: () => number;
+  }
+  function fakeAsk(n = 1): AskFake {
+    const edits: string[] = [];
+    const dms: string[] = [];
+    const replies: { content: string; flags?: number }[] = [];
+    let defers = 0;
+    const interaction = {
+      isChatInputCommand: () => true,
+      isButton: () => false,
+      isUserSelectMenu: () => false,
+      isStringSelectMenu: () => false,
+      isModalSubmit: () => false,
+      commandName: "ask",
+      inGuild: () => true,
+      channel: null,
+      channelId: "111",
+      applicationId: "app-1",
+      token: `interaction-token-${n}`,
+      appPermissions: { has: () => true },
+      user: {
+        id: `u${n}`,
+        send: async (m: { content: string }) => {
+          dms.push(m.content);
+        },
+      },
+      options: { getString: () => `質問${n}` },
+      deferReply: async () => {
+        defers += 1;
+      },
+      reply: async (o: { content: string; flags?: number }) => {
+        replies.push(o);
+      },
+      editReply: async (o: string | { content: string }) => {
+        edits.push(typeof o === "string" ? o : o.content);
+      },
+      followUp: async () => {},
+    };
+    return {
+      interaction: interaction as unknown as Interaction,
+      edits,
+      dms,
+      replies,
+      defers: () => defers,
+    };
+  }
+
+  /** 手動で進める fake タイマ(正常終了の猶予待ちを即時に進める)。 */
+  function manualTimers() {
+    let now = 0;
+    let seq = 0;
+    const timers = new Map<number, { at: number; fn: () => void }>();
+    return {
+      setTimer: (fn: () => void, ms: number) => {
+        seq += 1;
+        timers.set(seq, { at: now + ms, fn });
+        return seq;
+      },
+      clearTimer: (h: unknown) => {
+        timers.delete(h as number);
+      },
+      advance: (ms: number) => {
+        now += ms;
+        for (const [id, t] of [...timers]) {
+          if (t.at <= now) {
+            timers.delete(id);
+            t.fn();
+          }
+        }
+      },
+    };
+  }
+
+  /** 先頭に置いて順番待ちを作るためのブロッカー。 */
+  function blockQueue(queue: SerialQueue): () => void {
+    let release: () => void = () => {};
+    void queue.enqueue(
+      () =>
+        new Promise<void>((res) => {
+          release = res;
+        }),
+    );
+    return () => release();
+  }
+
+  const statuses = (store: BotStore) => store.listQueries().map((q) => q.answerStatus);
+
+  it("期限切れ(14 分超)だが token がまだ使える(15 分未満)なら、検索せず ephemeral を書き換えて timeout_skipped を記録", async () => {
+    const { logger, warns } = fakeLogger();
+    const store = createMemoryStore();
+    const queue = new SerialQueue();
+    let t = 0;
+    let asked = 0;
+    const client = createBot({
+      logger,
+      channels: channels(),
+      store,
+      queue,
+      now: () => t,
+      progressIntervalMs: 1_000_000,
+      onAsk: async () => {
+        asked += 1;
+        return { answerText: "回答", status: "answered", queryId: "q" };
+      },
+    });
+    const release = blockQueue(queue);
+    const fake = fakeAsk();
+    client.emit(Events.InteractionCreate, fake.interaction);
+    await vi.waitFor(() => expect(fake.defers()).toBe(1));
+    await new Promise((res) => setTimeout(res, 0));
+    t = 14.5 * 60_000; // 全体期限(14 分)は過ぎたが token は有効
+    release();
+    await vi.waitFor(() => expect(fake.edits).toEqual([DEADLINE_SKIPPED_MESSAGE]));
+    expect(asked).toBe(0); // 検索しない
+    expect(fake.dms).toEqual([]);
+    expect(statuses(store)).toEqual(["timeout_skipped"]);
+    expect(store.listQueries()[0]).toMatchObject({ question: "質問1", discordUserId: "u1" });
+    expect(warns.length).toBeGreaterThan(0); // ログに残す
+    await client.destroy();
+  });
+
+  it("期限内に始まった検索が長引き、配送時点で期限を過ぎていたら DM で配送する(ADR-0035 D2 (b))", async () => {
+    const { logger } = fakeLogger();
+    let t = 0;
+    const client = createBot({
+      logger,
+      channels: channels(),
+      store: createMemoryStore(),
+      now: () => t,
+      progressIntervalMs: 1_000_000,
+      onAsk: async () => {
+        t = 14 * 60_000 + 1;
+        return { answerText: "回答本文", status: "answered", queryId: "q9" };
+      },
+    });
+    const fake = fakeAsk();
+    client.emit(Events.InteractionCreate, fake.interaction);
+    await vi.waitFor(() => expect(fake.dms).toHaveLength(1));
+    expect(fake.dms[0]).toBe(`${DM_FALLBACK_NOTE}\n回答本文`);
+    expect(fake.edits).toEqual([]);
+    await client.destroy();
+  });
+
+  it("停止開始後の /ask は defer せず ephemeral で「再起動中」を返し、検索もレート制限の消費もしない", async () => {
+    const { logger } = fakeLogger();
+    const store = createMemoryStore();
+    const lifecycle = createAskLifecycle({ newId: () => "x" });
+    await lifecycle.shutdown();
+    let asked = 0;
+    const client = createBot({
+      logger,
+      channels: channels(),
+      store,
+      lifecycle,
+      onAsk: async () => {
+        asked += 1;
+        return { answerText: "x", status: "answered", queryId: "q" };
+      },
+    });
+    const fake = fakeAsk();
+    client.emit(Events.InteractionCreate, fake.interaction);
+    await vi.waitFor(() => expect(fake.replies).toHaveLength(1));
+    expect(fake.replies[0]).toEqual({
+      content: SHUTTING_DOWN_MESSAGE,
+      flags: MessageFlags.Ephemeral,
+    });
+    expect(fake.defers()).toBe(0);
+    expect(asked).toBe(0);
+    expect(store.listQueries()).toEqual([]);
+    // レート制限の予算を消費していない(次の hit が 1 件目になる)。
+    expect(store.hitRateLimit("user:u1", "ask", windowKey(Date.now()), 5).count).toBe(1);
+    await client.destroy();
+  });
+
+  it("処理中の token を inflight_asks に記録し、完了したら即削除する", async () => {
+    const { logger } = fakeLogger();
+    const store = createMemoryStore();
+    const lifecycle = createAskLifecycle({ store, newId: () => "row-1" });
+    const gate: { release: () => void } = { release: () => {} };
+    const client = createBot({
+      logger,
+      channels: channels(),
+      store,
+      lifecycle,
+      progressIntervalMs: 1_000_000,
+      onAsk: async () => {
+        await new Promise<void>((res) => {
+          gate.release = res;
+        });
+        return { answerText: "回答", status: "unanswered", queryId: "q" };
+      },
+    });
+    const fake = fakeAsk();
+    client.emit(Events.InteractionCreate, fake.interaction);
+    await vi.waitFor(() => expect(store.listInflightAsks()).toHaveLength(1));
+    expect(store.listInflightAsks()[0]).toMatchObject({
+      id: "row-1",
+      applicationId: "app-1",
+      token: "interaction-token-1",
+    });
+    gate.release();
+    await vi.waitFor(() => expect(fake.edits.at(-1)).toBe("回答"));
+    await vi.waitFor(() => expect(store.listInflightAsks()).toEqual([]));
+    expect(lifecycle.inflight).toBe(0);
+    await client.destroy();
+  });
+
+  it("正常終了: 処理中の /ask が猶予内に終われば中断せず回答を届ける", async () => {
+    const { logger } = fakeLogger();
+    const timers = manualTimers();
+    const lifecycle = createAskLifecycle({ newId: () => "r", graceMs: 60_000, ...timers });
+    const gate: { release: () => void } = { release: () => {} };
+    let signal: AbortSignal | undefined;
+    const client = createBot({
+      logger,
+      channels: channels(),
+      store: createMemoryStore(),
+      lifecycle,
+      progressIntervalMs: 1_000_000,
+      onAsk: async (_q, ctx) => {
+        signal = ctx.signal;
+        await new Promise<void>((res) => {
+          gate.release = res;
+        });
+        return { answerText: "最終回答", status: "unanswered", queryId: "q" };
+      },
+    });
+    const fake = fakeAsk();
+    client.emit(Events.InteractionCreate, fake.interaction);
+    await vi.waitFor(() => expect(signal).toBeDefined());
+    const done = lifecycle.shutdown();
+    timers.advance(30_000);
+    gate.release();
+    await expect(done).resolves.toMatchObject({ drained: true, aborted: 0 });
+    expect(fake.edits.at(-1)).toBe("最終回答");
+    expect(signal?.aborted).toBe(false);
+    await client.destroy();
+  });
+
+  it("正常終了: 猶予を超えたら検索中の /ask を中断し、順番待ちの /ask は検索せず、どちらも中断通知と interrupted を記録", async () => {
+    const { logger } = fakeLogger();
+    const store = createMemoryStore();
+    const timers = manualTimers();
+    let n = 0;
+    const lifecycle = createAskLifecycle({
+      store,
+      newId: () => `r${++n}`,
+      graceMs: 60_000,
+      abortSettleMs: 15_000,
+      ...timers,
+    });
+    const queue = new SerialQueue();
+    const askedQuestions: string[] = [];
+    const client = createBot({
+      logger,
+      channels: channels(),
+      store,
+      queue,
+      lifecycle,
+      progressIntervalMs: 1_000_000,
+      // handleAskRequest 相当: 中断されたら interrupted を記録して返す。
+      onAsk: async (q, ctx) => {
+        askedQuestions.push(q);
+        await new Promise<void>((res) => {
+          ctx.signal?.addEventListener("abort", () => res(), { once: true });
+        });
+        store.recordQuery({
+          id: "q-running",
+          correlationId: ctx.correlationId,
+          discordUserId: ctx.userId,
+          discordChannelId: ctx.channelId,
+          threadId: null,
+          question: q,
+          answer: null,
+          sourcesJson: null,
+          answerStatus: "interrupted",
+          feedback: null,
+          inputTokens: null,
+          outputTokens: null,
+          elapsedMs: null,
+          createdAt: "t",
+        });
+        return { answerText: INTERRUPTED_MESSAGE, status: "interrupted", queryId: "q-running" };
+      },
+    });
+    const running = fakeAsk(1);
+    const queued = fakeAsk(2);
+    client.emit(Events.InteractionCreate, running.interaction);
+    await vi.waitFor(() => expect(askedQuestions).toEqual(["質問1"]));
+    client.emit(Events.InteractionCreate, queued.interaction);
+    await vi.waitFor(() => expect(lifecycle.inflight).toBe(2));
+    expect(store.listInflightAsks()).toHaveLength(2);
+
+    const done = lifecycle.shutdown();
+    // 停止中に届いた新規 /ask は拒否される。
+    const late = fakeAsk(3);
+    client.emit(Events.InteractionCreate, late.interaction);
+    await vi.waitFor(() => expect(late.replies[0]?.content).toBe(SHUTTING_DOWN_MESSAGE));
+
+    timers.advance(60_000);
+    await expect(done).resolves.toEqual({
+      inflightAtStart: 2,
+      drained: false,
+      aborted: 2,
+      unsettled: 0,
+    });
+    expect(running.edits.at(-1)).toBe(INTERRUPTED_MESSAGE);
+    expect(queued.edits.at(-1)).toBe(INTERRUPTED_MESSAGE);
+    expect(askedQuestions).toEqual(["質問1"]); // 順番待ちの質問は検索しない
+    expect(statuses(store).sort()).toEqual(["interrupted", "interrupted"]);
+    expect(store.listQueries().find((q) => q.question === "質問2")).toBeDefined();
+    expect(store.listInflightAsks()).toEqual([]); // token は残さない
+    // キューに残っていた順番待ちのタスクは何もせずに抜ける(二重通知・記録なし)。
+    await queue.enqueue(async () => {});
+    expect(queued.edits.filter((e) => e === INTERRUPTED_MESSAGE)).toHaveLength(1);
+    expect(store.listQueries()).toHaveLength(2);
     await client.destroy();
   });
 });

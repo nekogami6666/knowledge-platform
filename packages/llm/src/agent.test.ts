@@ -183,6 +183,72 @@ describe("runAgentSearch", () => {
     }
   });
 
+  describe("呼び出し側の中断(signal・ADR-0035 追記)", () => {
+    /** next() が内部 abortController の abort でのみ reject する疑似ストリーム。 */
+    const hangingQuery = (): { queryFn: AgentQueryFn; started: () => number } => {
+      let started = 0;
+      const queryFn: AgentQueryFn = ({ options }) => {
+        started += 1;
+        return {
+          [Symbol.asyncIterator]: () => ({
+            next: (): Promise<IteratorResult<unknown>> =>
+              new Promise((_resolve, reject) => {
+                options.abortController?.signal.addEventListener("abort", () =>
+                  reject(new Error("aborted")),
+                );
+              }),
+          }),
+        };
+      };
+      return { queryFn, started: () => started };
+    };
+
+    it("検索中に signal が abort されたら ABORTED(TIMEOUT ではない)", async () => {
+      const { queryFn } = hangingQuery();
+      const ctl = new AbortController();
+      const p = runAgentSearch({ ...baseOpts, timeoutMs: 60_000, signal: ctl.signal }, { queryFn });
+      const assertion = expect(p).rejects.toMatchObject({ code: "ABORTED" });
+      ctl.abort();
+      await assertion;
+    });
+
+    it("開始前に abort 済みなら query() を呼ばずに ABORTED", async () => {
+      const { queryFn, started } = hangingQuery();
+      const ctl = new AbortController();
+      ctl.abort();
+      await expect(
+        runAgentSearch({ ...baseOpts, signal: ctl.signal }, { queryFn }),
+      ).rejects.toMatchObject({ code: "ABORTED" });
+      expect(started()).toBe(0);
+    });
+
+    it("signal を渡してもタイムアウトは従来どおり TIMEOUT", async () => {
+      vi.useFakeTimers();
+      try {
+        const { queryFn } = hangingQuery();
+        const ctl = new AbortController();
+        const p = runAgentSearch({ ...baseOpts, timeoutMs: 1000, signal: ctl.signal }, { queryFn });
+        const assertion = expect(p).rejects.toMatchObject({ code: "TIMEOUT" });
+        await vi.advanceTimersByTimeAsync(1000);
+        await assertion;
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("SDK が abort で例外を投げずに反復を終えても ABORTED として扱う", async () => {
+      const ctl = new AbortController();
+      const queryFn: AgentQueryFn = () =>
+        (async function* () {
+          ctl.abort();
+          yield { type: "assistant", message: { content: [] } };
+        })();
+      await expect(
+        runAgentSearch({ ...baseOpts, signal: ctl.signal }, { queryFn }),
+      ).rejects.toMatchObject({ code: "ABORTED" });
+    });
+  });
+
   it("abort 以外の理由で throw すれば API_ERROR", async () => {
     // next() が即 reject する(abort ではない)疑似ストリーム。
     const queryFn: AgentQueryFn = () => ({

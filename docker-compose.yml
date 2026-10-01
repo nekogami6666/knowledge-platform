@@ -7,6 +7,10 @@ services:
     image: stratum-bot
     init: true # node を PID 1 にしない(シグナル処理・ゾンビ回収)
     restart: unless-stopped # 自動復帰は rootless docker.service(systemd --user)+ linger と合わせて成立
+    # 正常終了の猶予(ADR-0035 追記)。SIGTERM を受けた bot は /ask の受付を止め、処理中の質問を
+    # 最大 SHUTDOWN_GRACE_MS(既定 60 秒)待ち、残りを中断して通知する(後処理に最大 15 秒)。
+    # 既定 10 秒のままだと待たずに SIGKILL される。SHUTDOWN_GRACE_MS を上げるならここも上げる。
+    stop_grace_period: 90s
     # ログ肥大の防御(㉞ 調査 S3)。無指定の json-file は無制限で、crash loop 時にディスクを
     # 食い潰す(bot.db と同じディスク)。適用には再作成が要る: docker compose up -d
     logging:
