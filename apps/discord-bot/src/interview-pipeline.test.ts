@@ -17,7 +17,12 @@ import {
 import type { InterviewChunk, InterviewSessionPayload } from "./interview-session.js";
 import { interviewSessionPayloadSchema } from "./interview-session.js";
 
-const OPS: OpsConfig = { channel_id: "OPS", kb_repo: "org/knowledge-base", ask_role_ids: [] };
+const OPS: OpsConfig = {
+  channel_id: "OPS",
+  kb_repo: "org/knowledge-base",
+  ask_role_ids: [],
+  home_channel_ids: [],
+};
 const MEMBERS: Members = {
   members: [
     { github: "yamada", discord: "U-yamada", name: "山田" },
@@ -203,7 +208,10 @@ describe("processInterviewSessionQueue(ADR-0028 D4)", () => {
     await processInterviewSessionQueue(mkDeps({ store, gh: undefined }));
     await processInterviewSessionQueue(mkDeps({ store, transcriber: undefined }));
     await processInterviewSessionQueue(
-      mkDeps({ store, ops: { channel_id: "OPS", kb_repo: null, ask_role_ids: [] } }),
+      mkDeps({
+        store,
+        ops: { channel_id: "OPS", kb_repo: null, ask_role_ids: [], home_channel_ids: [] },
+      }),
     );
     expect(listSpy).not.toHaveBeenCalled();
   });

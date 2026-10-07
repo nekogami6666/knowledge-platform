@@ -78,8 +78,14 @@ export const opsConfigSchema = z
      * 空 = 全員が使える(従来どおり)。
      */
     ask_role_ids: z.array(z.string()).default([]),
+    /**
+     * bot が利用者に応える「ホーム」チャンネル(2026-10-07)。/ask はここ(とその中のスレッド)だけで受け付け、
+     * 頼まれていない案内の公開返信もここ以外では出さない。運用では #knowledge_sharing。
+     * 空 = 従来どおり全チャンネル(後方互換)。💡・音声メモ・DM・面談パネル・ops 通知には影響しない。
+     */
+    home_channel_ids: z.array(z.string()).default([]),
   })
-  .default({ channel_id: null, kb_repo: null, ask_role_ids: [] });
+  .default({ channel_id: null, kb_repo: null, ask_role_ids: [], home_channel_ids: [] });
 export type OpsConfig = z.infer<typeof opsConfigSchema>;
 
 /**
@@ -212,6 +218,19 @@ export function isChannelAllowed(config: ChannelsConfig, gate: ChannelGateInput)
   if (config.permanent_exclude.includes(gate.channelId)) return false;
   if (gate.parentId !== null && config.permanent_exclude.includes(gate.parentId)) return false;
   return gate.botCanView === true;
+}
+
+/**
+ * ホームチャンネル(ops.home_channel_ids)内か(2026-10-07・純関数)。スレッドは親チャンネル ID でも照合する。
+ * homeChannelIds が空なら常に true(従来どおり全チャンネル)。
+ */
+export function isHomeChannel(
+  homeChannelIds: readonly string[],
+  gate: Pick<ChannelGateInput, "channelId" | "parentId">,
+): boolean {
+  if (homeChannelIds.length === 0) return true;
+  if (homeChannelIds.includes(gate.channelId)) return true;
+  return gate.parentId !== null && homeChannelIds.includes(gate.parentId);
 }
 
 /**

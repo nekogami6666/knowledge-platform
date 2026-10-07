@@ -16,7 +16,12 @@ import {
   voiceMemoBranch,
 } from "./voice-pipeline.js";
 
-const OPS: OpsConfig = { channel_id: "OPS", kb_repo: "org/knowledge-base", ask_role_ids: [] };
+const OPS: OpsConfig = {
+  channel_id: "OPS",
+  kb_repo: "org/knowledge-base",
+  ask_role_ids: [],
+  home_channel_ids: [],
+};
 const MEMBERS: Members = { members: [{ github: "yamada", discord: "U1" }] };
 // permalink は数値 snowflake 必須(kb-core の discordSourceSchema)。
 const GUILD_ID = "111111111111111111";

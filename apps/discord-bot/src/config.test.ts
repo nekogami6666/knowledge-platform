@@ -5,6 +5,7 @@ import {
   type ConfigReader,
   isAskAllowedByRole,
   isChannelAllowed,
+  isHomeChannel,
   loadChannels,
   loadDiscordIndex,
   loadOps,
@@ -116,13 +117,23 @@ describe("isChannelAllowed(ADR-0018: ロール可視性 + permanent_exclude)", (
 describe("loadOps (👍 代理マージ設定・§6.3)", () => {
   it("ファイルが無ければ両方 null(機能 OFF)", async () => {
     const ops = await loadOps(reader({}));
-    expect(ops).toEqual({ channel_id: null, kb_repo: null, ask_role_ids: [] });
+    expect(ops).toEqual({
+      channel_id: null,
+      kb_repo: null,
+      ask_role_ids: [],
+      home_channel_ids: [],
+    });
   });
   it("ops.yaml の実値を読む", async () => {
     const ops = await loadOps(
       reader({ "ops.yaml": "channel_id: '123'\nkb_repo: org/knowledge-base" }),
     );
-    expect(ops).toEqual({ channel_id: "123", kb_repo: "org/knowledge-base", ask_role_ids: [] });
+    expect(ops).toEqual({
+      channel_id: "123",
+      kb_repo: "org/knowledge-base",
+      ask_role_ids: [],
+      home_channel_ids: [],
+    });
   });
   it("片方だけの設定も許す(有効化判定は呼び出し側)", async () => {
     const ops = await loadOps(reader({ "ops.yaml": "channel_id: '123'" }));
@@ -206,5 +217,22 @@ describe("loadDiscordIndex(ADR-0038 D9)", () => {
         }),
       ),
     ).rejects.toThrow();
+  });
+});
+
+describe("isHomeChannel(ops.home_channel_ids・2026-10-07)", () => {
+  it("空なら全チャンネルを通す(従来どおり)", () => {
+    expect(isHomeChannel([], { channelId: "X", parentId: null })).toBe(true);
+  });
+  it("一致するチャンネル、または親チャンネルが一致するスレッドだけを通す", () => {
+    expect(isHomeChannel(["HOME"], { channelId: "HOME", parentId: null })).toBe(true);
+    expect(isHomeChannel(["HOME"], { channelId: "T1", parentId: "HOME" })).toBe(true);
+    expect(isHomeChannel(["HOME"], { channelId: "OTHER", parentId: null })).toBe(false);
+    expect(isHomeChannel(["HOME"], { channelId: "T2", parentId: "OTHER" })).toBe(false);
+  });
+  it("ops.yaml の home_channel_ids を読む(既定は空)", async () => {
+    expect((await loadOps(reader({}))).home_channel_ids).toEqual([]);
+    const ops = await loadOps(reader({ "ops.yaml": "home_channel_ids: ['111']" }));
+    expect(ops.home_channel_ids).toEqual(["111"]);
   });
 });

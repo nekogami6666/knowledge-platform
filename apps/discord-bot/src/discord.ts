@@ -56,6 +56,7 @@ import {
   type ChannelsConfig,
   isAskAllowedByRole,
   isChannelAllowed,
+  isHomeChannel,
   type OpsConfig,
   type VoiceConfig,
 } from "./config.js";
@@ -229,6 +230,12 @@ export function buildVcSnapshot(
 export const DENY_MESSAGE = "このチャンネルでは利用できません(§9.2)。";
 export function denyReason(channels: ChannelsConfig, gate: ChannelGateInput): string | null {
   return isChannelAllowed(channels, gate) ? null : DENY_MESSAGE;
+}
+
+/** 2026-10-07: ホームチャンネル外で /ask されたときの案内(本人のみ・ephemeral)。 */
+export function askHomeChannelMessage(homeChannelIds: readonly string[]): string {
+  const where = homeChannelIds.map((id) => `<#${id}>`).join(" / ");
+  return `/ask は ${where} で使ってください。`;
 }
 
 /** ADR-0036 D7: /ask を使えるロールを持たない人への応答(検索も記録もしない)。 */
@@ -591,6 +598,23 @@ async function handleAsk(
   }
   // ADR-0036 D7: 検索対象に private リポが入るため、社内のチームロール(ops.ask_role_ids)に限定する。
   // レート制限より前に判定し、対象外の人が予算を消費しないようにする。質問本文はログに残さない。
+  // 2026-10-07: /ask はホームチャンネル(#knowledge_sharing とその中のスレッド)だけで受け付ける。
+  // それ以外では本人にだけ案内して終える(defer・検索・記録・レート予算の消費をしない)。
+  const homeChannelIds = deps.ops?.home_channel_ids ?? [];
+  if (!isHomeChannel(homeChannelIds, gateInputFromInteraction(interaction))) {
+    logger.info(
+      { userId: interaction.user.id },
+      "/ask: ホームチャンネル外のため案内のみ返しました",
+    );
+    await ackOrBail(() =>
+      interaction.reply({
+        content: askHomeChannelMessage(homeChannelIds),
+        flags: MessageFlags.Ephemeral,
+      }),
+    );
+    return;
+  }
+
   const askRoleIds = deps.ops?.ask_role_ids ?? [];
   if (
     askRoleIds.length > 0 &&
@@ -993,13 +1017,13 @@ export const PROXY_MERGE_OFF_MESSAGE = "代理マージは現在利用できま�
  */
 export function proxyMergeRejectMessage(
   reason: string,
-  opsChannelId: string | null,
+  _opsChannelId: string | null,
 ): string | null {
   switch (reason) {
     case "not-ops-channel":
-      return opsChannelId === null
-        ? "PR のマージは bot の通知チャンネルに投稿された通知に 👍 でお願いします。"
-        : `PR のマージは <#${opsChannelId}> の通知に 👍 でお願いします。`;
+      // 2026-10-07: ops チャンネル外の PR リンクへの 👍 は、別リポの PR や雑談での 👍 も多く、
+      // 案内の公開返信は「頼まれていない返事」になるため黙る(ops チャンネルの通知への 👍 だけが導線)。
+      return null;
     case "not-webhook-message":
       return "bot の通知メッセージにのみ 👍 でマージできます。";
     case "repo-not-allowed":
@@ -1212,8 +1236,13 @@ export function gapAnswerRejectMessage(
   referenced: { isBot: boolean; isSelf: boolean; content: string },
 ): string | null {
   if (!referenced.isBot || referenced.isSelf) return null;
-  if (reason === "not-webhook-reference") return GAP_ANSWER_REJECT_MESSAGE;
-  if (reason === "no-question-id" && looksLikeGapRequest(referenced.content)) {
+  // 2026-10-07: 返信先が依頼らしい(q-ID 形を含む)ときだけ案内する。以前は not-webhook-reference
+  // (webhook ではない他 bot の通常投稿)への返信すべてに案内を返しており、OpenClaw 等の bot との
+  // 会話に無関係な公開返信をしていた。
+  if (
+    (reason === "not-webhook-reference" || reason === "no-question-id") &&
+    looksLikeGapRequest(referenced.content)
+  ) {
     return GAP_ANSWER_REJECT_MESSAGE;
   }
   return null;
@@ -1248,6 +1277,12 @@ export async function handleGapAnswer(message: Message, deps: BotDeps): Promise<
         content: referenced.content,
       });
       if (text === null) return;
+      // 2026-10-07: 頼まれていない案内の公開返信はホームチャンネル(#knowledge_sharing)内だけ。
+      const homeChannelIds = deps.ops?.home_channel_ids ?? [];
+      // スレッドなら親チャンネル ID でも照合する(チャンネル情報が無ければ null)。
+      const parentId =
+        (message.channel as { parentId?: string | null } | null | undefined)?.parentId ?? null;
+      if (!isHomeChannel(homeChannelIds, { channelId: message.channelId, parentId })) return;
       const rejectLog = withCorrelation(deps.logger, "gap-answer");
       rejectLog.info({ reason: decision.reason, authorId: message.author.id }, "gap answer missed");
       await ackReaction(message, "failed", rejectLog);

@@ -32,6 +32,7 @@ import { createMemoryStore } from "./db.js";
 import {
   ASK_ROLE_DENY_MESSAGE,
   askCommand,
+  askHomeChannelMessage,
   BOT_INTENTS,
   type BotDeps,
   commandsToRegister,
@@ -342,7 +343,12 @@ describe("parseGithubPrUrl", () => {
   });
 });
 
-const opsOn: OpsConfig = { channel_id: "OPS", kb_repo: "org/knowledge-base", ask_role_ids: [] };
+const opsOn: OpsConfig = {
+  channel_id: "OPS",
+  kb_repo: "org/knowledge-base",
+  ask_role_ids: [],
+  home_channel_ids: [],
+};
 
 describe("proxyMergeDecision (§6.3 のガード判定)", () => {
   const base = {
@@ -362,7 +368,10 @@ describe("proxyMergeDecision (§6.3 のガード判定)", () => {
   });
   it("ops 未設定(null)は機能 OFF", () => {
     expect(
-      proxyMergeDecision({ ...base, ops: { channel_id: null, kb_repo: null, ask_role_ids: [] } }),
+      proxyMergeDecision({
+        ...base,
+        ops: { channel_id: null, kb_repo: null, ask_role_ids: [], home_channel_ids: [] },
+      }),
     ).toEqual({
       merge: false,
       reason: "ops-config-off",
@@ -441,9 +450,9 @@ describe("proxyMergeDecision — DM ルート(§6.4 💡 capture)", () => {
 });
 
 describe("proxyMergeRejectMessage / shouldExplainProxyMergeReject (ADR-0030 D5)", () => {
-  it("直せる拒否理由は日本語で返し、ops チャンネルは設定値から mention する", () => {
-    expect(proxyMergeRejectMessage("not-ops-channel", "OPS")).toContain("<#OPS>");
-    expect(proxyMergeRejectMessage("not-ops-channel", null)).not.toContain("<#");
+  it("直せる拒否理由は日本語で返す。ops チャンネル外の 👍 には黙る(2026-10-07: 頼まれていない公開返信をしない)", () => {
+    expect(proxyMergeRejectMessage("not-ops-channel", "OPS")).toBeNull();
+    expect(proxyMergeRejectMessage("not-ops-channel", null)).toBeNull();
     expect(proxyMergeRejectMessage("not-webhook-message", "OPS")).toContain("bot の通知メッセージ");
     expect(proxyMergeRejectMessage("repo-not-allowed", "OPS")).toContain("対象外");
     expect(proxyMergeRejectMessage("ops-config-off", "OPS")).toBe(PROXY_MERGE_OFF_MESSAGE);
@@ -732,6 +741,9 @@ function fakeMessage(
     referencedAuthorBot?: boolean;
     /** 返信元が自 bot の投稿か(voice 訂正・/ask 回答への返信を区別する)。 */
     referencedAuthorId?: string;
+    /** 返信が投稿されたチャンネル(ホームチャンネルの判定用)。スレッドなら parentId。 */
+    channelId?: string;
+    parentId?: string | null;
   } = {},
 ): { message: Message; reacted: string[]; replies: string[] } {
   const reacted: string[] = [];
@@ -746,6 +758,8 @@ function fakeMessage(
     reference: over.isReply === false ? null : { messageId: "REQ1" },
     content: over.content ?? "湿度が高いと Y 軸が脱調します。",
     url: "https://discord.com/channels/1/2/3",
+    channelId: over.channelId ?? "CH1",
+    channel: { parentId: over.parentId ?? null },
     client: { user: { id: "BOT" } },
     fetchReference: async () => {
       if (over.fetchThrows) throw new Error("unknown message");
@@ -827,6 +841,44 @@ describe("handleGapAnswer (§6.5 ④UI 捕捉 / 例外封じ込め)", () => {
     expect(a.reacted).toEqual(["⚠️"]);
     expect(a.replies).toEqual([GAP_ANSWER_REJECT_MESSAGE]);
     expect(b.replies).toEqual([GAP_ANSWER_REJECT_MESSAGE]);
+  });
+
+  it("他の bot の通常投稿(依頼らしくない)への返信には無反応(2026-10-07: OpenClaw 等との会話に割り込まない)", async () => {
+    const { logger } = fakeLogger();
+    const { store, queued } = fakeStore();
+    const c = fakeMessage({ referencedWebhookId: null, referencedContent: "今日の天気は晴れです" });
+    await handleGapAnswer(c.message, deps(logger, store));
+    expect(queued).toHaveLength(0);
+    expect(c.replies).toEqual([]);
+    expect(c.reacted).toEqual([]);
+  });
+
+  it("ホームチャンネル外では案内もリアクションもしない。ホーム内(スレッドは親で判定)では案内する", async () => {
+    const { logger } = fakeLogger();
+    const { store } = fakeStore();
+    const homeDeps: BotDeps = {
+      ...deps(logger, store),
+      ops: { channel_id: null, kb_repo: null, ask_role_ids: [], home_channel_ids: ["HOME"] },
+    };
+    const outside = fakeMessage({ referencedWebhookId: null, channelId: "OTHER" });
+    await handleGapAnswer(outside.message, homeDeps);
+    expect(outside.replies).toEqual([]);
+    expect(outside.reacted).toEqual([]);
+    const inThread = fakeMessage({ referencedWebhookId: null, channelId: "T1", parentId: "HOME" });
+    await handleGapAnswer(inThread.message, homeDeps);
+    expect(inThread.replies).toEqual([GAP_ANSWER_REJECT_MESSAGE]);
+  });
+
+  it("正しい依頼への返信はホームチャンネル外でも受け付ける(依頼の投稿先で回答できるように)", async () => {
+    const { logger } = fakeLogger();
+    const { store, queued } = fakeStore();
+    const { message, reacted } = fakeMessage({ channelId: "OTHER" });
+    await handleGapAnswer(message, {
+      ...deps(logger, store),
+      ops: { channel_id: null, kb_repo: null, ask_role_ids: [], home_channel_ids: ["HOME"] },
+    });
+    expect(queued).toHaveLength(1);
+    expect(reacted).toEqual(["✅"]);
   });
 
   it("人間同士の返信・自 bot の投稿への返信・q-ID と無関係な webhook には無反応", async () => {
@@ -1293,11 +1345,65 @@ describe("InteractionCreate /ask の分割配送結線(§6.2 / ADR-0034 ephemera
     await client.destroy();
   });
 
+  describe("ホームチャンネル(ops.home_channel_ids・2026-10-07)", () => {
+    const opsHome = (...home_channel_ids: string[]): OpsConfig => ({
+      channel_id: null,
+      kb_repo: null,
+      ask_role_ids: [],
+      home_channel_ids,
+    });
+    const answered = async () => ({
+      answerText: "回答",
+      status: "answered" as const,
+      queryId: "q",
+    });
+
+    it("ホーム外の /ask は ephemeral の案内だけ返し、defer も onAsk もしない", async () => {
+      const { logger } = fakeLogger();
+      const onAsk = vi.fn(answered);
+      const client = createBot({
+        logger,
+        channels: channels(),
+        store: createMemoryStore(),
+        ops: opsHome("HOME"),
+        onAsk,
+      });
+      const { interaction, sends, replies, deferOptions } = fakeAskInteraction("質問");
+      client.emit(Events.InteractionCreate, interaction);
+      await vi.waitFor(() => expect(replies).toHaveLength(1));
+      expect(replies[0]?.content).toBe(askHomeChannelMessage(["HOME"]));
+      expect(replies[0]?.content).toContain("<#HOME>");
+      expect(replies[0]?.flags).toBe(MessageFlags.Ephemeral);
+      expect(deferOptions()).toHaveLength(0);
+      expect(sends).toHaveLength(0);
+      expect(onAsk).not.toHaveBeenCalled();
+      await client.destroy();
+    });
+
+    it("ホームチャンネル内・空設定(従来どおり)では通常どおり回答する", async () => {
+      for (const ops of [opsHome("111"), opsHome()]) {
+        const { logger } = fakeLogger();
+        const client = createBot({
+          logger,
+          channels: channels(),
+          store: createMemoryStore(),
+          ops,
+          onAsk: answered,
+        });
+        const { interaction, sends } = fakeAskInteraction("質問");
+        client.emit(Events.InteractionCreate, interaction);
+        await vi.waitFor(() => expect(sends).toHaveLength(1));
+        await client.destroy();
+      }
+    });
+  });
+
   describe("利用ロール(ops.ask_role_ids・ADR-0036 D7)", () => {
     const opsWithRole = (...ask_role_ids: string[]): OpsConfig => ({
       channel_id: null,
       kb_repo: null,
       ask_role_ids,
+      home_channel_ids: [],
     });
     const answered = async () => ({
       answerText: "回答",
