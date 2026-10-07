@@ -3,7 +3,7 @@ import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import type { BotStore, InflightAskStore, QueryRecord } from "./db.js";
+import type { BotStore, InflightAskStore, QueryRecord, SharedAnswerStore } from "./db.js";
 
 /**
  * better-sqlite3 の native バイナリが無い環境(= `pnpm approve-builds better-sqlite3` 未実施)では
@@ -266,5 +266,80 @@ describe.skipIf(!sqliteAvailable())("inflight_asks(ADR-0035 追記・強制終�
     raw.exec("DROP TABLE inflight_asks");
     expect(countRecentInflight(raw, now)).toBe(0);
     raw.close();
+  });
+});
+
+describe.skipIf(!sqliteAvailable())("shared_answers(ADR-0040・回答の公開共有の記録)", () => {
+  let createStore: (path: string) => BotStore & SharedAnswerStore;
+  type RawDb = {
+    exec(sql: string): void;
+    pragma(s: string, o?: { simple: boolean }): unknown;
+    close(): void;
+  };
+  let openRaw: (path: string) => RawDb;
+  let dir: string;
+  beforeAll(async () => {
+    ({ createSqliteStore: createStore } = await import("./sqlite-store.js"));
+    const Database = createRequire(import.meta.url)("better-sqlite3") as new (
+      path: string,
+    ) => RawDb;
+    openRaw = (p) => new Database(p);
+    dir = mkdtempSync(join(tmpdir(), "shared-"));
+  });
+  afterAll(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+  const claim = (queryId: string) => ({
+    queryId,
+    sharedAt: "2026-10-07T10:00:00+09:00",
+    channelId: "SHARE",
+    sharedBy: "u1",
+  });
+
+  it("予約 → 投稿 ID の記録 → 二重予約は false(1 回答 1 回)", () => {
+    const s = createStore(":memory:");
+    expect(s.getSharedAnswer("q1")).toBeUndefined();
+    expect(s.claimSharedAnswer(claim("q1"))).toBe(true);
+    expect(s.getSharedAnswer("q1")).toEqual({ ...claim("q1"), messageId: null });
+    s.completeSharedAnswer("q1", "m1");
+    expect(s.claimSharedAnswer(claim("q1"))).toBe(false);
+    expect(s.getSharedAnswer("q1")?.messageId).toBe("m1");
+    s.close();
+  });
+
+  it("release は投稿前の予約だけを消す(投稿済みの記録は消さない)", () => {
+    const s = createStore(":memory:");
+    s.claimSharedAnswer(claim("a"));
+    s.releaseSharedAnswer("a");
+    expect(s.getSharedAnswer("a")).toBeUndefined();
+    s.claimSharedAnswer(claim("b"));
+    s.completeSharedAnswer("b", "m-b");
+    s.releaseSharedAnswer("b");
+    expect(s.getSharedAnswer("b")?.messageId).toBe("m-b");
+    s.close();
+  });
+
+  it("既存 DB を開くと表が追加され、user_version とデータは変わらない・何度開いても冪等", () => {
+    const p = join(dir, "v1.db");
+    const old = createStore(p);
+    old.recordQuery(sampleQuery({ id: "old-q" }));
+    old.close();
+    const raw = openRaw(p);
+    raw.exec("DROP TABLE shared_answers");
+    expect(raw.pragma("user_version", { simple: true })).toBe(1);
+    raw.close();
+
+    const s = createStore(p);
+    expect(s.claimSharedAnswer(claim("old-q"))).toBe(true);
+    s.completeSharedAnswer("old-q", "m1");
+    // bot が開いたまま、別プロセス相当(ホスト側バッチ)がもう一度開く。
+    const again = createStore(p);
+    expect(again.getSharedAnswer("old-q")?.messageId).toBe("m1");
+    expect(again.getQuery("old-q")?.question).toBe("?");
+    again.close();
+    s.close();
+    const after = openRaw(p);
+    expect(after.pragma("user_version", { simple: true })).toBe(1);
+    after.close();
   });
 });

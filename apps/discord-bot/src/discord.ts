@@ -41,6 +41,7 @@ import {
   ERROR_MESSAGE,
   recordSkippedAsk,
 } from "./ask.js";
+import { canOfferShare, handleKeepShareButton, type KeepShareAction } from "./ask-keep-share.js";
 import {
   type AskLifecycle,
   createAskLifecycle,
@@ -60,7 +61,7 @@ import {
   type OpsConfig,
   type VoiceConfig,
 } from "./config.js";
-import type { BotStore } from "./db.js";
+import type { BotStore, SharedAnswerStore } from "./db.js";
 import type { DiscordSearchScope } from "./discord-search-scope.js";
 import { splitForDiscord } from "./format.js";
 import { type FreshnessApplyDeps, handleFreshnessReaction } from "./freshness-flow.js";
@@ -208,6 +209,13 @@ export interface BotDeps {
    * 環境でのみ注入する。キューで順番が来た時点で計算する(待っている間の権限変更も反映する)。
    */
   discordSearchScope?: (interaction: ChatInputCommandInteraction) => DiscordSearchScope | null;
+  /**
+   * 📢 共有の投稿先チャンネル(ADR-0040)。index.ts は ops.channel_id を渡す。sharedAnswers と両方揃ったときだけ
+   * 📢 を出す。投稿はこのチャンネルにだけ行う。
+   */
+  shareChannelId?: string;
+  /** 📢 共有の記録(bot.db の shared_answers・ADR-0040 D4)。未指定なら 📢 を出さない。 */
+  sharedAnswers?: SharedAnswerStore;
 }
 
 /**
@@ -251,9 +259,15 @@ export function windowKey(epochMs: number): string {
   return String(Math.floor(epochMs / RATE_WINDOW_MS));
 }
 
-/** 👍👎 ボタン行。customId は "fb:up:<queryId>" / "fb:down:<queryId>"。 */
-export function feedbackButtons(queryId: string): ActionRowBuilder<ButtonBuilder> {
-  return new ActionRowBuilder<ButtonBuilder>().addComponents(
+/**
+ * 👍👎 ボタン行。customId は "fb:up:<queryId>" / "fb:down:<queryId>"。
+ * opts.keep / opts.share で同じ行に「📌 残す」("fb:keep:<id>")・「📢 共有」("fb:share:<id>")を足す(ADR-0040)。
+ */
+export function feedbackButtons(
+  queryId: string,
+  opts: { keep?: boolean; share?: boolean } = {},
+): ActionRowBuilder<ButtonBuilder> {
+  const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
     new ButtonBuilder()
       .setCustomId(`fb:up:${queryId}`)
       .setLabel("👍")
@@ -263,15 +277,35 @@ export function feedbackButtons(queryId: string): ActionRowBuilder<ButtonBuilder
       .setLabel("👎")
       .setStyle(ButtonStyle.Danger),
   );
+  if (opts.keep === true) {
+    row.addComponents(
+      new ButtonBuilder()
+        .setCustomId(`fb:keep:${queryId}`)
+        .setLabel("📌 残す")
+        .setStyle(ButtonStyle.Secondary),
+    );
+  }
+  if (opts.share === true) {
+    row.addComponents(
+      new ButtonBuilder()
+        .setCustomId(`fb:share:${queryId}`)
+        .setLabel("📢 共有")
+        .setStyle(ButtonStyle.Secondary),
+    );
+  }
+  return row;
 }
+
+/** ボタン操作。up/down = 👍👎、それ以外は 📌 / 📢 と共有の確認画面(ADR-0040)。 */
+export type FeedbackButtonValue = "up" | "down" | KeepShareAction;
 
 /** ボタン customId を解析(不正なら null)。 */
 export function parseFeedbackCustomId(
   customId: string,
-): { value: "up" | "down"; queryId: string } | null {
-  const m = /^fb:(up|down):(.+)$/.exec(customId);
+): { value: FeedbackButtonValue; queryId: string } | null {
+  const m = /^fb:(up|down|keep|share-confirm|share-cancel|share):(.+)$/.exec(customId);
   if (m === null) return null;
-  return { value: m[1] as "up" | "down", queryId: m[2] as string };
+  return { value: m[1] as FeedbackButtonValue, queryId: m[2] as string };
 }
 
 const stubHandler: AskHandler = async () => ({
@@ -512,18 +546,25 @@ export interface DeliveryOutcome {
  * それ以外の失敗時の通知も本関数が送る: 1 チャンクでも配送済みなら editReply は使わない
  * (配送済み本文を上書きしてしまうため followUp で追記し、途中切れ回答にも 👍👎 を残して評価を
  * 受けられるようにする)。本関数は throw しない。
+ * fallbackComponents は DM 側の最終チャンクに付けるもの(既定 = components)。DM に届いた回答は
+ * それ自体が残るため、📌 / 📢 を外した行を渡す(ADR-0040)。
  */
 export async function deliverAnswer(
   delivery: AnswerDelivery,
   chunks: readonly string[],
   components: readonly ActionRowBuilder<ButtonBuilder>[],
+  fallbackComponents: readonly ActionRowBuilder<ButtonBuilder>[] = components,
 ): Promise<DeliveryOutcome> {
   let sentChunks = 0;
   let fallbackChunks = 0;
   const last = chunks.length - 1;
-  const msgAt = (i: number, content: string) => ({
+  const msgAt = (
+    i: number,
+    content: string,
+    rows: readonly ActionRowBuilder<ButtonBuilder>[] = components,
+  ) => ({
     content,
-    components: i === last ? [...components] : [],
+    components: i === last ? [...rows] : [],
   });
   try {
     for (const [i, chunk] of chunks.entries()) {
@@ -539,7 +580,7 @@ export async function deliverAnswer(
         for (let i = sentChunks; i <= last; i++) {
           const body = chunks[i] ?? "";
           const content = i === sentChunks ? `${DM_FALLBACK_NOTE}\n${body}` : body;
-          await delivery.fallback(msgAt(i, content));
+          await delivery.fallback(msgAt(i, content, fallbackComponents));
           fallbackChunks += 1;
         }
         return { sentChunks, fallbackChunks };
@@ -741,6 +782,20 @@ interface AcceptedAsk {
   signal: AbortSignal;
 }
 
+/**
+ * 回答メッセージに 📢 を出すか(ADR-0040)。保存済みの記録で判定する(Discord 引用の有無は sources_json)。
+ * 記録が読めないときは出さない(安全側)。
+ */
+function shareOffered(deps: BotDeps, queryId: string, log: Logger): boolean {
+  if (deps.shareChannelId === undefined || deps.sharedAnswers === undefined) return false;
+  try {
+    return canOfferShare(deps, deps.store.getQuery(queryId));
+  } catch (err) {
+    log.warn({ err: safeErrorInfo(err) }, "/ask: 共有ボタンの判定に失敗しました(📢 は出しません)");
+    return false;
+  }
+}
+
 /** 受付済み /ask の順番待ち → 期限判定 → 検索 → 配送(handleAsk の後半)。 */
 async function runAcceptedAsk(a: AcceptedAsk): Promise<void> {
   const { interaction, onAsk, deps, queue, log, now, question, correlationId, acceptedAt, signal } =
@@ -912,8 +967,18 @@ async function runAcceptedAsk(a: AcceptedAsk): Promise<void> {
   // ADR-0035 D2 (b): 検索が長引き配送時点で期限を過ぎていたら interaction を試みず DM で配送する。
   const expired = interactionLikelyExpired(acceptedAt, deliverAt);
   // 出典付き回答にのみ 👍👎 を付ける(未回答/エラーには付けない)。
-  const components =
-    result.status === "answered" && result.queryId !== "" ? [feedbackButtons(result.queryId)] : [];
+  // ADR-0040: ephemeral で届く回答には 📌(DM 保存)と、共有できる回答なら 📢 も並べる。
+  // DM で届く回答(失効時の代替経路)はそれ自体が残るため 👍👎 だけにする。
+  const answered = result.status === "answered" && result.queryId !== "";
+  const dmComponents = answered ? [feedbackButtons(result.queryId)] : [];
+  const components = answered
+    ? [
+        feedbackButtons(result.queryId, {
+          keep: true,
+          share: shareOffered(deps, result.queryId, log),
+        }),
+      ]
+    : [];
   const chunks = splitForDiscord(result.answerText);
   // Discord の 2000 字制限を超える回答は分割配送する。送信失敗の封じ込めは deliverAnswer 側。
   const outcome = expired
@@ -921,7 +986,7 @@ async function runAcceptedAsk(a: AcceptedAsk): Promise<void> {
       await deliverAnswer(
         { editReply: dm, followUp: dm },
         chunks.map((c, i) => (i === 0 ? `${DM_FALLBACK_NOTE}\n${c}` : c)),
-        components,
+        dmComponents,
       )
     : await deliverAnswer(
         {
@@ -934,6 +999,7 @@ async function runAcceptedAsk(a: AcceptedAsk): Promise<void> {
         },
         chunks,
         components,
+        dmComponents,
       );
   if (expired || outcome.fallbackChunks > 0) {
     log.warn(
@@ -1320,11 +1386,27 @@ export async function handleButton(interaction: ButtonInteraction, deps: BotDeps
   try {
     // ADR-0034 D3: 👍👎 は /ask 実行者本人のみ。ephemeral 化後は本人しかボタンを見られないが、
     // エフェメラル化以前の公開回答にはボタンが残るため store の記録と照合する(record 無しは従来どおり許可)。
+    // 📌 / 📢 / 共有の確認画面(ADR-0040)も同じ照合を通す(本人以外は保存も公開もできない)。
     const query = deps.store.getQuery(parsed.queryId);
     if (query !== undefined && query.discordUserId !== interaction.user.id) {
+      if (parsed.value !== "up" && parsed.value !== "down") {
+        log.info(
+          { queryId: parsed.queryId, action: parsed.value, result: "not_asker" },
+          "/ask 回答の保存・共有",
+        );
+      }
       await interaction.reply({
         content: "この操作は /ask を実行した本人のみ行えます。",
         flags: MessageFlags.Ephemeral,
+      });
+      return;
+    }
+    if (parsed.value !== "up" && parsed.value !== "down") {
+      // 記録の無い queryId は handleKeepShareButton 側で拒否する(本文が無く、本人も確かめられない)。
+      await handleKeepShareButton(interaction, parsed.value, parsed.queryId, query, {
+        log,
+        shareChannelId: deps.shareChannelId,
+        sharedAnswers: deps.sharedAnswers,
       });
       return;
     }
@@ -1349,12 +1431,17 @@ export async function handleButton(interaction: ButtonInteraction, deps: BotDeps
     });
   } catch (err) {
     // store throw(SQLite ロック等)や送信失敗で interaction を未 ack のまま落とさない。
-    log.error({ err }, "feedback handling failed");
+    const isFeedback = parsed.value === "up" || parsed.value === "down";
+    // 📌 / 📢 は interaction の webhook を使うため、例外は token を含みうる生の形で残さない(ADR-0040)。
+    log.error(
+      isFeedback ? { err } : { action: parsed.value, err: safeErrorInfo(err) },
+      "feedback handling failed",
+    );
     // 未応答ならガード付きで ephemeral 通知。二重応答や再失敗はこれ以上できることが無いので握りつぶす。
     if (!interaction.replied && !interaction.deferred) {
       try {
         await interaction.reply({
-          content: "フィードバックの記録に失敗しました。",
+          content: isFeedback ? "フィードバックの記録に失敗しました。" : "操作に失敗しました。",
           ephemeral: true,
         });
       } catch {

@@ -14,6 +14,8 @@ import type {
   PendingAction,
   QueryRecord,
   RateLimitResult,
+  SharedAnswer,
+  SharedAnswerStore,
 } from "./db.js";
 
 type DB = Database.Database;
@@ -90,6 +92,23 @@ function ensureInflightAsksTable(db: DB): void {
   `);
 }
 
+/**
+ * /ask 回答の公開共有の記録(ADR-0040)。**user_version を消費しない**(inflight_asks と同じ流儀)。
+ * 追加のみ・冪等で開くたびに実行する。bot.db を共有するホスト側バッチは本表を読まない。
+ * message_id は投稿前の予約の間だけ NULL(1 回答 1 回の排他を主キーで取るため・ADR-0040 D4)。
+ */
+function ensureSharedAnswersTable(db: DB): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS shared_answers (
+      query_id TEXT PRIMARY KEY,
+      shared_at TEXT NOT NULL,
+      channel_id TEXT NOT NULL,
+      message_id TEXT,
+      shared_by TEXT NOT NULL
+    );
+  `);
+}
+
 // sqlite の行は snake_case。`SELECT *` を `as QueryRecord`(camelCase)へ素キャストすると
 // 各フィールドが実行時 undefined になる(メモリ実装と乖離)。必ず下記マッパで写す。
 interface QueryRow {
@@ -149,12 +168,13 @@ function toPendingAction(r: ActionRow): PendingAction {
 }
 
 /** better-sqlite3 による BotStore。path はファイルパス(":memory:" も可)。 */
-export function createSqliteStore(path: string): BotStore & InflightAskStore {
+export function createSqliteStore(path: string): BotStore & InflightAskStore & SharedAnswerStore {
   const db: DB = new Database(path);
   db.pragma("journal_mode = WAL");
   db.pragma("busy_timeout = 5000");
   migrate(db);
   ensureInflightAsksTable(db);
+  ensureSharedAnswersTable(db);
 
   // @feedback を列・VALUES の双方に含めること。QueryRecord に feedback がある以上、
   // 列を欠くと better-sqlite3 の named-param 厳密一致で recordQuery が実行時に throw する。
@@ -191,6 +211,18 @@ export function createSqliteStore(path: string): BotStore & InflightAskStore {
   `);
   const deleteInflight = db.prepare("DELETE FROM inflight_asks WHERE id = ?");
   const selectInflight = db.prepare("SELECT * FROM inflight_asks ORDER BY accepted_at_ms");
+  // 予約は INSERT OR IGNORE の changes で判定する(主キー = 1 回答 1 回・ADR-0040 D4)。
+  const insertShared = db.prepare(`
+    INSERT OR IGNORE INTO shared_answers (query_id, shared_at, channel_id, message_id, shared_by)
+    VALUES (@queryId, @sharedAt, @channelId, NULL, @sharedBy)
+  `);
+  const updateSharedMessage = db.prepare(
+    "UPDATE shared_answers SET message_id = ? WHERE query_id = ?",
+  );
+  const deleteSharedClaim = db.prepare(
+    "DELETE FROM shared_answers WHERE query_id = ? AND message_id IS NULL",
+  );
+  const selectShared = db.prepare("SELECT * FROM shared_answers WHERE query_id = ?");
 
   return {
     recordQuery(q: QueryRecord) {
@@ -249,6 +281,41 @@ export function createSqliteStore(path: string): BotStore & InflightAskStore {
         acceptedAtMs: r.accepted_at_ms,
         correlationId: r.correlation_id,
       }));
+    },
+    claimSharedAnswer(row) {
+      return (
+        insertShared.run({
+          queryId: row.queryId,
+          sharedAt: row.sharedAt,
+          channelId: row.channelId,
+          sharedBy: row.sharedBy,
+        }).changes === 1
+      );
+    },
+    completeSharedAnswer(queryId, messageId) {
+      updateSharedMessage.run(messageId, queryId);
+    },
+    releaseSharedAnswer(queryId) {
+      deleteSharedClaim.run(queryId);
+    },
+    getSharedAnswer(queryId): SharedAnswer | undefined {
+      const r = selectShared.get(queryId) as
+        | {
+            query_id: string;
+            shared_at: string;
+            channel_id: string;
+            message_id: string | null;
+            shared_by: string;
+          }
+        | undefined;
+      if (r === undefined) return undefined;
+      return {
+        queryId: r.query_id,
+        sharedAt: r.shared_at,
+        channelId: r.channel_id,
+        messageId: r.message_id,
+        sharedBy: r.shared_by,
+      };
     },
     close() {
       db.close();

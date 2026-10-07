@@ -126,9 +126,38 @@ export interface InflightAskStore {
   listInflightAsks(): InflightAsk[];
 }
 
+/**
+ * /ask 回答の公開共有 1 件の記録(ADR-0040)。1 回答 1 回まで(queryId が主キー)。
+ * 投稿の前に「予約」として入れ(messageId=null)、投稿できたら messageId を埋める。
+ * 投稿に失敗したら予約を消す。質問・回答の本文は持たない(queries 側にある)。
+ */
+export interface SharedAnswer {
+  queryId: string;
+  /** 予約時刻(ISO 8601 JST)。 */
+  sharedAt: string;
+  /** 投稿先チャンネル ID。 */
+  channelId: string;
+  /** 投稿したメッセージ ID(先頭チャンク)。投稿中・投稿途中で落ちた予約は null。 */
+  messageId: string | null;
+  /** 共有操作をした Discord ユーザー ID(= 質問者本人)。 */
+  sharedBy: string;
+}
+
+/** 回答の共有記録(BotStore とは別の口。bot 本体だけが使う・ADR-0040)。 */
+export interface SharedAnswerStore {
+  /** 共有を予約する。既に記録があれば false(何も変えない)。 */
+  claimSharedAnswer(row: Omit<SharedAnswer, "messageId">): boolean;
+  /** 投稿できたメッセージ ID を記録する。未知 id は no-op。 */
+  completeSharedAnswer(queryId: string, messageId: string): void;
+  /** 投稿できなかった予約を消す(messageId が未記録の行だけ)。 */
+  releaseSharedAnswer(queryId: string): void;
+  getSharedAnswer(queryId: string): SharedAnswer | undefined;
+}
+
 /** インメモリ実装(テスト/開発用。native 依存なし)。プロセス終了で消える。 */
-export function createMemoryStore(): BotStore & InflightAskStore {
+export function createMemoryStore(): BotStore & InflightAskStore & SharedAnswerStore {
   const inflight = new Map<string, InflightAsk>();
+  const shared = new Map<string, SharedAnswer>();
   const queries: QueryRecord[] = [];
   const actions: PendingAction[] = [];
   const counters = new Map<string, number>();
@@ -179,6 +208,22 @@ export function createMemoryStore(): BotStore & InflightAskStore {
     },
     listInflightAsks() {
       return [...inflight.values()].map((r) => ({ ...r }));
+    },
+    claimSharedAnswer(row) {
+      if (shared.has(row.queryId)) return false;
+      shared.set(row.queryId, { ...row, messageId: null });
+      return true;
+    },
+    completeSharedAnswer(queryId, messageId) {
+      const r = shared.get(queryId);
+      if (r) r.messageId = messageId;
+    },
+    releaseSharedAnswer(queryId) {
+      if (shared.get(queryId)?.messageId === null) shared.delete(queryId);
+    },
+    getSharedAnswer(queryId) {
+      const r = shared.get(queryId);
+      return r === undefined ? undefined : { ...r };
     },
     close() {},
   };

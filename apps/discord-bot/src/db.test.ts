@@ -139,3 +139,36 @@ describe("createMemoryStore: hitRateLimit", () => {
     expect(s.hitRateLimit("user:1", "ask", "w2", 1).count).toBe(1);
   });
 });
+
+describe("createMemoryStore: shared_answers(ADR-0040)", () => {
+  const claim = (queryId: string) => ({
+    queryId,
+    sharedAt: "2026-10-07T10:00:00+09:00",
+    channelId: "SHARE",
+    sharedBy: "u1",
+  });
+
+  it("予約 → 投稿 ID の記録 → 二重予約は false(1 回答 1 回)", () => {
+    const s = createMemoryStore();
+    expect(s.getSharedAnswer("q1")).toBeUndefined();
+    expect(s.claimSharedAnswer(claim("q1"))).toBe(true);
+    expect(s.getSharedAnswer("q1")).toEqual({ ...claim("q1"), messageId: null });
+    s.completeSharedAnswer("q1", "m1");
+    expect(s.claimSharedAnswer(claim("q1"))).toBe(false);
+    expect(s.getSharedAnswer("q1")?.messageId).toBe("m1");
+  });
+
+  it("release は投稿前の予約だけを消す(投稿済みの記録・未知 id は no-op)", () => {
+    const s = createMemoryStore();
+    s.claimSharedAnswer(claim("a"));
+    s.releaseSharedAnswer("a");
+    expect(s.getSharedAnswer("a")).toBeUndefined();
+    s.claimSharedAnswer(claim("b"));
+    s.completeSharedAnswer("b", "m-b");
+    s.releaseSharedAnswer("b");
+    s.releaseSharedAnswer("unknown");
+    s.completeSharedAnswer("unknown", "m");
+    expect(s.getSharedAnswer("b")?.messageId).toBe("m-b");
+    expect(s.getSharedAnswer("unknown")).toBeUndefined();
+  });
+});

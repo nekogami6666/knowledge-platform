@@ -23,6 +23,19 @@ import {
   ERROR_MESSAGE,
   INTERRUPTED_MESSAGE,
 } from "./ask.js";
+import {
+  alreadySharedMessage,
+  KEEP_DM_FAILED_MESSAGE,
+  KEEP_DM_PARTIAL_MESSAGE,
+  KEEP_DONE_MESSAGE,
+  RECORD_NOT_FOUND_MESSAGE,
+  SHARE_CANCELLED_MESSAGE,
+  SHARE_DISCORD_CITED_MESSAGE,
+  SHARE_FAILED_MESSAGE,
+  SHARE_UNAVAILABLE_MESSAGE,
+  shareConfirmMessage,
+  shareDoneMessage,
+} from "./ask-keep-share.js";
 import { createAskLifecycle } from "./ask-lifecycle.js";
 import { ASK_COMPLETION_LOG_MSG } from "./ask-metrics.js";
 import { SerialQueue } from "./concurrency.js";
@@ -2329,5 +2342,591 @@ describe("InteractionCreate /ask の完了ログ(段階 1-1: 1 件 1 行・工�
     expect(log).toMatchObject({ outcome: "answered", failedStage: "delivery", errorKind: "Error" });
     expect(log.failedAtMs).toBe(log.totalMs);
     await client.destroy();
+  });
+});
+
+// --- 📌 残す / 📢 共有(ADR-0040)-------------------------------------------------
+
+function answeredRecord(over: Partial<QueryRecord> = {}): QueryRecord {
+  return {
+    id: "q1",
+    correlationId: "c1",
+    discordUserId: "u1",
+    discordChannelId: "111",
+    threadId: null,
+    question: "勤怠の締め日は?",
+    answer: "毎月末です。\n\n出典:\n[1] https://github.com/org/kb/blob/abc/a.md",
+    sourcesJson: JSON.stringify([
+      { kind: "github_file", repo: "org/kb", path: "a.md", ref: "abc" },
+    ]),
+    answerStatus: "answered",
+    feedback: null,
+    inputTokens: 1,
+    outputTokens: 1,
+    elapsedMs: 1,
+    createdAt: "2026-10-07T09:12:34+09:00",
+    ...over,
+  };
+}
+
+const DISCORD_CITED_SOURCES = JSON.stringify([
+  { kind: "github_file", repo: "org/kb", path: "a.md", ref: "abc" },
+  { kind: "discord", url: "https://discord.com/channels/1/2/3" },
+]);
+
+/** ボタン行(ActionRowBuilder[])の customId 一覧。 */
+function customIdsOf(rows: unknown[] | undefined): string[] {
+  return (rows ?? []).flatMap((r) =>
+    (r as { toJSON(): { components: { custom_id?: string }[] } })
+      .toJSON()
+      .components.map((c) => c.custom_id ?? ""),
+  );
+}
+
+describe("parseFeedbackCustomId / feedbackButtons(📌 / 📢・ADR-0040)", () => {
+  it("fb:keep / fb:share / fb:share-confirm / fb:share-cancel を解析する", () => {
+    expect(parseFeedbackCustomId("fb:keep:q1")).toEqual({ value: "keep", queryId: "q1" });
+    expect(parseFeedbackCustomId("fb:share:q1")).toEqual({ value: "share", queryId: "q1" });
+    expect(parseFeedbackCustomId("fb:share-confirm:q-1")).toEqual({
+      value: "share-confirm",
+      queryId: "q-1",
+    });
+    expect(parseFeedbackCustomId("fb:share-cancel:q1")).toEqual({
+      value: "share-cancel",
+      queryId: "q1",
+    });
+    for (const id of ["fb:keep:", "fb:share-:q1", "fb:sharex:q1", "fb:share-confirm:"]) {
+      expect(parseFeedbackCustomId(id)).toBeNull();
+    }
+  });
+
+  it("keep / share 指定で同じ行に 📌 / 📢 を足す(既定は 👍👎 のみ)", () => {
+    expect(customIdsOf([feedbackButtons("q1", { keep: true })])).toEqual([
+      "fb:up:q1",
+      "fb:down:q1",
+      "fb:keep:q1",
+    ]);
+    expect(customIdsOf([feedbackButtons("q1", { keep: true, share: true })])).toEqual([
+      "fb:up:q1",
+      "fb:down:q1",
+      "fb:keep:q1",
+      "fb:share:q1",
+    ]);
+  });
+});
+
+describe("InteractionCreate /ask の 📌 / 📢 ボタン(ADR-0040)", () => {
+  interface Sent {
+    via: "editReply" | "followUp" | "dm";
+    ids: string[];
+  }
+  function askFake(opts: { editThrows?: unknown } = {}): {
+    interaction: Interaction;
+    sends: Sent[];
+  } {
+    const sends: Sent[] = [];
+    const push =
+      (via: Sent["via"], throws?: unknown) =>
+      async (o: string | { content: string; components?: unknown[] }) => {
+        if (throws !== undefined) throw throws;
+        sends.push({ via, ids: typeof o === "string" ? [] : customIdsOf(o.components) });
+      };
+    const interaction = {
+      isChatInputCommand: () => true,
+      isButton: () => false,
+      isUserSelectMenu: () => false,
+      isStringSelectMenu: () => false,
+      isModalSubmit: () => false,
+      commandName: "ask",
+      inGuild: () => true,
+      channel: null,
+      channelId: "111",
+      appPermissions: { has: () => true },
+      member: null,
+      user: { id: "u1", send: push("dm") },
+      options: { getString: () => "質問" },
+      deferReply: async () => {},
+      reply: async () => {},
+      editReply: push("editReply", opts.editThrows),
+      followUp: push("followUp"),
+    };
+    return { interaction: interaction as unknown as Interaction, sends };
+  }
+
+  /** onAsk の代わりに記録を入れて answered を返す(handleAskRequest と同じく配送前に記録済み)。 */
+  function setup(
+    over: {
+      record?: Partial<QueryRecord>;
+      status?: AskResult["status"];
+      share?: boolean;
+      now?: () => number;
+      onAskHook?: () => void;
+    } = {},
+  ): ReturnType<typeof createBot> {
+    const { logger } = fakeLogger();
+    const store = createMemoryStore();
+    return createBot({
+      logger,
+      channels: channels(),
+      store,
+      ...(over.share === false ? {} : { shareChannelId: "SHARE", sharedAnswers: store }),
+      ...(over.now !== undefined ? { now: over.now } : {}),
+      onAsk: async () => {
+        over.onAskHook?.();
+        store.recordQuery(answeredRecord(over.record));
+        return { answerText: "毎月末です。", status: over.status ?? "answered", queryId: "q1" };
+      },
+    });
+  }
+
+  it("回答あり: 最終メッセージに 👍👎📌📢 を並べる", async () => {
+    const client = setup();
+    const { interaction, sends } = askFake();
+    client.emit(Events.InteractionCreate, interaction);
+    await vi.waitFor(() => expect(sends).toHaveLength(1));
+    expect(sends[0]?.ids).toEqual(["fb:up:q1", "fb:down:q1", "fb:keep:q1", "fb:share:q1"]);
+    await client.destroy();
+  });
+
+  it("Discord の発言を引用した回答には 📢 を出さない(📌 は出す)", async () => {
+    const client = setup({ record: { sourcesJson: DISCORD_CITED_SOURCES } });
+    const { interaction, sends } = askFake();
+    client.emit(Events.InteractionCreate, interaction);
+    await vi.waitFor(() => expect(sends).toHaveLength(1));
+    expect(sends[0]?.ids).toEqual(["fb:up:q1", "fb:down:q1", "fb:keep:q1"]);
+    await client.destroy();
+  });
+
+  it("共有先が未設定なら 📢 を出さない", async () => {
+    const client = setup({ share: false });
+    const { interaction, sends } = askFake();
+    client.emit(Events.InteractionCreate, interaction);
+    await vi.waitFor(() => expect(sends).toHaveLength(1));
+    expect(sends[0]?.ids).toEqual(["fb:up:q1", "fb:down:q1", "fb:keep:q1"]);
+    await client.destroy();
+  });
+
+  it("未回答にはボタンを付けない", async () => {
+    const client = setup({ status: "unanswered", record: { answerStatus: "unanswered" } });
+    const { interaction, sends } = askFake();
+    client.emit(Events.InteractionCreate, interaction);
+    await vi.waitFor(() => expect(sends).toHaveLength(1));
+    expect(sends[0]?.ids).toEqual([]);
+    await client.destroy();
+  });
+
+  it("配送時点で失効していて全体を DM で届けたときは 👍👎 だけ(📌📢 は付けない)", async () => {
+    let t = 0;
+    // 検索中に 15 分を超える(受付・順番は期限内、配送時点で失効)。
+    const client = setup({ now: () => t, onAskHook: () => (t = INTERACTION_TOKEN_MS) });
+    const { interaction, sends } = askFake();
+    client.emit(Events.InteractionCreate, interaction);
+    await vi.waitFor(() => expect(sends.filter((s) => s.via === "dm")).toHaveLength(1));
+    expect(sends.map((s) => s.via)).toEqual(["dm"]);
+    expect(sends[0]?.ids).toEqual(["fb:up:q1", "fb:down:q1"]);
+    await client.destroy();
+  });
+
+  it("editReply が失効して DM に切り替えたときも DM 側は 👍👎 だけ", async () => {
+    const client = setup();
+    const { interaction, sends } = askFake({ editThrows: unknownInteractionError() });
+    client.emit(Events.InteractionCreate, interaction);
+    await vi.waitFor(() => expect(sends.filter((s) => s.via === "dm")).toHaveLength(1));
+    expect(sends.find((s) => s.via === "dm")?.ids).toEqual(["fb:up:q1", "fb:down:q1"]);
+    await client.destroy();
+  });
+});
+
+describe("handleButton の 📌 / 📢(ADR-0040)", () => {
+  interface Posted {
+    content: string;
+    allowedMentions: unknown;
+  }
+  function keepShareButton(
+    customId: string,
+    opts: {
+      userId?: string;
+      dmThrowsAt?: number;
+      channel?: "ok" | "missing" | "throws";
+      postThrowsAt?: number;
+    } = {},
+  ): {
+    interaction: ButtonInteraction;
+    replies: { content: string; flags?: number; components?: unknown[] }[];
+    edits: { content: string; components?: unknown[] }[];
+    updates: { content: string; components?: unknown[] }[];
+    dms: { content: string; allowedMentions: unknown }[];
+    posted: Posted[];
+    fetchedChannels: string[];
+    calls: string[];
+  } {
+    const replies: { content: string; flags?: number; components?: unknown[] }[] = [];
+    const edits: { content: string; components?: unknown[] }[] = [];
+    const updates: { content: string; components?: unknown[] }[] = [];
+    const dms: { content: string; allowedMentions: unknown }[] = [];
+    const posted: Posted[] = [];
+    const fetchedChannels: string[] = [];
+    const calls: string[] = [];
+    let n = 0;
+    const channel = {
+      isSendable: () => true,
+      send: async (m: Posted) => {
+        if (opts.postThrowsAt !== undefined && posted.length === opts.postThrowsAt) {
+          throw new Error("Missing Access");
+        }
+        posted.push(m);
+        n += 1;
+        return { id: `m${n}`, url: `https://discord.com/channels/G/SHARE/m${n}` };
+      },
+    };
+    const interaction = {
+      customId,
+      guildId: "G",
+      replied: false,
+      deferred: false,
+      user: {
+        id: opts.userId ?? "u1",
+        send: async (m: { content: string; allowedMentions: unknown }) => {
+          if (opts.dmThrowsAt !== undefined && dms.length === opts.dmThrowsAt) {
+            throw new DiscordAPIError(
+              { code: RESTJSONErrorCodes.CannotSendMessagesToThisUser, message: "Cannot send" },
+              RESTJSONErrorCodes.CannotSendMessagesToThisUser,
+              403,
+              "POST",
+              "/channels/x/messages",
+              {},
+            );
+          }
+          dms.push(m);
+        },
+      },
+      client: {
+        channels: {
+          fetch: async (id: string) => {
+            fetchedChannels.push(id);
+            if (opts.channel === "throws") throw new Error("Unknown Channel");
+            return opts.channel === "missing" ? null : channel;
+          },
+        },
+      },
+      reply: async (o: { content: string; flags?: number; components?: unknown[] }) => {
+        calls.push("reply");
+        replies.push(o);
+      },
+      deferReply: async () => {
+        calls.push("deferReply");
+        interaction.deferred = true;
+      },
+      editReply: async (o: { content: string; components?: unknown[] }) => {
+        calls.push("editReply");
+        edits.push(o);
+      },
+      update: async (o: { content: string; components?: unknown[] }) => {
+        calls.push("update");
+        updates.push(o);
+      },
+      deferUpdate: async () => {
+        calls.push("deferUpdate");
+        interaction.deferred = true;
+      },
+    };
+    return {
+      interaction: interaction as unknown as ButtonInteraction,
+      replies,
+      edits,
+      updates,
+      dms,
+      posted,
+      fetchedChannels,
+      calls,
+    };
+  }
+
+  function setupStore(over: Partial<QueryRecord> = {}): ReturnType<typeof createMemoryStore> {
+    const store = createMemoryStore();
+    store.recordQuery(answeredRecord(over));
+    return store;
+  }
+  const shareDeps = (
+    logger: Logger,
+    store: ReturnType<typeof createMemoryStore>,
+    share = true,
+  ): BotDeps => ({
+    logger,
+    channels: channels(),
+    store,
+    ...(share ? { shareChannelId: "SHARE", sharedAnswers: store } : {}),
+  });
+  const NOT_ASKER = "この操作は /ask を実行した本人のみ行えます。";
+
+  it("本人以外は 📌 / 📢 / 公開する / やめる を使えない(DM も投稿も記録もしない)", async () => {
+    const { logger, infos } = fakeLogger();
+    const store = setupStore();
+    for (const id of ["fb:keep:q1", "fb:share:q1", "fb:share-confirm:q1", "fb:share-cancel:q1"]) {
+      const b = keepShareButton(id, { userId: "someone-else" });
+      await handleButton(b.interaction, shareDeps(logger, store));
+      expect(b.replies).toEqual([{ content: NOT_ASKER, flags: MessageFlags.Ephemeral }]);
+      expect(b.dms).toEqual([]);
+      expect(b.posted).toEqual([]);
+      expect(b.updates).toEqual([]);
+    }
+    expect(store.getSharedAnswer("q1")).toBeUndefined();
+    expect(infos.filter((i) => i.obj.result === "not_asker")).toHaveLength(4);
+  });
+
+  it("📌: 保存済みの回答を見出し付きで本人に DM し、ephemeral で「DM に保存しました」", async () => {
+    const { logger, infos } = fakeLogger();
+    const store = setupStore();
+    const b = keepShareButton("fb:keep:q1");
+    await handleButton(b.interaction, shareDeps(logger, store));
+    expect(b.calls).toEqual(["deferReply", "editReply"]);
+    expect(b.dms).toHaveLength(1);
+    expect(b.dms[0]?.content).toBe(
+      "📌 /ask の回答(2026-10-07 09:12 JST)\n\n**質問**\n> 勤怠の締め日は?\n\n**回答**\n毎月末です。\n\n出典:\n[1] https://github.com/org/kb/blob/abc/a.md",
+    );
+    expect(b.dms[0]?.allowedMentions).toEqual({ parse: [] });
+    expect(b.edits).toEqual([{ content: KEEP_DONE_MESSAGE }]);
+    // ログに質問・回答の本文を出さない。
+    const keepLog = infos.find((i) => i.obj.action === "keep");
+    expect(keepLog?.obj).toEqual({ queryId: "q1", action: "keep", result: "ok", chunks: 1 });
+  });
+
+  it("📌: 2000 字を超える回答は分割して全チャンクを DM する(Discord 引用付きでも保存はできる)", async () => {
+    const { logger } = fakeLogger();
+    const long = `${"あ".repeat(1500)}\n\n${"い".repeat(1500)}`;
+    const store = setupStore({ answer: long, sourcesJson: DISCORD_CITED_SOURCES });
+    const b = keepShareButton("fb:keep:q1");
+    await handleButton(b.interaction, shareDeps(logger, store));
+    expect(b.dms.length).toBe(2);
+    expect(b.dms.every((d) => d.content.length <= 2000)).toBe(true);
+    expect(b.dms.map((d) => d.content).join("\n\n")).toContain(long);
+    expect(b.edits).toEqual([{ content: KEEP_DONE_MESSAGE }]);
+  });
+
+  it("📌: DM を送れなければ受信設定の案内を ephemeral で返す(token を含む生の例外をログに出さない)", async () => {
+    const { logger, warns } = fakeLogger();
+    const store = setupStore();
+    const b = keepShareButton("fb:keep:q1", { dmThrowsAt: 0 });
+    await handleButton(b.interaction, shareDeps(logger, store));
+    expect(b.edits).toEqual([{ content: KEEP_DM_FAILED_MESSAGE }]);
+    expect(warns).toHaveLength(1);
+    expect(warns[0]).toMatchObject({
+      queryId: "q1",
+      action: "keep",
+      result: "dm_failed",
+      sentChunks: 0,
+      err: {
+        name: "DiscordAPIError[50007]",
+        code: RESTJSONErrorCodes.CannotSendMessagesToThisUser,
+      },
+    });
+  });
+
+  it("📌: 途中のチャンクで DM が失敗したら一部だけ届いた旨を案内する", async () => {
+    const { logger } = fakeLogger();
+    const store = setupStore({ answer: `${"あ".repeat(1500)}\n\n${"い".repeat(1500)}` });
+    const b = keepShareButton("fb:keep:q1", { dmThrowsAt: 1 });
+    await handleButton(b.interaction, shareDeps(logger, store));
+    expect(b.dms).toHaveLength(1);
+    expect(b.edits).toEqual([{ content: KEEP_DM_PARTIAL_MESSAGE }]);
+  });
+
+  it("📌 / 📢: 記録の無い回答は拒否する", async () => {
+    const { logger } = fakeLogger();
+    const store = createMemoryStore();
+    for (const id of ["fb:keep:nope", "fb:share:nope"]) {
+      const b = keepShareButton(id);
+      await handleButton(b.interaction, shareDeps(logger, store));
+      expect(b.replies).toEqual([
+        { content: RECORD_NOT_FOUND_MESSAGE, flags: MessageFlags.Ephemeral },
+      ]);
+      expect(b.dms).toEqual([]);
+    }
+  });
+
+  it("📢: 確認画面(ephemeral・公開する / やめる)を出すだけで、まだ投稿しない", async () => {
+    const { logger } = fakeLogger();
+    const store = setupStore();
+    const b = keepShareButton("fb:share:q1");
+    await handleButton(b.interaction, shareDeps(logger, store));
+    expect(b.replies).toHaveLength(1);
+    expect(b.replies[0]?.content).toBe(shareConfirmMessage("SHARE"));
+    expect(b.replies[0]?.content).toBe(
+      "この回答を <#SHARE> に公開します。質問と回答がメンバー全員に見えます。",
+    );
+    expect(b.replies[0]?.flags).toBe(MessageFlags.Ephemeral);
+    expect(customIdsOf(b.replies[0]?.components)).toEqual([
+      "fb:share-confirm:q1",
+      "fb:share-cancel:q1",
+    ]);
+    expect(b.posted).toEqual([]);
+    expect(store.getSharedAnswer("q1")).toBeUndefined();
+  });
+
+  it("公開する: 共有チャンネルにだけ投稿し(メンションは質問者のみ)、記録して確認画面をリンクに書き換える", async () => {
+    const { logger, infos } = fakeLogger();
+    const store = setupStore({ answer: "@everyone <@&999> 毎月末です。<@888>" });
+    const b = keepShareButton("fb:share-confirm:q1");
+    await handleButton(b.interaction, shareDeps(logger, store));
+    expect(b.fetchedChannels).toEqual(["SHARE"]);
+    expect(b.calls).toEqual(["deferUpdate", "editReply"]);
+    expect(b.posted).toEqual([
+      {
+        content:
+          "📢 <@u1> さんの /ask の共有\n\n**質問**\n> 勤怠の締め日は?\n\n**回答**\n@everyone <@&999> 毎月末です。<@888>",
+        allowedMentions: { parse: [], users: ["u1"] },
+      },
+    ]);
+    expect(b.edits).toEqual([
+      { content: "公開しました: https://discord.com/channels/G/SHARE/m1", components: [] },
+    ]);
+    expect(store.getSharedAnswer("q1")).toMatchObject({
+      queryId: "q1",
+      channelId: "SHARE",
+      messageId: "m1",
+      sharedBy: "u1",
+    });
+    const okLog = infos.find((i) => i.obj.action === "share-confirm");
+    expect(okLog?.obj).toEqual({
+      queryId: "q1",
+      action: "share-confirm",
+      result: "ok",
+      chunks: 1,
+      channelId: "SHARE",
+      messageId: "m1",
+    });
+  });
+
+  it("公開する: 長い回答は分割して投稿し、全チャンクに同じメンション制限を付ける", async () => {
+    const { logger } = fakeLogger();
+    const store = setupStore({ answer: `${"あ".repeat(1500)}\n\n${"い".repeat(1500)}` });
+    const b = keepShareButton("fb:share-confirm:q1");
+    await handleButton(b.interaction, shareDeps(logger, store));
+    expect(b.posted).toHaveLength(2);
+    for (const p of b.posted) {
+      expect(p.content.length).toBeLessThanOrEqual(2000);
+      expect(p.allowedMentions).toEqual({ parse: [], users: ["u1"] });
+    }
+    expect(store.getSharedAnswer("q1")?.messageId).toBe("m1");
+  });
+
+  it("やめる: 確認画面を書き換えるだけ(投稿も記録もしない)", async () => {
+    const { logger } = fakeLogger();
+    const store = setupStore();
+    const b = keepShareButton("fb:share-cancel:q1");
+    await handleButton(b.interaction, shareDeps(logger, store));
+    expect(b.updates).toEqual([{ content: SHARE_CANCELLED_MESSAGE, components: [] }]);
+    expect(b.posted).toEqual([]);
+    expect(store.getSharedAnswer("q1")).toBeUndefined();
+  });
+
+  it("二重共有は拒否する(📢 も 公開する も・リンク付き)", async () => {
+    const { logger } = fakeLogger();
+    const store = setupStore();
+    await handleButton(
+      keepShareButton("fb:share-confirm:q1").interaction,
+      shareDeps(logger, store),
+    );
+    const link = "https://discord.com/channels/G/SHARE/m1";
+    const again = keepShareButton("fb:share:q1");
+    await handleButton(again.interaction, shareDeps(logger, store));
+    expect(again.replies).toEqual([
+      { content: alreadySharedMessage(link), flags: MessageFlags.Ephemeral },
+    ]);
+    expect(alreadySharedMessage(link)).toBe(`この回答はすでに共有されています: ${link}`);
+    const confirm = keepShareButton("fb:share-confirm:q1");
+    await handleButton(confirm.interaction, shareDeps(logger, store));
+    expect(confirm.updates).toEqual([{ content: alreadySharedMessage(link), components: [] }]);
+    expect(confirm.posted).toEqual([]);
+  });
+
+  it("投稿前の予約が残っている(処理中)ときも投稿しない", async () => {
+    const { logger } = fakeLogger();
+    const store = setupStore();
+    store.claimSharedAnswer({
+      queryId: "q1",
+      sharedAt: "2026-10-07T10:00:00+09:00",
+      channelId: "SHARE",
+      sharedBy: "u1",
+    });
+    const b = keepShareButton("fb:share-confirm:q1");
+    await handleButton(b.interaction, shareDeps(logger, store));
+    expect(b.updates).toEqual([{ content: alreadySharedMessage(null), components: [] }]);
+    expect(b.posted).toEqual([]);
+  });
+
+  it("Discord 引用付きの回答は、偽造された 公開する でも拒否する(ADR-0038)", async () => {
+    const { logger, infos } = fakeLogger();
+    const store = setupStore({ sourcesJson: DISCORD_CITED_SOURCES });
+    const share = keepShareButton("fb:share:q1");
+    await handleButton(share.interaction, shareDeps(logger, store));
+    expect(share.replies).toEqual([
+      { content: SHARE_DISCORD_CITED_MESSAGE, flags: MessageFlags.Ephemeral },
+    ]);
+    const b = keepShareButton("fb:share-confirm:q1");
+    await handleButton(b.interaction, shareDeps(logger, store));
+    expect(b.updates).toEqual([{ content: SHARE_DISCORD_CITED_MESSAGE, components: [] }]);
+    expect(b.fetchedChannels).toEqual([]);
+    expect(b.posted).toEqual([]);
+    expect(store.getSharedAnswer("q1")).toBeUndefined();
+    expect(infos.some((i) => i.obj.result === "discord_cited")).toBe(true);
+  });
+
+  it("出典が読めない記録も共有しない(安全側)", async () => {
+    const { logger } = fakeLogger();
+    const store = setupStore({ sourcesJson: "{broken" });
+    const b = keepShareButton("fb:share-confirm:q1");
+    await handleButton(b.interaction, shareDeps(logger, store));
+    expect(b.updates).toEqual([{ content: SHARE_DISCORD_CITED_MESSAGE, components: [] }]);
+    expect(b.posted).toEqual([]);
+  });
+
+  it("共有先が未設定なら 📢 / 公開する を拒否する", async () => {
+    const { logger } = fakeLogger();
+    const store = setupStore();
+    const share = keepShareButton("fb:share:q1");
+    await handleButton(share.interaction, shareDeps(logger, store, false));
+    expect(share.replies).toEqual([
+      { content: SHARE_UNAVAILABLE_MESSAGE, flags: MessageFlags.Ephemeral },
+    ]);
+    const b = keepShareButton("fb:share-confirm:q1");
+    await handleButton(b.interaction, shareDeps(logger, store, false));
+    expect(b.updates).toEqual([{ content: SHARE_UNAVAILABLE_MESSAGE, components: [] }]);
+    expect(b.fetchedChannels).toEqual([]);
+  });
+
+  it("投稿に失敗したら予約を外して失敗を伝える(再試行できる)", async () => {
+    const { logger, warns } = fakeLogger();
+    const store = setupStore();
+    for (const channel of ["missing", "throws"] as const) {
+      const b = keepShareButton("fb:share-confirm:q1", { channel });
+      await handleButton(b.interaction, shareDeps(logger, store));
+      expect(b.edits).toEqual([{ content: SHARE_FAILED_MESSAGE, components: [] }]);
+      expect(store.getSharedAnswer("q1")).toBeUndefined();
+    }
+    const first = keepShareButton("fb:share-confirm:q1", { postThrowsAt: 0 });
+    await handleButton(first.interaction, shareDeps(logger, store));
+    expect(first.edits).toEqual([{ content: SHARE_FAILED_MESSAGE, components: [] }]);
+    expect(store.getSharedAnswer("q1")).toBeUndefined();
+    expect(warns.every((w) => (w as { result?: string }).result === "post_failed")).toBe(true);
+    // 再試行は成功する。
+    const retry = keepShareButton("fb:share-confirm:q1");
+    await handleButton(retry.interaction, shareDeps(logger, store));
+    expect(store.getSharedAnswer("q1")?.messageId).toBe("m1");
+  });
+
+  it("続きのチャンクの投稿に失敗しても、先頭を投稿済みとして記録する(二重投稿させない)", async () => {
+    const { logger } = fakeLogger();
+    const store = setupStore({ answer: `${"あ".repeat(1500)}\n\n${"い".repeat(1500)}` });
+    const b = keepShareButton("fb:share-confirm:q1", { postThrowsAt: 1 });
+    await handleButton(b.interaction, shareDeps(logger, store));
+    expect(b.posted).toHaveLength(1);
+    expect(store.getSharedAnswer("q1")?.messageId).toBe("m1");
+    expect(b.edits).toEqual([
+      {
+        content: shareDoneMessage("https://discord.com/channels/G/SHARE/m1", true),
+        components: [],
+      },
+    ]);
   });
 });

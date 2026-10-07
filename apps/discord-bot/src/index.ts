@@ -388,6 +388,8 @@ async function main(): Promise<void> {
         }
       : undefined;
 
+  // ADR-0040: 📢 共有の投稿先(ホームチャンネル優先・無ければ通知チャンネル)。
+  const shareChannelId = ops.home_channel_ids[0] ?? ops.channel_id;
   const bot = createBot({
     logger,
     queue,
@@ -425,6 +427,9 @@ async function main(): Promise<void> {
     ...(discordIndexStore !== undefined
       ? { discordSearchScope: (i) => searchScopeFromInteraction(i, channels) }
       : {}),
+    // ADR-0040: 📢 共有の投稿先。ホームチャンネル(ops.home_channel_ids の先頭・#knowledge_sharing)を優先し、
+    // 未設定なら従来の通知チャンネル(ops.channel_id)。どちらも無ければ 📢 を出さない。
+    ...(shareChannelId !== null ? { shareChannelId, sharedAnswers: store } : {}),
   });
   clientForPanel = bot;
   // ADR-0038 D3: Discord 本文インデックスの同期(イベント + 起動時の取り込み + 定期照合)。
