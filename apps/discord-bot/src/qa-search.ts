@@ -106,6 +106,10 @@ export function createQaSearch(deps: QaSearchFactoryDeps = {}): QaSearch {
               ...(input.onProgress !== undefined ? { onProgress: input.onProgress } : {}),
               // 正常終了時の中断(ADR-0035 追記)。ABORTED は shouldRetryAsk の対象外なので再試行しない。
               ...(input.signal !== undefined ? { signal: input.signal } : {}),
+              // ADR-0038 D6: /ask の discord_search(渡されたときだけ)。
+              ...(input.inProcessTools !== undefined
+                ? { inProcessTools: input.inProcessTools }
+                : {}),
               ...(input.onAttempt !== undefined
                 ? {
                     onUsage: (u: AgentRunUsage) => {

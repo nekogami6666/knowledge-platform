@@ -7,6 +7,7 @@
 // --- Agent SDK ラッパ(agentic search) ---
 export {
   type AgentEffort,
+  type AgentInProcessTool,
   type AgentModelUsage,
   type AgentProgressEvent,
   type AgentQueryFn,
@@ -17,6 +18,9 @@ export {
   createContainmentHook,
   DEFAULT_ALLOWED_TOOLS,
   DEFAULT_DISALLOWED_TOOLS,
+  defineInProcessTool,
+  IN_PROCESS_MCP_SERVER,
+  inProcessToolName,
   isModelSubstituted,
   type LlmDeps,
   runAgentSearch,

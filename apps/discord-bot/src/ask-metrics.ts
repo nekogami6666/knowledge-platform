@@ -20,6 +20,7 @@
  * - 検索の観測値(最終結果から・検索が成功しなかった場合は null): numTurns / durationApiMs /
  *   deniedToolCalls / notFound / citations(モデルが返した数)/ validCitations(検証を通った数)/
  *   requestedModel / actualModel
+ * - Discord 本文検索(ADR-0038): discordSearch({ calls, hits }。機能 OFF なら null。本文は出さない)
  * - 使用量(**全試行の合計**。形式エラーで再試行した回・最終的に失敗した回も含む。試行が無ければ null):
  *   searchAttempts(検索の試行回数)/ inputTokens / outputTokens / cacheCreationInputTokens /
  *   cacheReadInputTokens / totalCostUsd / modelUsage(モデル別の合計)。inputTokens はキャッシュ分を
@@ -178,6 +179,8 @@ export interface AskPipelineMetrics {
   search: AskSearchMetrics | null;
   /** 検索の使用量(全試行の合計・検索が失敗しても試行があれば入る)。 */
   usage: AskUsageMetrics | null;
+  /** Discord 本文検索(ADR-0038)の呼び出し回数と返した件数。機能 OFF・stub では null / 省略。 */
+  discordSearch?: { calls: number; hits: number } | null;
   failure: AskFailure | null;
 }
 
@@ -312,6 +315,7 @@ export function buildAskCompletionLog(input: AskCompletionInput): Record<string,
     modelUsage: u?.modelUsage ?? null,
     requestedModel: s?.requestedModel ?? null,
     actualModel: s?.actualModel ?? null,
+    discordSearch: m?.discordSearch ?? null,
     expired: input.expired,
     fallbackChunks: input.fallbackChunks,
   };

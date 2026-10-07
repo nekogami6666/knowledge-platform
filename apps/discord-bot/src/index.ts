@@ -51,6 +51,8 @@ import {
 import { attachDiscordIndexListeners, createDiscordIndexSource } from "./discord-index-discord.js";
 import { createDiscordIndexStore, type DiscordIndexStore } from "./discord-index-store.js";
 import { createDiscordIndexSync } from "./discord-index-sync.js";
+import { searchScopeFromInteraction } from "./discord-search-scope.js";
+import { createDiscordSearchSession } from "./discord-search-tool.js";
 import { parseEnv, parsePositiveIntEnv } from "./env.js";
 import { createFreshnessDmWorker, type FreshnessApplyDeps } from "./freshness-flow.js";
 import type { InterviewCommandDeps } from "./interview-commands.js";
@@ -276,6 +278,16 @@ async function main(): Promise<void> {
   });
 
   const onAsk: AskHandler = (question, ctx) => {
+    // ADR-0038 D5/D6: 本文インデックスが有効なら、質問者の検索範囲で discord_search を作る
+    // (範囲が判定できない・空ならツールは渡さず、discord 引用は全て破棄される)。
+    const discordSearch =
+      discordIndexStore !== undefined && ctx.discordScope !== undefined
+        ? createDiscordSearchSession({
+            store: discordIndexStore,
+            scope: ctx.discordScope ?? { guildId: "", channelIds: new Set() },
+            maxResults: discordIndexConfig.max_results,
+          })
+        : undefined;
     const deps: AskDeps = {
       // 検索範囲は毎回 registry から読む(ADR-0036)。
       getRepos: () => registry.scope(),
@@ -298,6 +310,7 @@ async function main(): Promise<void> {
       ...(ctx.signal !== undefined ? { signal: ctx.signal } : {}),
       // ADR-0035 D5: discord 側の進捗表示へ sync/search/tool_use を流す。
       ...(ctx.onProgress !== undefined ? { onProgress: ctx.onProgress } : {}),
+      ...(discordSearch !== undefined ? { discordSearch } : {}),
     };
     return handleAskRequest(
       {
@@ -408,6 +421,10 @@ async function main(): Promise<void> {
     ...(interviewDeps !== undefined ? { interview: interviewDeps } : {}),
     // ADR-0028 UI: 面談パネルのコンポーネント応答(未注入なら無反応)。
     ...(panelDeps !== undefined ? { interviewPanel: panelDeps } : {}),
+    // ADR-0038 D5: /ask の Discord 本文検索の範囲(本文インデックスが有効なときだけ)。
+    ...(discordIndexStore !== undefined
+      ? { discordSearchScope: (i) => searchScopeFromInteraction(i, channels) }
+      : {}),
   });
   clientForPanel = bot;
   // ADR-0038 D3: Discord 本文インデックスの同期(イベント + 起動時の取り込み + 定期照合)。

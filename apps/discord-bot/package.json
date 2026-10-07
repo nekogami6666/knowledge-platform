@@ -27,6 +27,10 @@
     "./collector": {
       "types": "./dist/collector-session.d.ts",
       "default": "./dist/collector-session.js"
+    },
+    "./discord-search": {
+      "types": "./dist/discord-search.d.ts",
+      "default": "./dist/discord-search.js"
     }
   },
   "scripts": {

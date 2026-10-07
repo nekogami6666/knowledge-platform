@@ -60,6 +60,7 @@ import {
   type VoiceConfig,
 } from "./config.js";
 import type { BotStore } from "./db.js";
+import type { DiscordSearchScope } from "./discord-search-scope.js";
 import { splitForDiscord } from "./format.js";
 import { type FreshnessApplyDeps, handleFreshnessReaction } from "./freshness-flow.js";
 import { handleInterviewCommand, type InterviewCommandDeps } from "./interview-commands.js";
@@ -142,6 +143,11 @@ export type AskHandler = (
     onProgress?: (ev: AskProgressEvent) => void;
     /** 正常終了時の中断(ADR-0035 追記)。index.ts が AskDeps.signal へ渡す。 */
     signal?: AbortSignal;
+    /**
+     * Discord 本文検索の範囲(ADR-0038 D5)。機能が有効なときだけ設定される(判定不能は null)。
+     * undefined = 機能 OFF。
+     */
+    discordScope?: DiscordSearchScope | null;
   },
 ) => Promise<AskResult>;
 
@@ -196,6 +202,11 @@ export interface BotDeps {
   interview?: InterviewCommandDeps;
   /** 面談パネル(ADR-0028 UI)。vcEnabled + interview_panel_channel_id の環境でのみ注入。 */
   interviewPanel?: InterviewPanelDeps;
+  /**
+   * /ask の Discord 本文検索の範囲を interaction から計算する(ADR-0038 D5)。本文インデックスが有効な
+   * 環境でのみ注入する。キューで順番が来た時点で計算する(待っている間の権限変更も反映する)。
+   */
+  discordSearchScope?: (interaction: ChatInputCommandInteraction) => DiscordSearchScope | null;
 }
 
 /**
@@ -774,6 +785,9 @@ async function runAcceptedAsk(a: AcceptedAsk): Promise<void> {
           reporter.onEvent(ev);
         },
         signal,
+        ...(deps.discordSearchScope !== undefined
+          ? { discordScope: deps.discordSearchScope(interaction) }
+          : {}),
       });
     });
     // 中断側が先に決着した場合でも task の失敗を unhandled rejection にしない。

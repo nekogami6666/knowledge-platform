@@ -130,6 +130,25 @@ describe("validateCitations (修正5: LLM 返却を信頼しない多層検証)"
     expect(validateCitations(ok, synced, exists)).toHaveLength(1);
     expect(validateCitations(ng, synced, exists)).toEqual([]);
   });
+
+  it("ADR-0038 D7: 許可集合を渡したら、今回ツールが返した permalink の discord 引用だけ通す", () => {
+    const returned = "https://discord.com/channels/1/2/3";
+    const other = "https://discord.com/channels/1/9/9"; // 形式は正しいが返していない(捏造・KB から写した等)
+    const cs: QaCitation[] = [
+      { kind: "discord", url: returned },
+      { kind: "discord", url: other },
+      { kind: "github_pr", repo: "org/minutes", number: 3 },
+    ];
+    const noop = () => null;
+    expect(validateCitations(cs, synced, exists, noop, new Set([returned]))).toEqual([
+      { kind: "discord", url: returned },
+      { kind: "github_pr", repo: "org/minutes", number: 3 },
+    ]);
+    // 機能有効だがツールが何も返していない → discord 引用は全て破棄。
+    expect(validateCitations(cs, synced, exists, noop, new Set())).toEqual([
+      { kind: "github_pr", repo: "org/minutes", number: 3 },
+    ]);
+  });
 });
 
 describe("stale KB 注記(§6.7 / C8: stale エントリの引用は除外せずフラグを付けて通す)", () => {
@@ -497,6 +516,7 @@ describe("handleAskRequest synthetic 統合(§6.2 受け入れ条件)", () => {
       validateMs: 2000,
       elapsedMs: 4000,
       sync: null, // 従来の一括同期(perRepo 未指定)では件数を持たない
+      discordSearch: null,
       failure: null,
       search: {
         numTurns: 9,

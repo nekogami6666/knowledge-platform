@@ -1,0 +1,112 @@
+{
+  "_comment": "ADR-0038 の discord_search 経路の fixture(synthetic・ADR-0002)。権限ビットは 10 進文字列(ViewChannel=1024, ReadMessageHistory=65536)。",
+  "now": "2026-10-01T12:00:00+09:00",
+  "guild": {
+    "id": "1000",
+    "ownerId": "5900",
+    "rolePermissions": { "1000": "66560", "2001": "0", "2002": "0" }
+  },
+  "permanent_exclude": ["3003"],
+  "bot": { "id": "5999", "roleIds": ["2002"] },
+  "members": {
+    "alice": { "id": "5001", "roleIds": ["2001"] },
+    "bob": { "id": "5002", "roleIds": [] }
+  },
+  "channels": [
+    { "id": "3001", "name": "general", "parentId": "900", "overwrites": [] },
+    {
+      "id": "3002",
+      "name": "dev",
+      "parentId": "900",
+      "overwrites": [
+        { "id": "1000", "type": "role", "allow": "0", "deny": "1024" },
+        { "id": "2001", "type": "role", "allow": "1024", "deny": "0" },
+        { "id": "2002", "type": "role", "allow": "1024", "deny": "0" }
+      ]
+    },
+    { "id": "3003", "name": "hr", "parentId": "900", "overwrites": [] },
+    {
+      "id": "3004",
+      "name": "bot-hidden",
+      "parentId": "900",
+      "overwrites": [{ "id": "2002", "type": "role", "allow": "0", "deny": "1024" }]
+    }
+  ],
+  "threads": [{ "id": "4001", "name": "リリース相談", "parentId": "3001" }],
+  "messages": [
+    {
+      "key": "general-decision",
+      "channelId": "3001",
+      "author": "山田",
+      "createdAt": "2026-09-29T10:00:00+09:00",
+      "content": "勤怠システムの締め日を 25 日に変更することに決定しました"
+    },
+    {
+      "key": "thread-release",
+      "channelId": "4001",
+      "author": "佐藤",
+      "createdAt": "2026-09-30T15:00:00+09:00",
+      "content": "勤怠システムのリリースは 10 月第 2 週で調整中"
+    },
+    {
+      "key": "dev-incident",
+      "channelId": "3002",
+      "author": "鈴木",
+      "createdAt": "2026-09-30T18:00:00+09:00",
+      "content": "勤怠システムの障害原因は DB のロック待ち"
+    },
+    {
+      "key": "hr-excluded",
+      "channelId": "3003",
+      "author": "高橋",
+      "createdAt": "2026-09-30T19:00:00+09:00",
+      "content": "勤怠システムと評価面談の日程"
+    },
+    {
+      "key": "bot-hidden",
+      "channelId": "3004",
+      "author": "田中",
+      "createdAt": "2026-09-30T20:00:00+09:00",
+      "content": "勤怠システムの bot に見えない話"
+    },
+    {
+      "key": "too-old",
+      "channelId": "3001",
+      "author": "山田",
+      "createdAt": "2026-05-01T10:00:00+09:00",
+      "content": "勤怠システムの初期の検討(初回取り込みの 90 日より前)"
+    }
+  ],
+  "cases": [
+    {
+      "id": "ds-001",
+      "asker": "alice",
+      "args": { "query": "勤怠システム" },
+      "expect": ["general-decision", "thread-release", "dev-incident"]
+    },
+    {
+      "id": "ds-002",
+      "asker": "bob",
+      "args": { "query": "勤怠システム" },
+      "expect": ["general-decision", "thread-release"]
+    },
+    {
+      "id": "ds-003",
+      "asker": "bob",
+      "args": { "query": "障害原因", "channel": "dev" },
+      "expect": []
+    },
+    {
+      "id": "ds-004",
+      "asker": "alice",
+      "args": { "query": "DB" },
+      "expect": ["dev-incident"]
+    },
+    {
+      "id": "ds-005",
+      "asker": "bob",
+      "args": { "query": "締め日", "since": "2026-09-01", "channel": "#general" },
+      "expect": ["general-decision"]
+    }
+  ]
+}

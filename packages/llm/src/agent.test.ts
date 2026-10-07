@@ -2,11 +2,15 @@ import type { Options } from "@anthropic-ai/claude-agent-sdk";
 import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import {
+  type AgentInProcessTool,
   type AgentQueryFn,
   buildAgentEnv,
   createContainmentHook,
   DEFAULT_ALLOWED_TOOLS,
   DEFAULT_DISALLOWED_TOOLS,
+  defineInProcessTool,
+  IN_PROCESS_MCP_SERVER,
+  inProcessToolName,
   isModelSubstituted,
   runAgentSearch,
   sanitizeModelUsage,
@@ -697,5 +701,87 @@ describe("SDK の使用量・費用の転記(段階 1-1 計測)", () => {
       },
     );
     expect(res.value.answer).toBe("A");
+  });
+});
+
+describe("プロセス内ツール(ADR-0038 D6: mcpServers の例外)", () => {
+  const success = {
+    type: "result",
+    subtype: "success",
+    structured_output: { answer: "A", notFound: false },
+    usage: { input_tokens: 1, output_tokens: 1 },
+  };
+  const echo = defineInProcessTool({
+    name: "discord_search",
+    description: "テスト用",
+    inputShape: { query: z.string().min(1), limit: z.number().int().optional() },
+    handler: async (args) => `q=${args.query}`,
+  });
+  const capture = async (opts: { inProcessTools?: readonly AgentInProcessTool[] }) => {
+    let seen: Options | undefined;
+    const queryFn: AgentQueryFn = ({ options }) => {
+      seen = options;
+      return streamOf(success)({ prompt: "", options });
+    };
+    await runAgentSearch({ ...baseOpts, ...opts }, { queryFn });
+    return seen;
+  };
+
+  it("渡したときだけ mcpServers に載せ、allowedTools に完全名を足す。基本ツール集合・hook・拒否は不変", async () => {
+    const seen = await capture({ inProcessTools: [echo] });
+    expect(Object.keys(seen?.mcpServers ?? {})).toEqual([IN_PROCESS_MCP_SERVER]);
+    expect(seen?.mcpServers?.[IN_PROCESS_MCP_SERVER]).toMatchObject({ type: "sdk" });
+    expect(seen?.strictMcpConfig).toBe(true);
+    expect(seen?.allowedTools).toEqual([
+      ...DEFAULT_ALLOWED_TOOLS,
+      inProcessToolName("discord_search"),
+    ]);
+    expect(inProcessToolName("discord_search")).toBe("mcp__stratum__discord_search");
+    expect(seen?.tools).toEqual([...DEFAULT_ALLOWED_TOOLS]);
+    expect(seen?.disallowedTools).toEqual([...DEFAULT_DISALLOWED_TOOLS]);
+    expect(seen?.hooks?.PreToolUse?.[0]?.hooks).toHaveLength(1);
+    expect(seen?.settings).toEqual({
+      permissions: { blockReadsOutsideWorkingDirectories: true },
+    });
+    expect(seen?.canUseTool).toBeUndefined();
+    expect(seen?.additionalDirectories).toBeUndefined();
+  });
+
+  it("渡さなければ従来どおり(mcpServers・strictMcpConfig のキー自体が無い)", async () => {
+    const seen = await capture({});
+    expect(seen !== undefined && "mcpServers" in seen).toBe(false);
+    expect(seen !== undefined && "strictMcpConfig" in seen).toBe(false);
+    expect(seen?.allowedTools).toEqual([...DEFAULT_ALLOWED_TOOLS]);
+  });
+
+  it("封じ込め hook はプロセス内ツールを判定しない(ファイル系ツールだけを見る)", async () => {
+    const hook = createContainmentHook("/tmp");
+    const out = await hook(
+      {
+        hook_event_name: "PreToolUse",
+        tool_name: inProcessToolName("discord_search"),
+        tool_input: { query: "/etc/passwd" },
+        session_id: "s",
+        transcript_path: "",
+        cwd: "/tmp",
+        tool_use_id: "t",
+      } as never,
+      undefined,
+      { signal: new AbortController().signal },
+    );
+    expect(out).toEqual({});
+  });
+
+  it("defineInProcessTool: 入力を zod で再検証し、不正な名前は定義時に拒否する", async () => {
+    await expect(echo.handler({ query: "勤怠" })).resolves.toBe("q=勤怠");
+    await expect(echo.handler({ query: "" })).rejects.toBeInstanceOf(z.ZodError);
+    expect(() =>
+      defineInProcessTool({
+        name: "Bad-Name",
+        description: "",
+        inputShape: {},
+        handler: async () => "",
+      }),
+    ).toThrow();
   });
 });

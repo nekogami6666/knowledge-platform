@@ -13,6 +13,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join, normalize } from "node:path";
 import { parseLineRange, safeParseEntry } from "@stratum/kb-core";
 import {
+  type AgentInProcessTool,
   type AgentProgressEvent,
   type AgentRunUsage,
   type AgentSearchResult,
@@ -35,6 +36,7 @@ import {
   usageOfResult,
 } from "./ask-metrics.js";
 import type { AnswerStatus, BotStore } from "./db.js";
+import type { DiscordSearchSession } from "./discord-search-tool.js";
 import { formatAnswer } from "./format.js";
 import type { RepoRegistry } from "./repo-registry.js";
 import type { ScopedRepo } from "./repo-scope.js";
@@ -240,18 +242,24 @@ export function isStaleKbEntry(raw: string): boolean {
  * 1) zod は呼び出し側(qaAnswerSchema)で済み 2) ドメイン github/discord のみ
  * 3) repo が同期対象 allowlist 内 4) path トラバーサル拒否
  * 5) lines は形式妥当 + ファイル実在 + ref=resolvedCommit 6) 全滅は呼び出し側が notFound に倒す
+ * discord 引用は形式に加え、allowedDiscordPermalinks が渡されたとき(Discord 本文検索が有効な /ask)は
+ * **今回 discord_search が返した permalink** に限る(= 質問者に見えるメッセージだけ・ADR-0038 D7)。
+ * 未指定(機能 OFF)は従来どおり形式のみ。
  */
 export function validateCitations(
   citations: readonly QaCitation[],
   synced: readonly SyncedRepo[],
   fileExists: (absPath: string) => boolean = existsSync,
   readFile: (absPath: string) => string | null = defaultReadFile,
+  allowedDiscordPermalinks?: ReadonlySet<string>,
 ): ResolvedCitation[] {
   const byRepo = new Map(synced.map((s) => [s.repo, s]));
   const out: ResolvedCitation[] = [];
   for (const c of citations) {
     if (c.kind === "discord") {
-      if (DISCORD_PERMALINK_RE.test(c.url)) out.push({ kind: "discord", url: c.url });
+      if (!DISCORD_PERMALINK_RE.test(c.url)) continue;
+      if (allowedDiscordPermalinks !== undefined && !allowedDiscordPermalinks.has(c.url)) continue;
+      out.push({ kind: "discord", url: c.url });
       continue;
     }
     // github_* は repo が "org/name" 形式かつ同期対象 allowlist 内であること。
@@ -303,6 +311,8 @@ export interface QaSearchInput {
    * 完了ログの費用・トークンを全試行の合計にするために使う。
    */
   onAttempt?: (usage: AgentRunUsage | null) => void;
+  /** プロセス内ツール(ADR-0038 D6。Discord 本文検索が有効な /ask の discord_search)。 */
+  inProcessTools?: readonly AgentInProcessTool[];
 }
 /** 戻りは runAgentSearch と同形(numTurns / durationApiMs を型で落とさない・ADR-0035 D4)。 */
 export type QaSearch = (input: QaSearchInput) => Promise<AgentSearchResult<QaAnswer>>;
@@ -397,6 +407,11 @@ export interface AskDeps {
    * `interrupted` として記録して INTERRUPTED_MESSAGE を返す。
    */
   signal?: AbortSignal;
+  /**
+   * Discord 本文検索(ADR-0038)。機能が有効な /ask では質問者ごとに作って渡す(検索範囲が空ならツールは 0 本)。
+   * 渡したときは discord 引用を「今回ツールが返した permalink」に限る(D7)。未指定 = 機能 OFF(従来どおり)。
+   */
+  discordSearch?: DiscordSearchSession;
 }
 
 export interface AskResult {
@@ -743,6 +758,8 @@ export async function handleAskRequest(req: AskRequest, deps: AskDeps): Promise<
     sync: syncMetrics,
     search,
     usage: usageMetrics ?? usageAcc.total(),
+    // ADR-0038: Discord 本文検索の呼び出し回数と返した件数(本文は出さない)。機能 OFF なら null。
+    discordSearch: deps.discordSearch?.stats() ?? null,
     failure,
   });
   // 関数にするのは、await をまたいだ再判定を TS の型の絞り込みに潰されないようにするため。
@@ -808,6 +825,8 @@ export async function handleAskRequest(req: AskRequest, deps: AskDeps): Promise<
 
     stage = "search";
     deps.onProgress?.({ kind: "search" });
+    // ADR-0038 D6: Discord 本文検索が有効なら、質問者の範囲に閉じた discord_search を渡す。
+    const discordTools = deps.discordSearch?.tools ?? [];
     const result = await deps.search({
       systemPrompt,
       question: req.question,
@@ -815,6 +834,7 @@ export async function handleAskRequest(req: AskRequest, deps: AskDeps): Promise<
       ...(deps.onProgress !== undefined ? { onProgress: deps.onProgress } : {}),
       ...(deps.signal !== undefined ? { signal: deps.signal } : {}),
       onAttempt: (u) => usageAcc.add(u),
+      ...(discordTools.length > 0 ? { inProcessTools: discordTools } : {}),
     });
     timings.searchMs = endStage();
     const { value, usage, requestedModel, actualModel } = result;
@@ -834,6 +854,7 @@ export async function handleAskRequest(req: AskRequest, deps: AskDeps): Promise<
           synced,
           deps.fileExists ?? existsSync,
           deps.readFile ?? defaultReadFile,
+          deps.discordSearch?.returnedPermalinks,
         );
     // ADR-0035 D4 / 段階 1-1: ターン数・トークン等は完了ログ(discord.ts)に載せる。
     search = searchMetricsOf(result, valid.length);

@@ -20,12 +20,14 @@
  *   これらはコンテナ層の隔離(別 uid 実行等・ADR-0006 D1)を置き換えるものではなく、その内側の多層防御。
  */
 import {
+  createSdkMcpServer,
   type HookCallback,
   type Options,
   query,
   type ThinkingConfig,
+  tool,
 } from "@anthropic-ai/claude-agent-sdk";
-import type { z } from "zod";
+import { type ZodRawShape, z } from "zod";
 import { zodToJsonSchema } from "zod-to-json-schema";
 import { LlmError, type LlmErrorCode } from "./errors.js";
 import { type ModelRole, modelIdFor } from "./models.js";
@@ -111,6 +113,81 @@ export type AgentEffort = "low" | "medium" | "high";
 /** 拡張思考の有無(ADR-0035 D6 の実験ノブ)。未指定なら SDK 既定。 */
 export type AgentThinking = "adaptive" | "disabled";
 
+/**
+ * 呼び出し元が渡すプロセス内ツール(ADR-0038 D6。SDK のプロセス内 MCP サーバとして載せる)。
+ * アプリ側が Agent SDK / MCP の型に依存しないよう、形は {@link defineInProcessTool} で作る。
+ * handler の戻り値はモデルへ返すテキスト。例外はツールのエラー結果としてモデルへ返し、検索自体は止めない。
+ */
+export interface AgentInProcessTool {
+  name: string;
+  description: string;
+  /** 入力の zod raw shape(z.object の中身)。SDK が JSON Schema 化してモデルに見せる。 */
+  inputShape: ZodRawShape;
+  /** 入力は handler 内で再検証済み(SDK 側の検証と二重)。 */
+  handler: (args: unknown) => Promise<string>;
+}
+
+/** プロセス内ツールを載せる MCP サーバ名(固定)。モデルから見えるツール名は `mcp__<server>__<name>`。 */
+export const IN_PROCESS_MCP_SERVER = "stratum";
+/** プロセス内ツールの呼び出し上限 ms(固定クエリ・読み取り専用のため通常は ms 単位で終わる)。 */
+const IN_PROCESS_TOOL_TIMEOUT_MS = 30_000;
+const IN_PROCESS_TOOL_NAME_RE = /^[a-z][a-z0-9_]{0,63}$/;
+
+/** モデル・allowedTools から見えるプロセス内ツールの完全名。 */
+export function inProcessToolName(name: string): string {
+  return `mcp__${IN_PROCESS_MCP_SERVER}__${name}`;
+}
+
+/**
+ * プロセス内ツールを定義する(ADR-0038 D6)。入力は zod で検証してから handler に渡す。
+ * 名前は英小文字・数字・`_` のみ(ツール名の衝突・MCP 名の正規化による取り違えを避ける)。
+ */
+export function defineInProcessTool<S extends ZodRawShape>(def: {
+  name: string;
+  description: string;
+  inputShape: S;
+  handler: (args: z.infer<z.ZodObject<S>>) => Promise<string>;
+}): AgentInProcessTool {
+  if (!IN_PROCESS_TOOL_NAME_RE.test(def.name)) {
+    throw new Error(`プロセス内ツール名が不正です: ${def.name}`);
+  }
+  const schema = z.object(def.inputShape);
+  return {
+    name: def.name,
+    description: def.description,
+    inputShape: def.inputShape,
+    handler: async (args) => def.handler(schema.parse(args)),
+  };
+}
+
+/** プロセス内ツール群を SDK の MCP サーバ設定にする(読み取り専用の注記・遅延ロードしない)。 */
+function inProcessMcpServer(tools: readonly AgentInProcessTool[]) {
+  return createSdkMcpServer({
+    name: IN_PROCESS_MCP_SERVER,
+    version: "1.0.0",
+    // ToolSearch は基本ツール集合に無いため、遅延ロードされると呼べなくなる。
+    alwaysLoad: true,
+    timeout: IN_PROCESS_TOOL_TIMEOUT_MS,
+    tools: tools.map((t) =>
+      tool(
+        t.name,
+        t.description,
+        t.inputShape,
+        async (args) => {
+          try {
+            return { content: [{ type: "text" as const, text: await t.handler(args) }] };
+          } catch (err) {
+            const reason =
+              err instanceof z.ZodError ? "入力が不正です" : "ツールの実行に失敗しました";
+            return { content: [{ type: "text" as const, text: reason }], isError: true };
+          }
+        },
+        { annotations: { readOnlyHint: true }, alwaysLoad: true },
+      ),
+    ),
+  });
+}
+
 export interface AgentSearchOptions<T> {
   /** UsageRecorder のラベル(アプリ名)。 */
   app: string;
@@ -147,6 +224,11 @@ export interface AgentSearchOptions<T> {
    * なら呼ばない。listener の例外は握る。
    */
   onUsage?: (u: AgentRunUsage) => void;
+  /**
+   * プロセス内ツール(ADR-0038 D6)。渡したときだけ `mcpServers` に載せ、`allowedTools` に個別に加える。
+   * 基本ツール集合(`tools`)と封じ込め hook は変えない(hook はファイル系ツールだけを判定する)。
+   */
+  inProcessTools?: readonly AgentInProcessTool[];
 }
 
 /** 1 回の実行の使用量(onUsage)。キャッシュ・費用は result に無ければキー自体を持たない。 */
@@ -382,9 +464,12 @@ export async function runAgentSearch<T>(
   // + tools で基本ツール集合自体を allowedTools に絞る(allowedTools:[] でも既定では cwd 配下の Read/Grep/Glob が
   // 通るため・ADR-0037 実験)。disallowedTools は冗長な明示拒否。
   // 読み取り範囲の封じ込め(ADR-0037): deny のみを返す PreToolUse hook + SDK の
-  // blockReadsOutsideWorkingDirectories。mcpServers / agents / canUseTool / toolAliases / additionalDirectories は
-  // 能力・到達範囲を広げうるため意図的に未設定のまま維持する(§9.5)。
+  // blockReadsOutsideWorkingDirectories。agents / canUseTool / toolAliases / additionalDirectories は
+  // 能力・到達範囲を広げうるため意図的に未設定のまま維持する(§9.5)。mcpServers は呼び出し元が明示的に渡した
+  // プロセス内ツールだけ(ADR-0038 D6 の例外。外部の MCP サーバは載せず、strictMcpConfig で外部設定も読まない)。
   const requestedModel = modelIdFor(opts.role);
+  const inProcessTools = opts.inProcessTools ?? [];
+  const inProcessNames = inProcessTools.map((t) => inProcessToolName(t.name));
   const options: Options = {
     systemPrompt: opts.systemPrompt,
     model: requestedModel,
@@ -394,7 +479,13 @@ export async function runAgentSearch<T>(
     // 会話記録(検索で読んだ社内文書の本文を含む)を ~/.claude/projects に残さない(2026-10-01)。
     persistSession: false,
     tools: [...allowedTools],
-    allowedTools: [...allowedTools],
+    allowedTools: [...allowedTools, ...inProcessNames],
+    ...(inProcessTools.length > 0
+      ? {
+          mcpServers: { [IN_PROCESS_MCP_SERVER]: inProcessMcpServer(inProcessTools) },
+          strictMcpConfig: true,
+        }
+      : {}),
     disallowedTools: [...DEFAULT_DISALLOWED_TOOLS],
     // flag 設定層(settingSources:[] でも適用される)。managedSettings は IT 管理設定がある環境で
     // 既定で捨てられるため使わない(ADR-0037)。
