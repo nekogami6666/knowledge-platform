@@ -4,6 +4,7 @@
 - **版**: v0.1(ADR-0001で採択)
 - **作成日**: 2026-06-10
 - **ステータス**: レビュー待ち(本ドキュメント自体が最初のADRの題材となる)
+- **転記メモ(2026-10-07・レビュー用の下書き)**: ADR-0034〜0040 と ADR-0018 / ADR-0035 / ADR-0036 の追記の決定を §3.3・§4.6・§5.1・§5.2・§6.2・§7.4・§8.3・§9.2・§9.3・§9.5 に転記した。転記時点でこれらの ADR(ADR-0018 を除く)は `proposed`(実装は main に反映済み)。ADR の採択(`accepted`)とこのメモの削除はレビューで行う
 
 ---
 
@@ -148,7 +149,7 @@
 
 1. **入口**: 会議議事録(既存)/ Discord スレッド(💡)/ 音声メモ / PR・Issue
 2. **中間**: バッチ群が原本を読み、ナレッジ候補を **PR として** knowledge-base に提案 → 人間がワンタップ承認(マージ)
-3. **出口**: discord-bot が knowledge-base + minutes + 開発リポジトリを agentic search し、引用付きで回答
+3. **出口**: discord-bot が knowledge-base + minutes + 開発リポジトリを agentic search し、引用付きで回答(有効時は Discord 本文も質問者が閲覧できる範囲で検索する・ADR-0038)
 4. **還流**: 未回答・低評価の質問が `questions/` に積まれ、専門家への 1 問依頼 → 回答がナレッジ化される
 
 ---
@@ -331,9 +332,15 @@ discord-bot のローカル SQLite(コンテナ内 `/data/bot.db` = VM の `~/st
 
 | テーブル | 用途 |
 |---|---|
-| `queries` | /ask の全クエリ・回答・評価(👍👎)・所要時間・トークン消費 |
+| `queries` | /ask の全クエリ・回答・評価(👍👎)・所要時間・トークン消費。`answer_status` は `answered` / `unanswered` / `delivery_failed` / `timeout` / `error` に加え、`timeout_skipped`(受付から期限を過ぎて順番が来たため検索しなかった)・`interrupted`(再起動で中断した)(ADR-0035 追記 D2'/D7。この 2 つは question_queue に積まない) |
 | `pending_actions` | 送信済み確認ボタン(鮮度確認・gap 回答依頼)の状態 |
 | `rate_limits` | ユーザ/チャンネル別の利用制御 |
+| `inflight_asks` | 処理中の /ask(interaction token・受付時刻・相関 ID。質問本文は持たない)。完了時に即削除し、強制終了後の起動時に元の応答を「中断しました」へ書き換えるために使う(ADR-0035 追記 D8) |
+| `shared_answers` | 📢 で共有した回答の記録(1 回答 1 回・投稿先とメッセージ ID)(ADR-0040 D4) |
+
+`inflight_asks` / `shared_answers` は `CREATE TABLE IF NOT EXISTS` で開くたびに作る追加のみの表で、`user_version` を消費しない(bot.db を共有するホスト側バッチは読まない)。
+
+Discord 本文インデックス(ADR-0038)は bot.db とは**別ファイル**(コンテナ内 `/data/discord-index.db`・env `DISCORD_INDEX_DB_PATH`)に置く。/ask の検索用に限った Discord メッセージ本文(保持 180 日)で、読むのは bot プロセス内の検索ツールだけ(ホスト側バッチ・KB へは出さない)。既定 OFF(`discord-index.yaml` の `enabled: true` で有効化。OFF のときはファイルを作らない)。ロールバックはファイル(と `-wal` / `-shm`)の削除(ADR-0038 D1/D2/D10)
 
 リポ完結バッチ(GitHub Actions: extractor / pr-miner / expertise-mapper / interview-kit)は SQLite を持たず、カーソルは `knowledge-base/_meta/state.json` に commit する(Actions はステートレスなため)。bot ローカル状態に触るバッチ(gap-tracker・ADR-0014 / freshness-checker・ADR-0019)は例外で、bot と同じ VM 上の systemd user timer で動き `bot.db`(`pending_actions` 等)を共有する。
 
@@ -352,7 +359,7 @@ discord-bot のローカル SQLite(コンテナ内 `/data/bot.db` = VM の `~/st
 | Discord クライアント | discord.js | v14 系 |
 | LLM(全タスク) | Claude Agent SDK(`@anthropic-ai/claude-agent-sdk`)を `packages/llm` の `runAgentSearch` 経由で使用 | 単発採点(judge)もツール無しの Agent SDK。第一者直叩き `@anthropic-ai/sdk` は撤去(ADR-0009) |
 | LLM プロバイダ | Claude Platform on AWS(`CLAUDE_CODE_USE_ANTHROPIC_AWS=1`) | Anthropic 運用・AWS Marketplace 課金。Amazon Bedrock とは別物(ADR-0008、ADR-0007 を supersede) |
-| 使用モデル | §5.2 のとおり 3 段使い分け | モデル ID は `packages/llm/models.ts` で一元管理。**ハードコード禁止** |
+| 使用モデル | §5.2 のとおり 3 段使い分け + /ask 専用の `qa`(ADR-0039) | モデル ID は `packages/llm/models.ts` で一元管理。**ハードコード禁止** |
 | GitHub 連携 | GitHub App + Octokit(`octokit`) | PAT は不採用(§9) |
 | スキーマ検証 | zod | frontmatter / 設定 / LLM 構造化出力すべて zod を単一の正とする |
 | frontmatter I/O | gray-matter | |
@@ -368,13 +375,14 @@ discord-bot のローカル SQLite(コンテナ内 `/data/bot.db` = VM の `~/st
 
 ### 5.2 LLM モデルの使い分け
 
-コスト・レイテンシ・品質のバランスのため 3 段構成とする。モデル ID・用途対応は `packages/llm/models.ts` の設定オブジェクトのみで定義し、全アプリはロール名(`fast` / `standard` / `deep`)で参照する。
+コスト・レイテンシ・品質のバランスのため 3 段構成とし、/ask の回答生成だけは専用ロール `qa` を使う(ADR-0039)。モデル ID・用途対応は `packages/llm/models.ts` の設定オブジェクトのみで定義し、全アプリはロール名(`fast` / `standard` / `deep` / `qa`)で参照する。
 
 | ロール | モデル(2026-06 時点) | 用途 |
 |---|---|---|
 | `fast` | `claude-haiku-4-5-20251001` | 分類・ルーティング・💡スレッドの一次要約・鮮度確認文面生成 |
-| `standard` | `claude-sonnet-4-6` | Q&A 回答生成、ナレッジ抽出、PR マイニング、矛盾検出 |
+| `standard` | `claude-sonnet-4-6` | ナレッジ抽出、PR マイニング、矛盾検出 |
 | `deep` | `claude-opus-4-8` | 月次の横断分析、インタビュー質問生成、専門性マップの トピック統合 |
+| `qa` | `claude-sonnet-5-5` | /ask の回答生成(agentic search)だけ。golden eval の run-qa も同じロールで走る(ADR-0039。2026-10-01 の比較実験で `standard` より約 2.5 倍速く費用は約半分。バッチは品質確認まで `standard` のまま) |
 
 - モデルは更新されるため、四半期ごとに `models.ts` を見直す(ADR 起票)
 - 料金・レート制限は実装時に必ず公式( https://docs.claude.com/en/docs/about-claude/pricing )を参照し、推測で見積もらない
@@ -428,22 +436,24 @@ Discord Gateway(WebSocket)受信とボタンインタラクションには常駐
 
 ### 6.2 C1 `discord-bot` — ① Q&A Bot(最優先実装)
 
-**トリガー**: スラッシュコマンド `/ask <質問文>`、または Bot へのメンション。
+**トリガー**: スラッシュコマンド `/ask <質問文>`、または Bot へのメンション。受け付けるのはホームチャンネル(`ops.yaml` の `home_channel_ids`・運用では #knowledge_sharing とその中のスレッド)だけで、それ以外のチャンネルでは本人にだけ利用場所を案内する(ADR-0018 追記 D8)。利用者は `ops.yaml` の `ask_role_ids`(社内のチームロール)のいずれかを持つメンバーに限る(ADR-0036 D7)。いずれも対象外なら defer・検索・記録・レート予算の消費をしない。
 
 **処理フロー**:
 
-1. 受信即時に「調べています…」をエフェメラルでなく**スレッド返信**で投稿(検索過程と回答を後から全員が参照できるようにする)。以後、回答までは 5 秒間隔で「順番待ち(前に N 件)」「調べています… 経過 N 秒 / 参照 N ファイル」と進捗を更新する(ADR-0035 D5。ツール名と回数のみを表示し、パスや内容は出さない)
-2. ローカルの作業ディレクトリで対象リポジトリ(`minutes`, `knowledge-base`, 設定された開発リポジトリ群)を `git fetch && git reset --hard && git clean -fd`(shallow clone を起動時に作成し、以後 fetch のみ)。`clean -fd` は `reset --hard` が消さない未追跡ファイル(同一 clone を共有する gap-tracker/freshness の staging 残骸)を除去し、未 commit ファイルへの permalink 生成を防ぐ。認証トークンは `.git/config` に永続化しない(fetch は URL 引数渡し・origin は毎同期でトークン無し URL に冪等上書き。ADR-0013 D1(b) と同流儀 — cwd 配下は agentic search の読み取り面のため・§9.5)
-3. Agent SDK `query()` を起動。許可ツールは **Read / Grep / Glob のみ**(Bash・Write・ネットワークは無効化)。システムプロンプトの要点:
+1. 受信即時に「調べています…」を**実行者本人限定の ephemeral 返信**で投稿する(ADR-0034。質問エコー・回答・出典・エラー・ボタンを含む応答一式が本人にだけ見える。全員が参照できる共有の正典は KB 本体)。以後、回答までは 5 秒間隔で「順番待ち(前に N 件)」「調べています… 経過 N 秒 / 参照 N ファイル」と進捗を更新する(ADR-0035 D5。ツール名と回数のみを表示し、パスや内容は出さない)
+2. ローカルの作業ディレクトリで対象リポジトリを `git fetch && git reset --hard && git clean -fd`(shallow clone を起動時に作成し、以後 fetch のみ)。対象は `repos.yaml` の `repos:`(手動指定。`minutes`・`knowledge-base` 等)と、任意の `all_visible`(clone トークンで見える org のリポ全部 − アーカイブ・フォーク・除外リスト。明示オプトイン・既定 OFF。ADR-0036 D1〜D3)の和集合。同期はリポ単位で行い、最終成功同期から `ASK_SYNC_TTL_MS`(既定 60 秒)以内で作業ツリーがクリーンかつ HEAD が記録と一致するリポは fetch しない。同期に失敗しても最終成功が `ASK_SYNC_MAX_STALENESS_MS`(既定 6 時間)以内なら前回データで検索し、回答末尾に「※ ナレッジは <時刻> 時点の内容です(最新化に失敗)」を付ける。許容期間を超えたリポは、手動指定なら検索せずにその旨を返し、`all_visible` 由来なら今回の対象から外す(ADR-0035 追記「同期の再利用と前回データの利用」)。同期・検索・鮮度確認の KB 書き込みは同じ直列キューで直列化する(ADR-0036 D5。`all_visible` の 10 分ごとの定期同期と対象外 clone の削除(D4/D5)は未実装)。`clean -fd` は `reset --hard` が消さない未追跡ファイルを除去し、未 commit ファイルへの permalink 生成を防ぐ(gap-tracker / freshness-checker は bot とは別の clone ディレクトリ `clones-gap` / `clones-freshness` を使い、bot の clone は共有しない・docs/deploy/README.md)。clone は `core.symlinks=false` で展開し、コミットされた symlink を通常ファイルとして扱う(ADR-0037 D4)。認証トークンは `.git/config` に永続化しない(fetch は URL 引数渡し・origin は毎同期でトークン無し URL に冪等上書き。ADR-0013 D1(b) と同流儀 — cwd 配下は agentic search の読み取り面のため・§9.5)
+3. Agent SDK `query()` を `qa` ロール(§5.2・ADR-0039)で起動。許可ツールは **Read / Grep / Glob のみ**(Bash・Write・ネットワークは無効化)。読み取りは cwd の実体パス配下に封じ込める(§9.5・ADR-0037)。Discord 本文インデックスが有効なときに限り、質問者が閲覧できるチャンネルだけを検索する読み取り専用のプロセス内ツール `discord_search` を 1 本追加し、Discord の引用はこのツールが今回返した permalink だけを受け付ける(ADR-0038 D5〜D7)。システムプロンプトの要点:
    - 回答は日本語、簡潔に(Discord で読める長さ: 原則 1,500 字以内)
    - **すべての主張に出典を付ける**。出典は `kb-core` の provenance 形式 → Bot が GitHub permalink に変換して脚注表示
    - 根拠が見つからない場合は推測せず、`NOT_FOUND` を構造化出力で返す(P6)
    - 矛盾する記録を見つけたら両論併記し、新しい方を優先しつつ矛盾を明示
-4. 回答メッセージに 👍 / 👎 ボタンを付与
+4. 回答メッセージに 👍 / 👎 ボタンを付与(操作できるのは /ask の実行者本人のみ・ADR-0034 D3)。回答ありの場合はさらに「📌 残す」(保存済みの最終回答を本人へ DM)と「📢 共有」(確認画面を経て共有チャンネル = ホームチャンネルへ公開。1 回答 1 回まで。Discord の発言を引用した回答には出さない)を付す(ADR-0040)。interaction の失効で回答を DM で届けた場合は 👍👎 のみ
 5. SQLite `queries` に質問・回答・出典・トークン消費・所要時間を記録
 6. `NOT_FOUND` または 👎 の場合、`questions/open/` への登録キューに積む(即 commit せず、gap-tracker が日次でまとめて commit。Bot から Git への書き込み経路を最小化するため)
 
-**失敗時挙動**: Agent SDK のタイムアウト(上限 600 秒・env `ASK_TIMEOUT_MS`。ADR-0035 D1)・API エラー時は、その旨を返し `queries` に失敗として記録。タイムアウトはリトライしない(ADR-0032)。直列キュー待ちで interaction token(15 分)が失効した場合は本人 DM で配送する(ADR-0035 D2)。git 実行は 1 コマンド 60 秒で打ち切る。
+**失敗時挙動**: Agent SDK のタイムアウト(上限 600 秒・env `ASK_TIMEOUT_MS`。ADR-0035 D1)・API エラー時は、その旨を返し `queries` に失敗として記録。タイムアウトはリトライしない(ADR-0032)。受付から 14 分(interaction token 15 分 − 余裕 1 分)を過ぎて直列キューの順番が来た質問は検索せず、本人に再質問を案内して `timeout_skipped` で記録する(question_queue には積まない)。期限内に始まった検索が長引き、配送時点で期限を過ぎた回答は本人 DM で配送する(ADR-0035 D2'。DM も失敗したらログに残す)。git 実行は 1 コマンド 60 秒で打ち切る。
+
+再起動(SIGTERM / SIGINT)時は新規 /ask を「再起動中です」と断り、処理中(順番待ちを含む)の質問を最大 `SHUTDOWN_GRACE_MS`(既定 60 秒)待ってから中断し、表示を再質問の案内に書き換えて `interrupted` で記録する(compose の `stop_grace_period: 90s`)。強制終了(SIGKILL / OOM)で残った処理中の質問は、次回起動時に受付から 15 分未満のものだけ元の応答を同じ案内に書き換える(`inflight_asks`・§4.6)(ADR-0035 追記 D7/D8)。
 
 **受け入れ条件**:
 - 既存議事録に答えが存在する質問 10 件(ゴールデンセット初版)に対し、8 件以上で正しい出典付き回答
@@ -568,6 +578,7 @@ Discord Gateway(WebSocket)受信とボタンインタラクションには常駐
 
 - pino による構造化 JSON ログ。相関 ID(query id / batch run id)を全ログに付与
 - 障害通知は #stratum-ops へ(バッチ失敗、Bot 再起動、スキーマ検証失敗)。専用監視 SaaS は導入しない(P7)。再起動は Docker の restart policy + rootless docker.service(linger)に委ねる(ADR-0016 D5・ADR-0010 D4)
+- チャンネルの呼称: 本書の #stratum-ops は運用通知チャンネル(`ops.yaml` の `channel_id` 等)の呼称で、本番では #knowledge_sharing がこれを兼ねる(docs/admin-guide.md §2・ADR-0040 D3)。/ask の受付と頼まれていない案内の返信もホームチャンネル(`ops.home_channel_ids`・運用では同じ #knowledge_sharing)に限る(ADR-0018 追記 D7〜D10)
 
 ### 7.5 タイムゾーンと言語
 
@@ -594,7 +605,7 @@ Discord Gateway(WebSocket)受信とボタンインタラクションには常駐
 
 | ファイル | ロール | 責務 |
 |---|---|---|
-| `prompts/qa/answer.md` | standard | /ask の回答生成(検索エージェントの system prompt) |
+| `prompts/qa/answer.md` | qa(ADR-0039) | /ask の回答生成(検索エージェントの system prompt) |
 | `prompts/extractor/extract.md` | standard | 議事録 → decisions/learnings/open_questions の構造化抽出 |
 | `prompts/extractor/reconcile.md` | standard | 抽出候補と既存 KB の重複・矛盾判定 |
 | `prompts/capture/triage.md` | fast | 💡スレッドのナレッジ候補判定 |
@@ -632,12 +643,16 @@ GitHub App の権限は最小権限で発行する:
 - default-deny は維持する(bot が見えないチャンネルの Gateway イベントはそもそも届かない)。恒久除外(§9.3)は denylist として `channels.yaml` の `permanent_exclude` に残す
 - Message Content Intent を使用するため、Developer Portal での Intent 有効化と、サーバ管理者・全メンバーへの「Bot が読むチャンネル一覧」の周知を運用要件とする(録音同意の既存運用に揃える)
 - DM・プライベートチャンネルは収集対象外(③-a 参照)
+- 利用者に応える場所はホームチャンネル(`ops.yaml` の `home_channel_ids`・既定 `[]` = 全チャンネル。運用では #knowledge_sharing。スレッドは親 ID でも照合)に絞る。可視性ゲートと permanent_exclude が先に効き、ホームはその中で「応える場所」をさらに絞る。/ask はホームだけで受け付け、gap 回答の拒否案内はホーム内で依頼らしい投稿(q-ID 形を含む)への返信にだけ出し、代理マージの「ops チャンネルでお願いします」案内は出さない。💡・音声メモ・DM・面談パネル・ops 通知は対象外(ADR-0018 追記 D7〜D10)
+- **Discord 本文の保存(/ask の検索用・既定 OFF)**: `discord-index.yaml` の `enabled: true` のときに限り、bot に見える(実効 ViewChannel)∧ permanent_exclude でないギルドのテキストチャンネル(通常・アナウンス)と公開スレッド・フォーラム投稿の本文を別ファイル(§4.6)に保存する(スレッドは自身と親の両方が通ること)。private thread・bot / webhook / システムメッセージ・空本文は保存しない。同期はイベント + 起動時の取り込み(既定 90 日)+ 定期照合(既定 6 時間ごと・直近 7 日)で、編集・削除・見えなくなったチャンネルを反映し、保持期間(既定 180 日)を過ぎた本文を消す。検索時は質問者が `ViewChannel` ∧ `ReadMessageHistory` を持つチャンネル ∩ いま bot に見えるチャンネルだけを対象にする(判定できなければ検索しない)。ADR-0017 D7(本文を残さない)を /ask の検索用に限って置き換えるもので、extractor(ADR-0033)の fetch → extract → discard は変えない(ADR-0038 D1〜D5・D9)。周知(上記)には「/ask で本文が検索される」ことを加える(ADR-0038 D8)
 
 ### 9.3 機微情報の除外規程(全抽出系プロンプトに埋め込む)
 
 以下は**取り込み・要約・引用のすべてを禁止**: 人事評価・処遇・給与・採用候補者個人情報、健康・私生活に関する個人情報、顧客との契約金額等の営業機密のうち経営が指定するもの、認証情報そのもの(トークン・パスワードが議事録に書かれていた場合は伏字化して #stratum-ops に警告)。
 
 加えて、特定チャンネル(例: #hr, #management)を恒久除外する。除外は ADR-0018 の可視性ゲートとは独立の denylist として経営承認の上で `channels.yaml` の `permanent_exclude` に明記し、スレッドは親チャンネル ID でも照合する(万一 bot ロールに見えてしまっても読まない二重防御・ADR-0018 D3)。
+
+Discord 本文インデックス(§9.2・ADR-0038)について: 保存段階で効くのは permanent_exclude と bot の可視性だけで、これは緩めない。上記カテゴリの**コードでの自動判定(分類器)は無く**、従来どおりプロンプト(qa/answer)で抽出・引用・要約を禁止する(確率的な防御)。機微な話題は permanent_exclude のチャンネルか bot を入れない private チャンネルで行う運用を維持する(ADR-0038 D8)。/ask の回答を 📢 で共有チャンネルへ公開する機能(§6.2)は、Discord の発言を引用した回答では使えない(ADR-0040 D3)。
 
 ### 9.4 外部送信の整理
 
@@ -650,6 +665,8 @@ GitHub App の権限は最小権限で発行する:
 
 - Q&A エージェントの許可ツールを Read/Grep/Glob に限定(Bash・Write・ネットワーク禁止)→ 文書内に指示が混入しても実行能力がない
 - ただし **cwd は封じ込め境界ではない**(ADR-0006): Agent SDK の Read/Grep/Glob は cwd 外の絶対パス(`~/.ssh`・`/proc/self/environ`・兄弟 clone 等)もプロンプトなしで読めるため、cwd 制限だけでは任意ホストファイルの漏洩チャネルになりうる。**封じ込めは deploy 層(OS/コンテナ FS サンドボックス)で担保**し、コード側は cwd を境界と誤認させない設計にする。実運用の実行境界は GitHub Actions エフェメラル runner(ADR-0013)
+- **agent 内の読み取り封じ込め(ADR-0037)**: 常駐 bot では agent が cwd 外(`/config`・`/data/bot.db`・`/proc/<pid>/environ` 等)を Read できることを本番で確認したため、`packages/llm` の `runAgentSearch`(全呼び出し元に一律)に次の層を重ねる。(1) realpath(cwd) 配下以外のファイル系ツール呼び出しを deny する自前の PreToolUse hook(deny か判定委譲のみを返し、allow・入力の書き換えはしない。判定不能は deny)、(2) SDK の `settings.permissions.blockReadsOutsideWorkingDirectories: true`、(3) `tools` = `allowedTools`(ツール無し単発は名実ともにツール無し)、(4) bot の clone は `core.symlinks=false`。deny 件数は `/ask` の完了ログ(`deniedToolCalls`)で観測する。これらは同一 uid・同一コンテナ内のポリシーであり、agent subprocess の OS 層隔離(別 uid 等)は将来課題として残る
+- **プロセス内ツールの例外(ADR-0038 D6)**: `mcpServers` は未設定を原則とし、例外は呼び出し元が明示的に渡したプロセス内ツールだけ(現状は /ask の `discord_search` 1 本。サーバ名固定・`strictMcpConfig: true`・読み取り専用・固定のプリペアドステートメント・件数上限・質問者の権限で絞った範囲)。stdio / HTTP / SSE の MCP サーバ・`agents`・`canUseTool`・`toolAliases`・`additionalDirectories` は引き続き未設定
 - 抽出系は構造化出力のみを受け取り、出力スキーマ外の挙動(別リポジトリへの書き込み等)を構造的に不可能にする
 - Bot の回答に含まれる URL は GitHub / Discord ドメインのみ許可(リンク先誘導の防止)
 
