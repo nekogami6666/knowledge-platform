@@ -380,9 +380,9 @@ Discord 本文インデックス(ADR-0038)は bot.db とは**別ファイル**(�
 | ロール | モデル(2026-06 時点) | 用途 |
 |---|---|---|
 | `fast` | `claude-haiku-4-5-20251001` | 分類・ルーティング・💡スレッドの一次要約・鮮度確認文面生成 |
-| `standard` | `claude-sonnet-4-6` | ナレッジ抽出、PR マイニング、矛盾検出 |
+| `standard` | `claude-sonnet-5-5` | ナレッジ抽出、PR マイニング、矛盾検出(ADR-0039 追記 D4・2026-10-07 に claude-sonnet-4-6 から移行。議事録抽出の比較で 1 件 2〜5 分 → 10〜30 秒・費用は約 1/3) |
 | `deep` | `claude-opus-4-8` | 月次の横断分析、インタビュー質問生成、専門性マップの トピック統合 |
-| `qa` | `claude-sonnet-5-5` | /ask の回答生成(agentic search)だけ。golden eval の run-qa も同じロールで走る(ADR-0039。2026-10-01 の比較実験で `standard` より約 2.5 倍速く費用は約半分。バッチは品質確認まで `standard` のまま) |
+| `qa` | `claude-sonnet-5-5` | /ask の回答生成(agentic search)だけ。golden eval の run-qa も同じロールで走る(ADR-0039。2026-10-01 の比較実験で当時の `standard`(claude-sonnet-4-6)より約 2.5 倍速く費用は約半分。`standard` と同じモデルだが、片方だけ戻せるよう別ロールのまま残す) |
 
 - モデルは更新されるため、四半期ごとに `models.ts` を見直す(ADR 起票)
 - 料金・レート制限は実装時に必ず公式( https://docs.claude.com/en/docs/about-claude/pricing )を参照し、推測で見積もらない
