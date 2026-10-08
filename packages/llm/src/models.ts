@@ -12,13 +12,15 @@ export type ModelRole = "fast" | "standard" | "deep" | "qa";
  * - fast: 分類・ルーティング・💡スレッドの一次要約・鮮度確認文面生成
  * - standard: Q&A 回答生成・ナレッジ抽出・PR マイニング・矛盾検出
  * - deep: 月次の横断分析・インタビュー質問生成・専門性マップのトピック統合 + golden eval の judge
- * - qa: /ask の回答生成(agentic search)だけ(ADR-0039)。2026-10-01 の比較実験で standard より約 2.5 倍速く
- *   費用は約半分・未回答判定と引用は同等だったため先に切り替える。抽出などのバッチは standard のまま
- *   (品質を確かめてから別途判断)。組織の Claude Code 設定は claude-sonnet-4-6 を許可していない点にも注意。
+ * - qa: /ask の回答生成(agentic search)だけ(ADR-0039)。2026-10-01 の比較実験で旧 standard(claude-sonnet-4-6)
+ *   より約 2.5 倍速く費用は約半分・未回答判定と引用は同等だったため先に切り替えた。
+ * - standard も claude-sonnet-5-5 に移した(ADR-0039 追記 D4・2026-10-07)。議事録抽出の比較で 4〜20 倍速く、
+ *   費用は 1/3 程度。sonnet-4-6 は組織の Claude Code 設定で許可されていない。qa は /ask 専用に分けたまま残す
+ *   (片方だけ戻せるように)。
  */
 export const MODELS: Readonly<Record<ModelRole, string>> = {
   fast: "claude-haiku-4-5-20251001",
-  standard: "claude-sonnet-4-6",
+  standard: "claude-sonnet-5-5",
   deep: "claude-opus-4-8",
   qa: "claude-sonnet-5-5",
 };

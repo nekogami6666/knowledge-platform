@@ -170,7 +170,7 @@ flowchart TB
 
 | モジュール | 役割 | 要点 |
 |---|---|---|
-| [models.ts](../packages/llm/src/models.ts) | ロール→ID レジストリ | `fast=claude-haiku-4-5-20251001` / `standard=claude-sonnet-4-6` / `deep=claude-opus-4-8`。呼び出し側は `modelIdFor(role)` のみ、**ID 直書き禁止**。`STT_MODEL=gpt-4o-transcribe` は別軸 |
+| [models.ts](../packages/llm/src/models.ts) | ロール→ID レジストリ | `fast=claude-haiku-4-5-20251001` / `standard=claude-sonnet-5-5` / `deep=claude-opus-4-8` / `qa=claude-sonnet-5-5`(ADR-0039)。呼び出し側は `modelIdFor(role)` のみ、**ID 直書き禁止**。`STT_MODEL=gpt-4o-transcribe` は別軸 |
 | [prompts.ts](../packages/llm/src/prompts.ts) | `prompts/<app>/<name>.md` ローダ | frontmatter を gray-matter で解析、`role` を検証。**プロンプトのコード直書き禁止**の実体 |
 | [agent.ts](../packages/llm/src/agent.ts) | agentic search ラッパ | `@anthropic-ai/claude-agent-sdk` を **唯一 import** する場所。封じ込めの本体(下図) |
 | [retry.ts](../packages/llm/src/retry.ts) | 指数バックオフ | 既定 maxRetries=3。`RATE_LIMITED(429)/OVERLOADED(529)/TIMEOUT` のみリトライ |
