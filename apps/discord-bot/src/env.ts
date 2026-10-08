@@ -47,6 +47,8 @@ const envSchema = z
     ASK_SYNC_TTL_MS: z.string().optional(),
     /** 同期に失敗したとき前回データで検索してよい期間 ms(既定 21600000 = 6 時間・段階 1-2)。 */
     ASK_SYNC_MAX_STALENESS_MS: z.string().optional(),
+    /** all_visible の定期同期の間隔 ms(既定 600000・ADR-0036 D5)。all_visible が無ければ未使用。 */
+    REPO_SYNC_INTERVAL_MS: z.string().optional(),
     /** VC 録音 sidecar の URL(ADR-0020。compose 内部ネットワーク・例 http://recorder:9488)。未設定なら VC 入口 OFF。 */
     RECORDER_URL: z.string().optional(),
     /** 録音ファイルの共有マウント(sidecar と同一パス・ADR-0020 D4)。 */

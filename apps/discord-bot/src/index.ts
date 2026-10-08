@@ -6,7 +6,7 @@
 import { randomUUID } from "node:crypto";
 import { readFile as fsReadFile, writeFile as fsWriteFile } from "node:fs/promises";
 import { join } from "node:path";
-import { createGhClientFromEnv, type GhClient } from "@stratum/gh-client";
+import { createGhClientFromAuth, createGhClientFromEnv, type GhClient } from "@stratum/gh-client";
 import { validateRepo } from "@stratum/kb-core";
 import {
   createFsPromptStore,
@@ -14,7 +14,6 @@ import {
   nullUsageRecorder,
   type Transcriber,
 } from "@stratum/llm";
-import { withCloneToken } from "@stratum/shared";
 import { type Client, Events, Routes } from "discord.js";
 import { setNotifySecrets } from "./ack.js";
 import {
@@ -70,7 +69,18 @@ import { createLogger, withCorrelation } from "./logger.js";
 import { createCloneMembersLoader, DEFAULT_KB_DIR } from "./members.js";
 import { createQaSearch } from "./qa-search.js";
 import { createRepoRegistry } from "./repo-registry.js";
-import { resolveRepoScope } from "./repo-scope.js";
+import {
+  type CloneCleanupDeps,
+  createPeriodicRepoSync,
+  DEFAULT_REPO_SYNC_INTERVAL_MS,
+  manualScope,
+  nodeCloneFs,
+  type PeriodicRepoSync,
+  removeOutOfScopeClones,
+  resolveScopeOnce,
+  type ScopeResolveDeps,
+  withManagedCloneRecording,
+} from "./repo-sync.js";
 import { createGitRepoSyncer } from "./repos.js";
 import { createSqliteStore } from "./sqlite-store.js";
 import { isoJst } from "./time.js";
@@ -107,9 +117,8 @@ async function main(): Promise<void> {
       "repos.yaml の url に認証情報が埋め込まれています。トークンを GIT_CLONE_TOKEN(env)へ移し、URL から外してください(§9.1)。",
     );
   }
-  const repos = reposConfig.repos.map((r) =>
-    r.url !== undefined ? { ...r, url: withCloneToken(r.url, env.GIT_CLONE_TOKEN) } : r,
-  );
+  // repos: の手動指定(url にトークン注入済み)。KB の dir・鮮度確認の KB 同期はここから引く。
+  const repos = manualScope(reposConfig.repos, env.GIT_CLONE_TOKEN);
   const ops = await loadOps(reader);
   const voice = await loadVoice(reader);
   // ADR-0038: Discord 本文インデックス(既定 OFF。OFF なら DB を作らずイベントも購読しない)。
@@ -118,10 +127,24 @@ async function main(): Promise<void> {
   // members 対応表は KB clone の _meta/members.yaml が唯一の正(ADR-0017 D3)。
   // clone 先 dir は repos.yaml の ops.kb_repo 該当エントリから引く(無ければ既定名)。
   const kbDir = repos.find((r) => r.repo === ops.kb_repo)?.dir ?? DEFAULT_KB_DIR;
-  // 検索範囲(ADR-0036)。all_visible の列挙・定期同期での差し替えは後続(3b-2)で配線する。
-  const registry = createRepoRegistry(
-    resolveRepoScope({ manual: repos, allVisible: null, visible: [] }).repos,
-  );
+  // ADR-0036 D1: all_visible があれば GIT_CLONE_TOKEN で見える org のリポを列挙して検索範囲を決める
+  // (トークンの可視範囲 = 検索範囲)。null なら手動指定のみ(従来挙動・列挙も定期同期もしない)。
+  // 列挙に失敗した起動は手動指定のみで始め、定期同期で再試行する。
+  const allVisible = reposConfig.all_visible;
+  const cloneToken = env.GIT_CLONE_TOKEN;
+  const cloneGh =
+    allVisible !== null && cloneToken !== undefined && cloneToken.length > 0
+      ? createGhClientFromAuth({ kind: "token", token: cloneToken })
+      : undefined;
+  const scopeDeps: ScopeResolveDeps = {
+    manual: reposConfig.repos,
+    allVisible,
+    ...(cloneGh !== undefined ? { listOrgRepos: (org: string) => cloneGh.listOrgRepos(org) } : {}),
+    cloneToken,
+    logger,
+  };
+  const startupScope = allVisible !== null ? await resolveScopeOnce(scopeDeps) : null;
+  const registry = createRepoRegistry(startupScope ?? repos);
   const getMembers = createCloneMembersLoader({ clonesDir: env.CLONES_DIR, kbDir, logger });
 
   // 👍 代理マージ(§6.3): ops.yaml と GitHub 認証が両方揃ったときだけ有効(既定 OFF)。
@@ -141,6 +164,8 @@ async function main(): Promise<void> {
       permanentExclude: channels.permanent_exclude.length,
       membersSource: `${kbDir}/_meta/members.yaml`,
       repos: repos.length,
+      allVisible: allVisible !== null,
+      scope: registry.scope().length,
       proxyMerge: gh !== undefined,
       voiceMemo: voice.channel_id !== null,
       discordIndex: discordIndexConfig.enabled,
@@ -152,7 +177,7 @@ async function main(): Promise<void> {
       "channels.allow は廃止されました(ADR-0018: bot が見えるチャンネルを読みます)。行を削除してください(無視されます)。",
     );
   }
-  if (repos.length === 0) {
+  if (registry.scope().length === 0) {
     logger.warn("repos.yaml が空です。検索対象リポがありません(§14 #5)。");
   }
   if (voice.max_recording_minutes > 22) {
@@ -186,10 +211,21 @@ async function main(): Promise<void> {
   const discordIndexStore: DiscordIndexStore | undefined = discordIndexConfig.enabled
     ? createDiscordIndexStore(env.DISCORD_INDEX_DB_PATH)
     : undefined;
-  const syncer = createGitRepoSyncer(env.CLONES_DIR);
+  const gitSyncer = createGitRepoSyncer(env.CLONES_DIR);
+  // ADR-0036 D4: all_visible 有効時は、列挙由来のリポを新規に clone する前に managed_clones へ記録する
+  // (定期同期と /ask の sync_on_ask 分の両方)。無効なら従来の syncer そのまま。
+  const syncer =
+    allVisible !== null
+      ? withManagedCloneRecording(gitSyncer, {
+          store,
+          clonesDir: env.CLONES_DIR,
+          fs: nodeCloneFs,
+          nowIso: () => isoJst(),
+        })
+      : gitSyncer;
   const promptStore = createFsPromptStore(env.PROMPTS_DIR);
-  // §6.2 /ask の直列キュー。鮮度確認の KB 書き込みも同じキューに載せ、検索中の reset --hard・
-  // 書き込み途中の同期を起こさない(ADR-0035 の既知レース・ADR-0036 D5)。
+  // §6.2 /ask の直列キュー。定期同期(ADR-0036 D5)と鮮度確認の KB 書き込みも同じキューに載せ、
+  // 検索中の reset --hard・書き込み途中の同期を起こさない(ADR-0035 の既知レース)。
   const queue = new SerialQueue();
 
   // §6.7(ADR-0019 D2/D3): 鮮度確認 DM への 👍✏️🗑 応答。👍/🗑 は main 直 commit のため
@@ -204,7 +240,7 @@ async function main(): Promise<void> {
       kbRepo,
       // gh-client の既定と同じ(KB の base ブランチを変える場合はここも設定化する)。
       baseBranch: "main",
-      // KB clone を触る区間(sync → 書き込み → validate → commit)を /ask と直列化する。
+      // KB clone を触る区間(sync → 書き込み → validate → commit)を /ask・定期同期と直列化する。
       // syncKbClone は区間の内側で呼ばれるためキューに積まない(積むとデッドロック)。
       runExclusive: (task) => queue.enqueue(task),
       // 段階 1-2: KB の作業ツリーを触ったら、次の /ask は TTL 内でも KB を同期し直す。
@@ -289,7 +325,7 @@ async function main(): Promise<void> {
           })
         : undefined;
     const deps: AskDeps = {
-      // 検索範囲は毎回 registry から読む(ADR-0036)。
+      // 検索範囲は毎回 registry から読む(all_visible 有効時は定期同期で差し替わる・ADR-0036)。
       getRepos: () => registry.scope(),
       syncer,
       // リポ単位の同期(ADR-0036 D5)を常に使う: TTL 内は fetch せず再利用し、同期に失敗しても
@@ -558,6 +594,38 @@ async function main(): Promise<void> {
   const FRESHNESS_POLL_MS = 10 * 60 * 1000;
   const freshnessTimer = setInterval(() => freshnessWorker.kick(), FRESHNESS_POLL_MS);
   freshnessTimer.unref();
+
+  // ADR-0036 D4/D5: 定期同期(all_visible 有効時のみ)と対象外 clone の削除。終了処理が始まったら
+  // (/ask の受付停止)新しいリポ・チャンクへ進まず、bot.db にも触らない(DB を閉じた後に書かない)。
+  const cleanupDeps: CloneCleanupDeps = {
+    store,
+    clonesDir: env.CLONES_DIR,
+    // repos: の手動指定と KB の dir は managed の記録があっても消さない。
+    protectedDirs: [...reposConfig.repos.map((r) => r.dir), kbDir],
+    fs: nodeCloneFs,
+    logger,
+    isStopped: () => !askLifecycle.accepting,
+  };
+  let periodicSync: PeriodicRepoSync | undefined;
+  if (allVisible !== null) {
+    periodicSync = createPeriodicRepoSync({
+      registry,
+      syncer,
+      resolveScope: () => resolveScopeOnce(scopeDeps),
+      enqueue: (task) => queue.enqueue(task),
+      cleanup: cleanupDeps,
+      logger,
+    });
+    const intervalMs = parsePositiveIntEnv(
+      "REPO_SYNC_INTERVAL_MS",
+      env.REPO_SYNC_INTERVAL_MS,
+      DEFAULT_REPO_SYNC_INTERVAL_MS,
+      (data, msg) => logger.warn(data, msg),
+    );
+    periodicSync.start(intervalMs);
+    logger.info({ intervalMs }, "all_visible の定期同期を有効化しました(ADR-0036 D5)");
+  }
+
   // 起動時レジューム(ADR-0015 D5): 再起動前に受け付けた pending を拾う。
   bot.once(Events.ClientReady, () => {
     // ADR-0035 追記: 強制終了で残った /ask の進捗表示を「中断しました」に書き換える(15 分以内のみ)。
@@ -576,6 +644,17 @@ async function main(): Promise<void> {
     }).catch((err) =>
       logger.warn({ err: safeErrorInfo(err) }, "/ask: 中断した質問の後始末に失敗しました"),
     );
+    if (periodicSync !== undefined) {
+      // ADR-0036 D5: 初回 clone はバックグラウンド(チャンク単位でキューに積む)。clone できたリポから
+      // 検索対象になる。起動時の列挙に成功していればその結果を使う(失敗なら再列挙)。
+      void periodicSync.runOnce(startupScope !== null ? { scope: startupScope } : undefined);
+    } else if (store.listManagedClones().length > 0) {
+      // all_visible を外した(ロールバック)後: bot が作った clone は範囲外なので一度だけ片付ける
+      // (agent の cwd は CLONES_DIR のため、残すと manifest に無くても読める)。
+      void queue
+        .enqueue(() => removeOutOfScopeClones(registry.scope(), cleanupDeps))
+        .catch((err: unknown) => logger.warn({ err }, "managed clone の片付けに失敗しました"));
+    }
     voiceWorker?.kick();
     freshnessWorker.kick();
     // ADR-0028 D1: state:"recording" の interview セッションを復元(冪等 finalize → 次チャンク/完了)。
@@ -594,6 +673,8 @@ async function main(): Promise<void> {
     lifecycle: askLifecycle,
     stopTimers: () => {
       clearInterval(freshnessTimer);
+      // ADR-0036 D5: 定期同期のタイマを止め、実行中の回は次のリポの前で打ち切る(以後 bot.db に触らない)。
+      periodicSync?.stop();
       if (discordIndexTimer !== undefined) clearInterval(discordIndexTimer);
     },
     destroyClient: () => bot.destroy(),

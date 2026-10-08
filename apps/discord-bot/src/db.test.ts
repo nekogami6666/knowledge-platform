@@ -172,3 +172,19 @@ describe("createMemoryStore: shared_answers(ADR-0040)", () => {
     expect(s.getSharedAnswer("unknown")).toBeUndefined();
   });
 });
+
+describe("createMemoryStore: managed_clones(ADR-0036 D4)", () => {
+  it("追加(同じ dir は冪等・最初の createdAt を保つ)→ dir 昇順の一覧 → 削除(未知 dir は no-op)", () => {
+    const s = createMemoryStore();
+    s.addManagedClone({ dir: "biz-minutes", repo: "org/biz-minutes", createdAt: "t1" });
+    s.addManagedClone({ dir: "app", repo: "org/app", createdAt: "t2" });
+    s.addManagedClone({ dir: "app", repo: "org/app", createdAt: "t3" });
+    expect(s.listManagedClones()).toEqual([
+      { dir: "app", repo: "org/app", createdAt: "t2" },
+      { dir: "biz-minutes", repo: "org/biz-minutes", createdAt: "t1" },
+    ]);
+    s.removeManagedClone("app");
+    s.removeManagedClone("unknown");
+    expect(s.listManagedClones().map((c) => c.dir)).toEqual(["biz-minutes"]);
+  });
+});

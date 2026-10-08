@@ -13,7 +13,16 @@ repos:
 # GIT_CLONE_TOKEN で見える org のリポを列挙し、アーカイブ・フォーク・exclude を除いて上の repos: と
 # 和集合にする(repos: 側の指定が優先。exclude は列挙分にだけ効き、repos: の手動指定は外さない)。
 # exclude: リポ名 or "org/name"(大小無視の完全一致)。機密リポは clone しないことで読み取り面から外す。
-# sync_on_ask: /ask のたびに最新化するリポ名(`*` の簡易 glob 可)。それ以外は定期同期のみ。
+# sync_on_ask: /ask のたびに最新化するリポ名(`*` の簡易 glob 可)。それ以外は定期同期のみ
+#   (bot 内で REPO_SYNC_INTERVAL_MS ごと・既定 10 分。初回 clone は起動後にバックグラウンドで行い、
+#   clone できたリポから順に検索対象になる)。
+# 対象外になった(exclude に追加・アーカイブ・見えなくなった)リポの clone は次の定期同期で削除する。
+# 削除するのは bot が列挙由来として新規に作った dir(bot.db の managed_clones)だけで、repos: の手動指定・
+# KB・記録の無い既存 dir には触れない(範囲外かつ記録の無い CLONES_DIR 直下の項目は定期同期で warn する。
+# agent の cwd は CLONES_DIR のため読めてしまう — 有効化前に除外リポの旧 clone を手動で消すこと)。
+# 列挙に失敗した回は前回の範囲のまま・削除しない。all_visible を外して再起動すると、bot が作った clone を
+# 一度だけ片付ける。commit の無い空リポは失敗扱いせず、manifest・引用対象から外す。
+# 前提: ADR-0037(読み取りの封じ込め)が本番で有効なこと。
 # all_visible:
 #   org: org
 #   exclude:

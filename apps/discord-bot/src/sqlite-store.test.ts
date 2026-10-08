@@ -3,7 +3,13 @@ import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import type { BotStore, InflightAskStore, QueryRecord, SharedAnswerStore } from "./db.js";
+import type {
+  BotStore,
+  InflightAskStore,
+  ManagedCloneStore,
+  QueryRecord,
+  SharedAnswerStore,
+} from "./db.js";
 
 /**
  * better-sqlite3 の native バイナリが無い環境(= `pnpm approve-builds better-sqlite3` 未実施)では
@@ -234,7 +240,7 @@ describe.skipIf(!sqliteAvailable())("inflight_asks(ADR-0035 追記・強制終�
     expect(s.getQuery("old-q")?.question).toBe("?");
     s.close();
     const after = openRaw(p);
-    // 版番号は消費しない(3b-2 の v2 managed_clones と番号が衝突しない)。
+    // 版番号は消費しない(managed_clones・shared_answers も同じ流儀)。
     expect(after.pragma("user_version", { simple: true })).toBe(1);
     after.close();
   });
@@ -343,3 +349,66 @@ describe.skipIf(!sqliteAvailable())("shared_answers(ADR-0040・回答の公開�
     after.close();
   });
 });
+
+describe.skipIf(!sqliteAvailable())(
+  "managed_clones(ADR-0036 D4・bot が作った clone の記録)",
+  () => {
+    let createStore: (path: string) => BotStore & ManagedCloneStore;
+    type RawDb = {
+      exec(sql: string): void;
+      pragma(s: string, o?: { simple: boolean }): unknown;
+      close(): void;
+    };
+    let openRaw: (path: string) => RawDb;
+    let dir: string;
+    beforeAll(async () => {
+      ({ createSqliteStore: createStore } = await import("./sqlite-store.js"));
+      const Database = createRequire(import.meta.url)("better-sqlite3") as new (
+        path: string,
+      ) => RawDb;
+      openRaw = (p) => new Database(p);
+      dir = mkdtempSync(join(tmpdir(), "managed-"));
+    });
+    afterAll(() => {
+      rmSync(dir, { recursive: true, force: true });
+    });
+
+    it("追加(同じ dir は冪等・最初の created_at を保つ)→ dir 昇順の一覧 → 削除(未知 dir は no-op)", () => {
+      const s = createStore(":memory:");
+      s.addManagedClone({ dir: "biz-minutes", repo: "org/biz-minutes", createdAt: "t1" });
+      s.addManagedClone({ dir: "app", repo: "org/app", createdAt: "t2" });
+      s.addManagedClone({ dir: "app", repo: "org/app", createdAt: "t3" });
+      expect(s.listManagedClones()).toEqual([
+        { dir: "app", repo: "org/app", createdAt: "t2" },
+        { dir: "biz-minutes", repo: "org/biz-minutes", createdAt: "t1" },
+      ]);
+      s.removeManagedClone("app");
+      s.removeManagedClone("unknown");
+      expect(s.listManagedClones().map((c) => c.dir)).toEqual(["biz-minutes"]);
+      s.close();
+    });
+
+    it("既存 DB を開くと表が追加され、user_version とデータは変わらない・何度開いても冪等", () => {
+      const p = join(dir, "v1.db");
+      const old = createStore(p);
+      old.recordQuery(sampleQuery({ id: "old-q" }));
+      old.close();
+      const raw = openRaw(p);
+      raw.exec("DROP TABLE managed_clones");
+      expect(raw.pragma("user_version", { simple: true })).toBe(1);
+      raw.close();
+
+      const s = createStore(p);
+      s.addManagedClone({ dir: "app", repo: "org/app", createdAt: "t" });
+      // bot が開いたまま、別プロセス相当(ホスト側バッチ)がもう一度開く。
+      const again = createStore(p);
+      expect(again.listManagedClones().map((c) => c.dir)).toEqual(["app"]);
+      expect(again.getQuery("old-q")?.question).toBe("?");
+      again.close();
+      s.close();
+      const after = openRaw(p);
+      expect(after.pragma("user_version", { simple: true })).toBe(1);
+      after.close();
+    });
+  },
+);

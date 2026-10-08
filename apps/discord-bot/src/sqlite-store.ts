@@ -11,6 +11,8 @@ import type {
   BotStore,
   InflightAsk,
   InflightAskStore,
+  ManagedClone,
+  ManagedCloneStore,
   PendingAction,
   QueryRecord,
   RateLimitResult,
@@ -76,8 +78,7 @@ function migrate(db: DB): void {
  * - bot.db はホスト側バッチ(gap-tracker / freshness / stats / recordings-cleanup)と共有しており、
  *   各バッチも同じ createSqliteStore を通る。古いコードのバッチは本表を知らないまま素通りし
  *   (`current >= SCHEMA_VERSION` で migrate を抜ける)、新しいコードのバッチが先に開いても同じ表を作るだけ。
- * - 並行する 3b-2(ADR-0036 D4)が SCHEMA_VERSION 2 で managed_clones を足す予定のため、
- *   本表は版番号を取らずに独立させた(どちらが先にマージされても番号の付け直しが要らない)。
+ * - 後から足した managed_clones・shared_answers も同じ流儀で、版番号は 1 のまま。
  *   将来 migrate の版に畳む場合も、この文は冪等なのでそのまま任意の vN 段へ移せる。
  */
 function ensureInflightAsksTable(db: DB): void {
@@ -105,6 +106,21 @@ function ensureSharedAnswersTable(db: DB): void {
       channel_id TEXT NOT NULL,
       message_id TEXT,
       shared_by TEXT NOT NULL
+    );
+  `);
+}
+
+/**
+ * bot が all_visible の列挙由来として作った clone dir の記録(ADR-0036 D4)。**user_version を消費しない**
+ * (inflight_asks と同じ流儀)。追加のみ・冪等で開くたびに実行する。bot.db を共有するホスト側バッチは
+ * 本表を読まず、古いコードのバッチは素通りする。削除してよい clone はここに記録がある dir だけ。
+ */
+function ensureManagedClonesTable(db: DB): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS managed_clones (
+      dir TEXT PRIMARY KEY,
+      repo TEXT NOT NULL,
+      created_at TEXT NOT NULL
     );
   `);
 }
@@ -168,13 +184,16 @@ function toPendingAction(r: ActionRow): PendingAction {
 }
 
 /** better-sqlite3 による BotStore。path はファイルパス(":memory:" も可)。 */
-export function createSqliteStore(path: string): BotStore & InflightAskStore & SharedAnswerStore {
+export function createSqliteStore(
+  path: string,
+): BotStore & InflightAskStore & SharedAnswerStore & ManagedCloneStore {
   const db: DB = new Database(path);
   db.pragma("journal_mode = WAL");
   db.pragma("busy_timeout = 5000");
   migrate(db);
   ensureInflightAsksTable(db);
   ensureSharedAnswersTable(db);
+  ensureManagedClonesTable(db);
 
   // @feedback を列・VALUES の双方に含めること。QueryRecord に feedback がある以上、
   // 列を欠くと better-sqlite3 の named-param 厳密一致で recordQuery が実行時に throw する。
@@ -223,6 +242,13 @@ export function createSqliteStore(path: string): BotStore & InflightAskStore & S
     "DELETE FROM shared_answers WHERE query_id = ? AND message_id IS NULL",
   );
   const selectShared = db.prepare("SELECT * FROM shared_answers WHERE query_id = ?");
+  const selectManaged = db.prepare("SELECT * FROM managed_clones ORDER BY dir");
+  // 同じ dir の再記録は冪等(最初の created_at を保つ)。
+  const upsertManaged = db.prepare(`
+    INSERT INTO managed_clones (dir, repo, created_at) VALUES (@dir, @repo, @createdAt)
+    ON CONFLICT (dir) DO UPDATE SET repo = excluded.repo
+  `);
+  const deleteManaged = db.prepare("DELETE FROM managed_clones WHERE dir = ?");
 
   return {
     recordQuery(q: QueryRecord) {
@@ -316,6 +342,16 @@ export function createSqliteStore(path: string): BotStore & InflightAskStore & S
         messageId: r.message_id,
         sharedBy: r.shared_by,
       };
+    },
+    listManagedClones(): ManagedClone[] {
+      const rows = selectManaged.all() as Array<{ dir: string; repo: string; created_at: string }>;
+      return rows.map((r) => ({ dir: r.dir, repo: r.repo, createdAt: r.created_at }));
+    },
+    addManagedClone(c) {
+      upsertManaged.run({ dir: c.dir, repo: c.repo, createdAt: c.createdAt });
+    },
+    removeManagedClone(dir) {
+      deleteManaged.run(dir);
     },
     close() {
       db.close();

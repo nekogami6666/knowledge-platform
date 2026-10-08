@@ -154,10 +154,37 @@ export interface SharedAnswerStore {
   getSharedAnswer(queryId: string): SharedAnswer | undefined;
 }
 
+/** bot が all_visible の列挙由来(managed)として作った clone dir の記録(ADR-0036 D4)。 */
+export interface ManagedClone {
+  /** CLONES_DIR 直下の dir 名(1 セグメント)。 */
+  dir: string;
+  /** "org/name"(観測用)。 */
+  repo: string;
+  /** 記録時刻(ISO 8601 JST・§7.5)。 */
+  createdAt: string;
+}
+
+/**
+ * managed clone の記録(ADR-0036 D4。BotStore とは別の口。bot 本体だけが使う)。
+ * 対象外になったリポの clone を消してよいのは、ここに記録がある(= bot が作った)dir だけ。
+ */
+export interface ManagedCloneStore {
+  /** dir 昇順。 */
+  listManagedClones(): ManagedClone[];
+  /** 記録する(同じ dir は冪等。最初の createdAt を保つ)。 */
+  addManagedClone(c: ManagedClone): void;
+  /** 記録を消す(未知 dir は no-op)。 */
+  removeManagedClone(dir: string): void;
+}
+
 /** インメモリ実装(テスト/開発用。native 依存なし)。プロセス終了で消える。 */
-export function createMemoryStore(): BotStore & InflightAskStore & SharedAnswerStore {
+export function createMemoryStore(): BotStore &
+  InflightAskStore &
+  SharedAnswerStore &
+  ManagedCloneStore {
   const inflight = new Map<string, InflightAsk>();
   const shared = new Map<string, SharedAnswer>();
+  const managed = new Map<string, ManagedClone>();
   const queries: QueryRecord[] = [];
   const actions: PendingAction[] = [];
   const counters = new Map<string, number>();
@@ -224,6 +251,18 @@ export function createMemoryStore(): BotStore & InflightAskStore & SharedAnswerS
     getSharedAnswer(queryId) {
       const r = shared.get(queryId);
       return r === undefined ? undefined : { ...r };
+    },
+    listManagedClones() {
+      return [...managed.values()]
+        .sort((a, b) => (a.dir < b.dir ? -1 : a.dir > b.dir ? 1 : 0))
+        .map((c) => ({ ...c }));
+    },
+    addManagedClone(c) {
+      const prev = managed.get(c.dir);
+      managed.set(c.dir, { ...c, createdAt: prev?.createdAt ?? c.createdAt });
+    },
+    removeManagedClone(dir) {
+      managed.delete(dir);
     },
     close() {},
   };
