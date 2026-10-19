@@ -8,5 +8,7 @@ backfill_days: 90 # カーソルが無いチャンネルの初回取り込み(ex
 retention_days: 180 # これより古い本文は削除(backfill_days 以上)
 reconcile_interval_hours: 6 # 停止中の編集・削除を反映する定期照合の周期
 reconcile_window_days: 7 # 定期照合で取り直す範囲
-max_results: 20 # discord_search 1 回で返す上限
+max_results: 8 # discord_search 1 回で返す上限(最大 100)
+excerpt_chars: 200 # 1 件の抜粋の最大文字数(80〜500)
+max_tool_calls: 1 # /ask 1 件で検索できる回数(0 = ツールを渡さない。速さのロールバックの第 1 段)
 max_fetch_per_channel: 10000 # 1 周期でチャンネルあたりに取得する上限

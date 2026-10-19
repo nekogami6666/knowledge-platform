@@ -10,8 +10,12 @@
  *   取りこぼし区間を飛ばす)。
  * - 定期照合は直近 reconcile_window_days を取り直し、取得結果に無い保存済みメッセージを削除する。
  *   削除判定は「取得範囲の下端より後」かつ「取得開始時刻より前に作られた」ID に限る(取得中の新規を消さない)。
+ * - 取り込みは 1 ページ(100 件)ずつ 1 トランザクションで保存し、ページの間でイベントループに処理を返す
+ *   (初回の取り込み中も /ask・Gateway のイベントを止めない・ADR-0038 追記 2026-10-08 A4)。ページの間に
+ *   削除・対象外になったチャンネルは、その周期の残りを書かない(消した直後に古い取得結果で書き戻さない)。
  * 本文はログに出さない(件数のみ・§7.4)。
  */
+import { setImmediate as yieldToEventLoop } from "node:timers/promises";
 import {
   type ChannelGateInput,
   type ChannelsConfig,
@@ -24,6 +28,8 @@ import { compareSnowflake, snowflakeForMs, snowflakeToMs } from "./snowflake.js"
 const DAY_MS = 86_400_000;
 /** tombstone を残す期間(1 周期の取得より十分長ければよい)。 */
 const TOMBSTONE_TTL_MS = DAY_MS;
+/** 取り込みで 1 トランザクションにまとめる件数(Discord の 1 ページ = 100 件)。 */
+export const WRITE_BATCH_SIZE = 100;
 
 /** Discord から取った 1 メッセージ(純粋データ)。 */
 export interface SourceMessage {
@@ -153,6 +159,11 @@ export function createDiscordIndexSync(deps: DiscordIndexSyncDeps): DiscordIndex
   const log = deps.logger ?? noopLogger;
   const excluded = new Set(channels.permanent_exclude);
   let running = false;
+  /**
+   * 周期の途中で削除・対象外になったチャンネル(スレッドは親でも照合)。ページの間に届いたイベントで
+   * 消した本文を、同じ周期の古い取得結果で書き戻さないために使う。周期の開始で空にする。
+   */
+  const purgedInCycle = new Set<string>();
 
   /** 1 件を反映する(対象なら upsert、対象外なら削除)。戻りは upsert の有無。 */
   const apply = (m: SourceMessage, ch: SourceChannel): "upserted" | "deleted" | "none" => {
@@ -178,9 +189,13 @@ export function createDiscordIndexSync(deps: DiscordIndexSyncDeps): DiscordIndex
    * スレッドは親で消える(アーカイブ済みで一覧に無いスレッドの本文も、親が見える限り残す)。
    */
   const purgeGuild = (guildId: string, list: readonly SourceChannel[]): number => {
-    const allowedParents = new Set(
-      list.filter((c) => c.kind !== "thread" && isIndexableChannel(c, channels)).map((c) => c.id),
-    );
+    const allowedParents = new Set<string>();
+    for (const c of list) {
+      if (c.kind === "thread") continue;
+      // 一覧は取得時点のものでありうるため、ここでは印を付けるだけで外さない(外すのは ChannelUpdate だけ)。
+      if (isIndexableChannel(c, channels)) allowedParents.add(c.id);
+      else purgedInCycle.add(c.id);
+    }
     return store.purgeGuildExcept(guildId, allowedParents, excluded);
   };
 
@@ -201,11 +216,24 @@ export function createDiscordIndexSync(deps: DiscordIndexSyncDeps): DiscordIndex
     const cap = config.max_fetch_per_channel;
     const msgs = await source.fetchMessagesAfter(ch.id, fetchFrom, cap);
     report.fetched += msgs.length;
-    for (const m of msgs) {
-      const r = apply(m, ch);
-      if (r === "upserted") report.upserted += 1;
-      else if (r === "deleted") report.deleted += 1;
+    const purged = (): boolean => purgedInCycle.has(ch.id) || purgedInCycle.has(ch.parentChannelId);
+    for (let i = 0; i < msgs.length; i += WRITE_BATCH_SIZE) {
+      // 取得中・ページの間に消されたチャンネルは書かない(カーソルも進めず、次の周期の判定に任せる)。
+      if (purged()) return;
+      const page = msgs.slice(i, i + WRITE_BATCH_SIZE);
+      const upserts: IndexedMessage[] = [];
+      const deletes: string[] = [];
+      for (const m of page) {
+        if (isIndexableMessage(m)) upserts.push(toIndexed(m, ch));
+        else deletes.push(m.id);
+      }
+      for (const r of store.upsertMany(upserts)) {
+        if (r === "inserted" || r === "updated") report.upserted += 1;
+      }
+      report.deleted += store.deleteMessages(deletes, now());
+      await yieldToEventLoop();
     }
+    if (purged()) return;
     const last = msgs[msgs.length - 1];
     const capped = msgs.length >= cap;
     if (capped) report.cappedChannels += 1;
@@ -253,13 +281,17 @@ export function createDiscordIndexSync(deps: DiscordIndexSyncDeps): DiscordIndex
     },
     handleChannelGone(channelId) {
       safe("チャンネル削除の反映", () => {
+        purgedInCycle.add(channelId);
         store.purgeChannel(channelId);
       });
     },
     handleChannelChanged(channel) {
       safe("チャンネル変更の反映", () => {
-        if (isIndexableChannel(channel, channels)) upsertChannelMeta(channel);
-        else {
+        if (isIndexableChannel(channel, channels)) {
+          purgedInCycle.delete(channel.id);
+          upsertChannelMeta(channel);
+        } else {
+          purgedInCycle.add(channel.id);
           const n = store.purgeChannel(channel.id);
           if (n > 0) {
             log.info(
@@ -289,6 +321,7 @@ export function createDiscordIndexSync(deps: DiscordIndexSyncDeps): DiscordIndex
     async runCycle() {
       if (running) return null;
       running = true;
+      purgedInCycle.clear();
       const report: CycleReport = {
         guilds: 0,
         channels: 0,

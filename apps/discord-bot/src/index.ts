@@ -315,13 +315,15 @@ async function main(): Promise<void> {
 
   const onAsk: AskHandler = (question, ctx) => {
     // ADR-0038 D5/D6: 本文インデックスが有効なら、質問者の検索範囲で discord_search を作る
-    // (範囲が判定できない・空ならツールは渡さず、discord 引用は全て破棄される)。
+    // (範囲が判定できない・空、または max_tool_calls: 0 ならツールは渡さず、discord 引用は全て破棄される)。
     const discordSearch =
       discordIndexStore !== undefined && ctx.discordScope !== undefined
         ? createDiscordSearchSession({
             store: discordIndexStore,
             scope: ctx.discordScope ?? { guildId: "", channelIds: new Set() },
             maxResults: discordIndexConfig.max_results,
+            excerptChars: discordIndexConfig.excerpt_chars,
+            maxToolCalls: discordIndexConfig.max_tool_calls,
           })
         : undefined;
     const deps: AskDeps = {
@@ -506,6 +508,9 @@ async function main(): Promise<void> {
         retentionDays: discordIndexConfig.retention_days,
         reconcileIntervalHours: discordIndexConfig.reconcile_interval_hours,
         reconcileWindowDays: discordIndexConfig.reconcile_window_days,
+        maxToolCalls: discordIndexConfig.max_tool_calls,
+        maxResults: discordIndexConfig.max_results,
+        excerptChars: discordIndexConfig.excerpt_chars,
       },
       "Discord 本文インデックスは有効です(ADR-0038)",
     );

@@ -160,6 +160,106 @@ describe.skipIf(!sqliteAvailable())("createDiscordIndexStore(ADR-0038 D2)", () =
     expect(store.counts().messages).toBe(0);
   });
 
+  it("upsertMany: 1 トランザクションで upsert し、FTS・tombstone・古い版の規則は 1 件ずつと同じ", () => {
+    store.upsertMessage(msg({ messageId: "1", content: "古い本文", editedAt: T0 + 10 }));
+    store.deleteMessages(["2"], T0);
+    expect(
+      store.upsertMany([
+        msg({ messageId: "1", content: "さらに古い取得結果" }), // edited_at が保存済みより古い
+        msg({ messageId: "2", content: "削除済みの本文" }), // tombstone
+        msg({ messageId: "3", content: "新しい障害対応メモ" }),
+        msg({ messageId: "3", content: "新しい障害対応メモ" }),
+      ]),
+    ).toEqual(["stale", "tombstoned", "inserted", "unchanged"]);
+    expect(store.upsertMany([])).toEqual([]);
+    expect(search({ fts: ["障害対応"] }).map((h) => h.messageId)).toEqual(["3"]);
+    expect(search({ fts: ["削除済み"] })).toEqual([]);
+    expect(store.counts().messages).toBe(2);
+  });
+
+  it("upsertMany: 途中で失敗したら 1 件も書かない(トランザクション)", () => {
+    const bad = { ...msg({ messageId: "2" }), content: null } as unknown as IndexedMessage;
+    expect(() =>
+      store.upsertMany([msg({ messageId: "1", content: "先に入る本文" }), bad]),
+    ).toThrow();
+    expect(store.counts().messages).toBe(0);
+    expect(search({ fts: ["先に入る"] })).toEqual([]);
+  });
+
+  describe("searchAny(事前検索用の OR 検索・ADR-0038 追記 A3)", () => {
+    const any = (terms: string[], parents = ["c1"], extra = {}) =>
+      store.searchAny({ terms, parentChannelIds: parents, limit: 10, ...extra });
+
+    it("3 文字以上の語の OR・一致した語の数(2 文字の語も数える)の多い順 → bm25 → 新しい順", () => {
+      store.upsertMessage(
+        msg({ messageId: "1", content: "勤怠システムの締め日は 25 日", createdAt: T0 }),
+      );
+      store.upsertMessage(
+        msg({ messageId: "2", content: "勤怠システムの障害", createdAt: T0 + 1 }),
+      );
+      store.upsertMessage(msg({ messageId: "3", content: "締め日の連絡です", createdAt: T0 + 2 }));
+      store.upsertMessage(msg({ messageId: "4", content: "関係ない雑談", createdAt: T0 + 3 }));
+      const hits = any(["勤怠", "システム", "締め日"]);
+      expect(hits.map((h) => [h.messageId, h.matchedTerms])).toEqual([
+        ["1", 3],
+        ["2", 2],
+        ["3", 1],
+      ]);
+      for (const h of hits) expect(typeof h.bm25).toBe("number");
+      // AND の search では 1 件しか当たらない(既存の挙動は変えない)。
+      expect(search({ fts: ["システム", "締め日"] }).map((h) => h.messageId)).toEqual(["1"]);
+    });
+
+    it("一致数が同じなら bm25 → 新しい順・limit で切る", () => {
+      store.upsertMessage(msg({ messageId: "1", content: "リリース", createdAt: T0 }));
+      store.upsertMessage(msg({ messageId: "2", content: "リリース", createdAt: T0 + 1 }));
+      store.upsertMessage(msg({ messageId: "3", content: "リリース", createdAt: T0 + 2 }));
+      expect(any(["リリース"], ["c1"], { limit: 2 }).map((h) => h.messageId)).toEqual(["3", "2"]);
+    });
+
+    it("3 文字以上の語が無ければ LIKE の OR(bm25 は null)・大小無視・重複除去", () => {
+      store.upsertMessage(msg({ messageId: "1", content: "DB の勤怠データ", createdAt: T0 }));
+      store.upsertMessage(msg({ messageId: "2", content: "勤怠の話", createdAt: T0 + 1 }));
+      store.upsertMessage(msg({ messageId: "3", content: "雑談", createdAt: T0 + 2 }));
+      const hits = any(["db", "勤怠", "DB"]);
+      expect(hits.map((h) => [h.messageId, h.matchedTerms, h.bm25])).toEqual([
+        ["1", 2, null],
+        ["2", 1, null],
+      ]);
+      expect(any([" ", ""])).toEqual([]);
+    });
+
+    it("検索範囲・期間は search と同じに絞る(範囲外の本文は返さない・空集合は 0 件)", () => {
+      store.upsertMessage(msg({ messageId: "1", content: "秘密の議論です", createdAt: T0 }));
+      store.upsertMessage(
+        msg({
+          messageId: "2",
+          channelId: "t9",
+          parentChannelId: "c2",
+          threadId: "t9",
+          content: "秘密の議論その2",
+          createdAt: T0 + 5,
+        }),
+      );
+      expect(any(["秘密の"], ["c1"]).map((h) => h.messageId)).toEqual(["1"]);
+      expect(any(["秘密の"], ["c2"]).map((h) => h.messageId)).toEqual(["2"]);
+      expect(any(["秘密の"], [])).toEqual([]);
+      expect(any(["秘", "論"], ["c2"]).map((h) => h.messageId)).toEqual(["2"]);
+      expect(any(["秘密の"], ["c1", "c2"], { sinceMs: T0 + 1 }).map((h) => h.messageId)).toEqual([
+        "2",
+      ]);
+      expect(any(["秘密の"], ["c1", "c2"], { untilMs: T0 }).map((h) => h.messageId)).toEqual(["1"]);
+    });
+
+    it("語は FTS 構文・LIKE のワイルドカードとして解釈されない", () => {
+      store.upsertMessage(msg({ messageId: "1", content: "100% 完了した" }));
+      store.upsertMessage(msg({ messageId: "2", content: "1000 件完了" }));
+      expect(() => any(['content:"x" OR *', "NEAR(a b)", "完了した"])).not.toThrow();
+      expect(any(['content:"x" OR *', "完了した"]).map((h) => h.messageId)).toEqual(["1"]);
+      expect(any(["0%"]).map((h) => h.messageId)).toEqual(["1"]);
+    });
+  });
+
   it("purgeOlderThan は保持期間より古い本文を消す", () => {
     store.upsertMessage(msg({ messageId: "1", createdAt: T0 - 1 }));
     store.upsertMessage(msg({ messageId: "2", createdAt: T0 }));

@@ -129,7 +129,10 @@ export type VoiceConfig = z.infer<typeof voiceConfigSchema>;
  * - backfill_days: カーソルが無いチャンネルの初回取り込み範囲(extractor と同じ 90 日)。
  * - retention_days: 本文の保持期間(これより古い本文は定期照合で削除)。backfill_days 以上。
  * - reconcile_interval_hours / reconcile_window_days: 停止中の編集・削除を反映する定期照合の周期と範囲。
- * - max_results: discord_search 1 回で返す上限件数。
+ * - max_results: discord_search 1 回で返す上限件数(ADR-0038 追記 2026-10-08 で 20 → 8)。
+ *   1 回ごとにターン 1 つと抜粋の再送が増えるため、件数・抜粋・回数をまとめて小さくする(同追記)。
+ * - excerpt_chars: 1 件の抜粋の最大文字数(同追記。旧 定数 300)。
+ * - max_tool_calls: /ask 1 件で discord_search を検索できる回数(同追記)。0 = ツールを渡さない。
  * - max_fetch_per_channel: 1 周期でチャンネルあたりに REST で取得する上限(残りは次の周期でカーソルから)。
  */
 export const discordIndexConfigSchema = z
@@ -139,7 +142,9 @@ export const discordIndexConfigSchema = z
     retention_days: z.number().int().positive().default(180),
     reconcile_interval_hours: z.number().positive().default(6),
     reconcile_window_days: z.number().int().positive().default(7),
-    max_results: z.number().int().positive().max(100).default(20),
+    max_results: z.number().int().positive().max(100).default(8),
+    excerpt_chars: z.number().int().min(80).max(500).default(200),
+    max_tool_calls: z.number().int().min(0).max(5).default(1),
     max_fetch_per_channel: z.number().int().positive().default(10_000),
   })
   .superRefine((c, ctx) => {

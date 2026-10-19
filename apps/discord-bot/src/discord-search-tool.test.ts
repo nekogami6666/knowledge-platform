@@ -9,6 +9,7 @@ import {
   excerpt,
   NO_CHANNEL_MESSAGE,
   NO_HIT_MESSAGE,
+  overLimitMessage,
   parseDateBound,
   splitTerms,
 } from "./discord-search-tool.js";
@@ -105,11 +106,12 @@ describe.skipIf(!sqliteAvailable())("createDiscordSearchSession(ADR-0038 D5/D6)"
     store.upsertMessage(msg("3", "dev", "勤怠システムの未公開の障害情報"));
   });
 
-  const session = (channelIds: string[]) =>
+  const session = (channelIds: string[], maxToolCalls = 10) =>
     createDiscordSearchSession({
       store,
       scope: { guildId: "g1", channelIds: new Set(channelIds) },
       maxResults: 20,
+      maxToolCalls,
     });
 
   it("質問者に見えないチャンネル(dev)の本文は返さない・返した permalink を記録する", async () => {
@@ -125,7 +127,8 @@ describe.skipIf(!sqliteAvailable())("createDiscordSearchSession(ADR-0038 D5/D6)"
       "https://discord.com/channels/100/200/1",
       "https://discord.com/channels/100/400/2",
     ]);
-    expect(s.stats()).toEqual({ calls: 1, hits: 2 });
+    expect(s.stats()).toMatchObject({ calls: 1, hits: 2, overLimit: 0 });
+    expect(s.stats().ms).toBeGreaterThanOrEqual(0);
   });
 
   it("見えないチャンネルを channel で指定しても、存在しないチャンネルと同じ文面を返す", async () => {
@@ -143,6 +146,60 @@ describe.skipIf(!sqliteAvailable())("createDiscordSearchSession(ADR-0038 D5/D6)"
 
   it("検索範囲が空ならツール自体を渡さない", () => {
     expect(session([]).tools).toEqual([]);
+  });
+
+  it("回数の上限(既定 1): 超えた呼び出しは検索せず定型文を返す・引数の誤りは数えない(ADR-0038 追記 A1)", async () => {
+    let searched = 0;
+    const counting: DiscordIndexStore = {
+      ...store,
+      search: (p) => {
+        searched += 1;
+        return store.search(p);
+      },
+    };
+    const s = createDiscordSearchSession({
+      store: counting,
+      scope: { guildId: "g1", channelIds: new Set(["pub"]) },
+      maxResults: 20,
+    });
+    const tool = s.tools[0];
+    if (tool === undefined) throw new Error("tool missing");
+    expect(tool.description).toContain("1 回まで");
+    // 引数の誤り(解決できないチャンネル・日付の形式)は上限に数えない。
+    expect(await tool.handler({ query: "勤怠システム", channel: "no-such" })).toBe(
+      NO_CHANNEL_MESSAGE,
+    );
+    expect(await tool.handler({ query: "勤怠システム", since: "昨日" })).toContain("形式が不正");
+    expect(await tool.handler({ query: "勤怠システム" })).toContain("締め日は 25 日");
+    const over = await tool.handler({ query: "締め日" });
+    expect(over).toBe(overLimitMessage(1));
+    expect(over).toBe("検索の上限(1 回)に達しました。手元の根拠で回答してください。");
+    expect(searched).toBe(1);
+    expect(s.stats()).toMatchObject({ calls: 1, hits: 2, overLimit: 1 });
+  });
+
+  it("max_tool_calls: 0 はツールを渡さない(返した permalink は空のまま = discord 引用は全て破棄)", () => {
+    const s = session(["pub"], 0);
+    expect(s.tools).toEqual([]);
+    expect(s.returnedPermalinks.size).toBe(0);
+    expect(s.stats()).toEqual({ calls: 0, hits: 0, ms: 0, overLimit: 0 });
+  });
+
+  it("抜粋の長さ(excerptChars)を設定で変えられ、既定は 200 字", async () => {
+    store.upsertMessage(msg("9", "pub", `勤怠システム${"あ".repeat(400)}`));
+    const run = async (excerptChars?: number) => {
+      const s = createDiscordSearchSession({
+        store,
+        scope: { guildId: "g1", channelIds: new Set(["pub"]) },
+        maxResults: 20,
+        ...(excerptChars !== undefined ? { excerptChars } : {}),
+      });
+      const out = await s.tools[0]?.handler({ query: "あああ" });
+      const rows = JSON.parse(String(out).slice(String(out).indexOf("["))) as { excerpt: string }[];
+      return [...(rows[0]?.excerpt ?? "").replace(/…/g, "")].length;
+    };
+    expect(await run()).toBe(200);
+    expect(await run(80)).toBe(80);
   });
 
   it("/ask 統合: ツールを渡し、返した permalink の引用だけ残す(返していない・見えない本文の引用は破棄)", async () => {

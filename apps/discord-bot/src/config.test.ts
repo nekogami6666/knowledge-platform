@@ -192,7 +192,9 @@ describe("loadDiscordIndex(ADR-0038 D9)", () => {
       retention_days: 180,
       reconcile_interval_hours: 6,
       reconcile_window_days: 7,
-      max_results: 20,
+      max_results: 8,
+      excerpt_chars: 200,
+      max_tool_calls: 1,
       max_fetch_per_channel: 10_000,
     });
   });
@@ -217,6 +219,22 @@ describe("loadDiscordIndex(ADR-0038 D9)", () => {
         }),
       ),
     ).rejects.toThrow();
+  });
+
+  it("max_tool_calls は 0〜5(0 = ツールを渡さない)・excerpt_chars は 80〜500(ADR-0038 追記 2026-10-08)", async () => {
+    const zero = await loadDiscordIndex(reader({ "discord-index.yaml": "max_tool_calls: 0" }));
+    expect(zero.max_tool_calls).toBe(0);
+    for (const bad of [
+      "max_tool_calls: -1",
+      "max_tool_calls: 6",
+      "max_tool_calls: 1.5",
+      "excerpt_chars: 79",
+      "excerpt_chars: 501",
+      "max_results: 0",
+      "max_results: 101",
+    ]) {
+      await expect(loadDiscordIndex(reader({ "discord-index.yaml": bad })), bad).rejects.toThrow();
+    }
   });
 });
 

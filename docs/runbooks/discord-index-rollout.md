@@ -13,6 +13,8 @@
 - /ask のたびに「質問者が閲覧できる(ViewChannel ∧ ReadMessageHistory)∩ いま bot が見える ∩
   ¬permanent_exclude」のチャンネルだけを検索範囲にし、`discord_search` ツールとしてエージェントに渡す
 - Discord の引用は、今回ツールが返した permalink だけを受け付ける
+- 速さのため、ツールを検索できるのは /ask 1 件につき `max_tool_calls` 回(既定 1)、1 回で返すのは
+  `max_results` 件(既定 8)× 抜粋 `excerpt_chars` 字(既定 200)まで(ADR-0038 追記 2026-10-08)
 
 ## 0. 前提チェック
 
@@ -59,11 +61,14 @@ backfill_days: 90 # カーソルが無いチャンネルの初回取り込み(ex
 retention_days: 180 # これより古い本文は削除(backfill_days 以上)
 reconcile_interval_hours: 6 # 停止中の編集・削除を反映する定期照合の周期
 reconcile_window_days: 7 # 定期照合で取り直す範囲(retention_days 以下)
-max_results: 20 # discord_search 1 回で返す上限(最大 100)
+max_results: 8 # discord_search 1 回で返す上限(最大 100)
+excerpt_chars: 200 # 1 件の抜粋の最大文字数(80〜500)
+max_tool_calls: 1 # /ask 1 件で検索できる回数(0 = ツールを渡さない)
 max_fetch_per_channel: 10000 # 1 周期でチャンネルあたりに取得する上限
 ```
 
-`retention_days < backfill_days` や `reconcile_window_days > retention_days` は起動時の検証で拒否される。
+`retention_days < backfill_days` や `reconcile_window_days > retention_days`、範囲外の `excerpt_chars` /
+`max_tool_calls`(0〜5)は起動時の検証で拒否される。
 
 ## 1. メンバーへの周知文(下書き・有効化の前に #knowledge_sharing へ)
 
@@ -102,13 +107,20 @@ ssh stratum-vm
 cd ~/knowledge-platform/apps/discord-bot/config
 cp discord-index.yaml.example discord-index.yaml
 sed -i 's/^enabled: false/enabled: true/' discord-index.yaml
-grep '^enabled' discord-index.yaml          # => enabled: true
+grep -E '^(enabled|max_tool_calls|max_results|excerpt_chars):' discord-index.yaml
+# => enabled: true / max_results: 8 / excerpt_chars: 200 / max_tool_calls: 1(推奨値 = 雛形のまま)
 
 cd ~/knowledge-platform
 # 回答中の /ask があれば少し待つ(update.sh と同じ確認。ホストに node と build 済みの dist が必要)
 DB_PATH=~/stratum/data/bot.db node apps/discord-bot/dist/inflight-cli.js
 docker compose restart bot                  # 設定だけの変更は再起動で反映(admin-guide §3)
 ```
+
+**推奨値**(ADR-0038 追記 2026-10-08): `max_tool_calls: 1`・`max_results: 8`・`excerpt_chars: 200`(雛形の値)。
+ツールの呼び出し 1 回ごとにエージェントのターンが 1 つ(約 2.4 秒)増え、返した抜粋が以降のターンで毎回
+送り直されるため、まずはこの値で有効化し、下の「速さの確認」で見てから変える。
+旧版の雛形から作った `discord-index.yaml`(`max_results: 20` が書かれている)は、`max_results` を 8 に直すか
+行ごと消して既定値に任せる(書かれた値が既定より優先される)。
 
 コードの更新も同時に行う場合は `./docs/deploy/update.sh`(git pull → build → `docker compose up -d`)でよい。
 再起動時、処理中の /ask は最大 60 秒待ってから中断・再質問の案内になる(ADR-0035 追記)。
@@ -122,17 +134,18 @@ docker compose logs -f bot | grep -E 'config loaded|discord-index|Discord 本文
 | msg | 意味・見る項目 |
 |---|---|
 | `config loaded` | `discordIndex: true` になっていること |
-| `Discord 本文インデックスは有効です(ADR-0038)` | 起動時に 1 回。`backfillDays` / `retentionDays` / `reconcileIntervalHours` / `reconcileWindowDays` |
+| `Discord 本文インデックスは有効です(ADR-0038)` | 起動時に 1 回。`backfillDays` / `retentionDays` / `reconcileIntervalHours` / `reconcileWindowDays` / `maxToolCalls` / `maxResults` / `excerptChars` |
 | `discord-index: 同期が完了しました` | 起動直後(ClientReady)と 6 時間ごと。`guilds` / `fetched` / `upserted` / `deleted` / `purgedByVisibility` / `purgedByRetention` / `cappedChannels` / `failedChannels` / `messages`(保存件数の合計)/ `channels`(**保存済みチャンネル数**。周期で処理した数ではない) |
 | `discord-index: チャンネルの同期に失敗しました` | warn。`channelId` ごと。`failedChannels` に計上され、次の周期で再試行 |
 | `discord-index: チャンネル一覧の取得に失敗しました` / `discord-index: 同期に失敗しました(次の周期で再試行)` | warn。続くなら Discord 側の障害か権限を確認 |
 | `discord-index: 見えなくなったチャンネルの本文を削除しました` / `discord-index: 対象外になったチャンネルの本文を削除しました` | 権限変更・permanent_exclude 追加で本文を消した(`purged`) |
 | `discord-index: <処理名> の処理に失敗しました` / `discord-index: <処理名> に失敗しました` | イベント処理の warn(bot は落ちない。取りこぼしは次の照合で拾う) |
-| `/ask: 完了` | `discordSearch: { calls, hits }`(ツールの呼び出し回数と返した件数。OFF なら null) |
+| `/ask: 完了` | `discordSearch: { calls, hits, ms, overLimit }`(実際に検索した回数・返した件数・ツールの処理時間の合計・上限で断った呼び出しの数。OFF なら null) |
 
 初回の取り込みはチャンネル数 × 90 日分を直列に REST で取るため、最初の `同期が完了しました` まで時間がかかる
 (1 チャンネル 1 周期あたり最大 `max_fetch_per_channel` 件で打ち切り、`cappedChannels` が 0 でなければ残りは次の周期で続ける)。
-取り込み中も /ask は使える(その時点までの本文が検索される)。
+取り込み中も /ask は使える(その時点までの本文が検索される)。取り込みは 100 件ずつ 1 トランザクションで書き、
+ページの間で処理を返すため、取り込み中も /ask・Gateway のイベントは止まらない(ADR-0038 追記 A4)。
 
 保存件数とファイルサイズの確認(読み取り専用):
 
@@ -140,6 +153,32 @@ docker compose logs -f bot | grep -E 'config loaded|discord-index|Discord 本文
 ls -lh ~/stratum/data/discord-index.db*
 sqlite3 -readonly ~/stratum/data/discord-index.db "SELECT COUNT(*) FROM messages; SELECT COUNT(*) FROM channels;"
 ```
+
+### 速さの確認(有効化の前後で比べる)
+
+有効化の**前**(数日分)と**後**の `/ask: 完了` を比べる。見る項目は `totalMs`(受付 → 配送完了)・
+`numTurns`(エージェントのターン数)・`discordSearch.calls` / `discordSearch.ms` / `discordSearch.overLimit`。
+
+```sh
+# 直近 1 日の /ask: 完了 から必要な項目だけを取り出す(本文・質問文は含まれない)
+docker compose logs --since 24h bot | grep '/ask: 完了' \
+  | sed 's/^[^{]*//' \
+  | jq -c '{totalMs, numTurns, ds: .discordSearch}'
+# 中央値の目安(totalMs)
+docker compose logs --since 24h bot | grep '/ask: 完了' | sed 's/^[^{]*//' \
+  | jq -s 'map(.totalMs) | sort | .[length/2|floor]'
+```
+
+ログは 1 行 1 JSON(pino)。VM に `jq` が無ければ `grep -oE '"(totalMs|numTurns)":[0-9]+|"discordSearch":\{[^}]*\}'` で目視する。
+
+- 目安: `discordSearch.calls` が 1 の回は、0 の回より `numTurns` が 1 前後・`totalMs` が数秒多い程度に収まる。
+  `discordSearch.ms` はストアの検索時間で、通常は数十 ms 以下(大きければ DB のサイズ・ディスクを疑う)。
+- `overLimit` が 0 でない回が多い = モデルが 2 回目を試みている(プロンプトの「1 回まで」が守られていない)。
+  上限で断っているので遅くはならないが、プロンプトの見直しの材料にする。
+- 遅くなりすぎた場合の戻し方(**この順で**。各段で `docker compose restart bot`):
+  1. `max_tool_calls: 0` — 同期と保存は続け、/ask にツールを渡さない(Discord の引用は破棄される)。
+     起動ログの `maxToolCalls: 0` と、`/ask: 完了` の `discordSearch.calls` が 0 になることを確認
+  2. `enabled: false` — 機能ごと止める(§4)
 
 ## 3. 実機確認(権限の異なる 2 人)
 
@@ -166,6 +205,8 @@ B は閲覧不可)と、テスト用の **除外チャンネル Y**(bot が見�
 
 ## 4. ロールバック(ADR-0038 D10)
 
+速さだけが問題なら、先に §2「速さの確認」の `max_tool_calls: 0` を試す(本文は残る)。
+
 1. `discord-index.yaml` を `enabled: false` にして `docker compose restart bot`(ツールは渡されず、同期も止まる)。
    `config loaded` の `discordIndex: false` を確認
 2. 本文を消す(本文はこのファイルにしか無い。bot.db・KB には影響しない):
@@ -186,5 +227,5 @@ B は閲覧不可)と、テスト用の **除外チャンネル Y**(bot が見�
    (`discord-index-discord.ts` の `fetchActiveThreads`)ため、有効化の時点で既にアーカイブされたスレッドの過去本文は取り込まれない
 5. 保持期間 180 日の妥当性(利用実績を見て短縮を検討)
 6. §9.3 の機微情報を保存段階で検出する仕組み(現状はプロンプトのみ)を入れるか
-7. `discord_search` の呼び出し回数・件数を /ask の完了ログに出すか — 実装では `/ask: 完了` に `discordSearch { calls, hits }` が出ている
-   (ADR 側の更新が残っている)
+7. `discord_search` の呼び出し回数・件数を /ask の完了ログに出すか — 実装済み。`/ask: 完了` に
+   `discordSearch { calls, hits, ms, overLimit }` が出ている(ADR-0038 追記 2026-10-08)

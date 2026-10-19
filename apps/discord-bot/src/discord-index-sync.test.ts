@@ -350,6 +350,84 @@ describe.skipIf(!sqliteAvailable())("createDiscordIndexSync(ADR-0038 D3/D4)", ()
     expect(store.getCursor("c1").caughtUp).toBe(true);
   });
 
+  /** upsertMany の呼び出し(書き込みの直後)を観測する(ページごとの書き込み・ページの間の割り込みの再現用)。 */
+  const makeObserved = (onPage: (size: number, n: number) => void) => {
+    let n = 0;
+    const observed: DiscordIndexStore = {
+      ...store,
+      upsertMany: (ms) => {
+        n += 1;
+        const out = store.upsertMany(ms);
+        onPage(ms.length, n);
+        return out;
+      },
+    };
+    return createDiscordIndexSync({
+      store: observed,
+      source,
+      channels: { permanent_exclude: [] },
+      config: baseConfig(),
+      now: () => now,
+    });
+  };
+
+  it("取り込みは 100 件ずつ 1 トランザクションで書き、ページの間でイベントループに処理を返す(ADR-0038 追記 A4)", async () => {
+    source.channels = [text("c1")];
+    for (let i = 0; i < 250; i++) source.put(m("c1", DAY + i * 1000, `本文${i}`));
+    source.put(m("c1", DAY / 2, "bot の投稿", { authorIsBot: true }));
+    const sizes: number[] = [];
+    const ticksAtPage: number[] = [];
+    let ticks = 0;
+    let spinning = true;
+    const spin = () => {
+      if (!spinning) return;
+      ticks += 1;
+      setImmediate(spin);
+    };
+    setImmediate(spin);
+    const sync = makeObserved((size) => {
+      sizes.push(size);
+      ticksAtPage.push(ticks);
+    });
+    const r = await sync.runCycle();
+    spinning = false;
+    // 3 ページ目は bot の投稿を除いた 50 件(bot の投稿は保存しない)。
+    expect(sizes).toEqual([100, 100, 50]);
+    expect(r).toMatchObject({ fetched: 251, upserted: 250 });
+    expect(store.counts().messages).toBe(250);
+    // ページの間で他の処理(setImmediate)が進んでいる。
+    for (let i = 1; i < ticksAtPage.length; i++) {
+      expect(ticksAtPage[i] ?? 0).toBeGreaterThan(ticksAtPage[i - 1] ?? 0);
+    }
+    expect(store.getCursor("c1")).toMatchObject({ caughtUp: true });
+  });
+
+  it("ページの間にチャンネルが削除・対象外になったら、その周期の残りを書き戻さない", async () => {
+    source.channels = [text("c1"), thread("t1", "c1")];
+    for (let i = 0; i < 150; i++) source.put(m("c1", DAY + i * 1000, `本文${i}`));
+    for (let i = 0; i < 150; i++) source.put(m("t1", DAY + i * 1000, `スレッド${i}`));
+    let sync: ReturnType<typeof makeObserved> | undefined;
+    sync = makeObserved((_size, n) => {
+      // c1 の 1 ページ目の直後に ChannelDelete が届く。
+      if (n === 1) sync?.handleChannelGone("c1");
+    });
+    await sync.runCycle();
+    expect(all(["c1"])).toEqual([]);
+    expect(store.getCursor("c1")).toEqual({ lastMessageId: null, caughtUp: false });
+
+    // 親が対象外(bot が見えない)になった ChannelUpdate でも、スレッドの残りは書かない。
+    store = (await import("./discord-index-store.js")).createDiscordIndexStore(":memory:");
+    sync = makeObserved((_size, n) => {
+      if (n === 1) {
+        sync?.handleChannelChanged(
+          text("c1", { gate: { channelId: "c1", parentId: "cat", botCanView: false } }),
+        );
+      }
+    });
+    await sync.runCycle();
+    expect(all(["c1"])).toEqual([]);
+  });
+
   it("多重起動しない(実行中の runCycle があれば null)", async () => {
     source.channels = [text("c1")];
     const sync = make();

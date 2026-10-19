@@ -6,6 +6,8 @@
  * - SQL は固定(discord-index-store.ts の search)。検索語は FTS のフレーズと LIKE のパラメータとしてだけ渡る。
  * - 返した permalink を記録し、引用の検証(validateCitations)に使う(ADR-0038 D7)。
  * - 本文はツールの戻り値としてモデルにだけ渡る。ログには件数だけを出す(§7.4)。
+ * - 呼び出し 1 回ごとにエージェントのターンが 1 つ増え、抜粋が以降のターンで再送されるため、検索できる回数を
+ *   コードで制限する(ADR-0038 追記 2026-10-08 A1)。上限を超えた呼び出しは検索せずに定型文を返す。
  */
 import { type AgentInProcessTool, defineInProcessTool } from "@stratum/llm";
 import { z } from "zod";
@@ -14,8 +16,10 @@ import type { DiscordSearchScope } from "./discord-search-scope.js";
 import { isoJst } from "./time.js";
 
 export const DISCORD_SEARCH_TOOL_NAME = "discord_search";
-/** 抜粋の最大文字数(本文をまるごと渡さない)。 */
-export const DEFAULT_EXCERPT_CHARS = 300;
+/** 抜粋の最大文字数(本文をまるごと渡さない)。設定 excerpt_chars の既定と同じ(ADR-0038 追記 A2)。 */
+export const DEFAULT_EXCERPT_CHARS = 200;
+/** /ask 1 件で検索できる回数。設定 max_tool_calls の既定と同じ(ADR-0038 追記 A1)。 */
+export const DEFAULT_MAX_TOOL_CALLS = 1;
 /** 1 回の検索語の上限(長い文をそのまま渡されたときの防御)。 */
 const MAX_TERMS = 8;
 const JST_OFFSET_MS = 9 * 3_600_000;
@@ -24,6 +28,10 @@ const DAY_MS = 86_400_000;
 export const NO_CHANNEL_MESSAGE =
   "指定のチャンネルは検索できません(存在しないか、閲覧できないチャンネルです)。channel を省略して検索してください。";
 export const NO_HIT_MESSAGE = "該当する Discord の発言は見つかりませんでした。";
+/** 上限を超えた呼び出しへの応答(検索はしない)。 */
+export function overLimitMessage(maxToolCalls: number): string {
+  return `検索の上限(${maxToolCalls} 回)に達しました。手元の根拠で回答してください。`;
+}
 
 /** 検索語へ分割する(空白区切り・重複除去・上限)。3 文字以上は FTS、1〜2 文字は LIKE(trigram の制約)。 */
 export function splitTerms(query: string): { fts: string[]; like: string[] } {
@@ -95,7 +103,19 @@ export interface DiscordSearchSession {
   /** 今回ツールが返した permalink(引用の検証に使う)。 */
   returnedPermalinks: ReadonlySet<string>;
   /** 観測用の集計(本文は含めない)。 */
-  stats(): { calls: number; hits: number };
+  stats(): DiscordSearchStats;
+}
+
+/** /ask の完了ログに出す観測値(ADR-0038・同追記 2026-10-08)。 */
+export interface DiscordSearchStats {
+  /** 実際にストアを検索した回数(引数の誤り・上限超えは含めない)。 */
+  calls: number;
+  /** 返した件数の合計。 */
+  hits: number;
+  /** ツールの処理時間の合計(ms・上限超えの応答を除く)。 */
+  ms: number;
+  /** 上限(max_tool_calls)を超えて断った呼び出しの数。 */
+  overLimit: number;
 }
 
 export interface DiscordSearchDeps {
@@ -103,6 +123,8 @@ export interface DiscordSearchDeps {
   scope: DiscordSearchScope;
   maxResults: number;
   excerptChars?: number;
+  /** 検索できる回数(既定 1)。0 ならツールを渡さない。 */
+  maxToolCalls?: number;
 }
 
 function formatHits(
@@ -137,7 +159,56 @@ export function createDiscordSearchSession(deps: DiscordSearchDeps): DiscordSear
   const returned = new Set<string>();
   let calls = 0;
   let hitsTotal = 0;
+  let elapsedMs = 0;
+  let overLimit = 0;
   const excerptChars = deps.excerptChars ?? DEFAULT_EXCERPT_CHARS;
+  const maxToolCalls = deps.maxToolCalls ?? DEFAULT_MAX_TOOL_CALLS;
+
+  /**
+   * 1 回分の検索(同期処理)。回数の上限に数えるのはストアを検索したときだけで、引数の誤り
+   * (空の語・日付の形式・解決できないチャンネル)は数えない(言い直しの 1 回を奪わない)。
+   */
+  const run = (args: {
+    query: string;
+    since?: string | undefined;
+    until?: string | undefined;
+    channel?: string | undefined;
+  }): string => {
+    const { fts, like } = splitTerms(args.query);
+    if (fts.length === 0 && like.length === 0) return NO_HIT_MESSAGE;
+    const sinceMs = args.since !== undefined ? parseDateBound(args.since, "start") : undefined;
+    const untilMs = args.until !== undefined ? parseDateBound(args.until, "end") : undefined;
+    if (sinceMs === null || untilMs === null) {
+      return "since / until の形式が不正です。YYYY-MM-DD(JST)か ISO 8601 で指定してください。";
+    }
+    let parents = [...deps.scope.channelIds];
+    if (args.channel !== undefined) {
+      const id = resolveChannel(args.channel, deps.scope, deps.store);
+      if (id === null) return NO_CHANNEL_MESSAGE;
+      parents = [id];
+    }
+    calls += 1;
+    const hits = deps.store.search({
+      ftsTerms: fts,
+      likeTerms: like,
+      parentChannelIds: parents,
+      ...(sinceMs !== undefined ? { sinceMs } : {}),
+      ...(untilMs !== undefined ? { untilMs } : {}),
+      limit: deps.maxResults,
+    });
+    // 念のため範囲外を落とす(ストアの条件と二重)。
+    const visible = hits.filter((h) => deps.scope.channelIds.has(h.parentChannelId));
+    if (visible.length === 0) return NO_HIT_MESSAGE;
+    hitsTotal += visible.length;
+    for (const h of visible) returned.add(h.permalink);
+    const ids = new Set<string>();
+    for (const h of visible) {
+      ids.add(h.parentChannelId);
+      if (h.threadId !== null) ids.add(h.threadId);
+    }
+    const names = deps.store.channelNames([...ids]);
+    return formatHits(visible, [...fts, ...like], names, excerptChars);
+  };
 
   const tool = defineInProcessTool({
     name: DISCORD_SEARCH_TOOL_NAME,
@@ -147,6 +218,7 @@ export function createDiscordSearchSession(deps: DiscordSearchDeps): DiscordSear
       "query は空白区切りの語(すべてを含む発言が当たる。3 文字以上の語は部分一致・関連度順、",
       "1〜2 文字の語は部分一致で新しい順)。since / until は YYYY-MM-DD(JST)または ISO 8601。",
       "channel はチャンネル名(# は省略可)か ID で、そのチャンネルとスレッドに絞る。",
+      `検索できるのは 1 回の質問につき ${maxToolCalls} 回まで。`,
     ].join(""),
     inputShape: {
       query: z.string().min(1).max(200).describe("検索語(空白区切り)"),
@@ -155,47 +227,25 @@ export function createDiscordSearchSession(deps: DiscordSearchDeps): DiscordSear
       channel: z.string().max(100).optional().describe("チャンネル名または ID"),
     },
     handler: async (args) => {
-      calls += 1;
-      const { fts, like } = splitTerms(args.query);
-      if (fts.length === 0 && like.length === 0) return NO_HIT_MESSAGE;
-      const sinceMs = args.since !== undefined ? parseDateBound(args.since, "start") : undefined;
-      const untilMs = args.until !== undefined ? parseDateBound(args.until, "end") : undefined;
-      if (sinceMs === null || untilMs === null) {
-        return "since / until の形式が不正です。YYYY-MM-DD(JST)か ISO 8601 で指定してください。";
+      // 上限を超えたら検索しない(ADR-0038 追記 A1)。
+      if (calls >= maxToolCalls) {
+        overLimit += 1;
+        return overLimitMessage(maxToolCalls);
       }
-      let parents = [...deps.scope.channelIds];
-      if (args.channel !== undefined) {
-        const id = resolveChannel(args.channel, deps.scope, deps.store);
-        if (id === null) return NO_CHANNEL_MESSAGE;
-        parents = [id];
+      const t0 = performance.now();
+      try {
+        return run(args);
+      } finally {
+        elapsedMs += performance.now() - t0;
       }
-      const hits = deps.store.search({
-        ftsTerms: fts,
-        likeTerms: like,
-        parentChannelIds: parents,
-        ...(sinceMs !== undefined ? { sinceMs } : {}),
-        ...(untilMs !== undefined ? { untilMs } : {}),
-        limit: deps.maxResults,
-      });
-      // 念のため範囲外を落とす(ストアの条件と二重)。
-      const visible = hits.filter((h) => deps.scope.channelIds.has(h.parentChannelId));
-      if (visible.length === 0) return NO_HIT_MESSAGE;
-      hitsTotal += visible.length;
-      for (const h of visible) returned.add(h.permalink);
-      const ids = new Set<string>();
-      for (const h of visible) {
-        ids.add(h.parentChannelId);
-        if (h.threadId !== null) ids.add(h.threadId);
-      }
-      const names = deps.store.channelNames([...ids]);
-      return formatHits(visible, [...fts, ...like], names, excerptChars);
     },
   });
 
   return {
-    // 検索範囲が空(質問者が読めるチャンネルが無い・判定不能)ならツール自体を渡さない。
-    tools: deps.scope.channelIds.size > 0 ? [tool] : [],
+    // 検索範囲が空(質問者が読めるチャンネルが無い・判定不能)か、回数の上限が 0 ならツール自体を渡さない。
+    // セッションは残すため、引用の検証は「今回返した permalink だけ」(= 空集合)のまま厳格に効く(D7)。
+    tools: deps.scope.channelIds.size > 0 && maxToolCalls > 0 ? [tool] : [],
     returnedPermalinks: returned,
-    stats: () => ({ calls, hits: hitsTotal }),
+    stats: () => ({ calls, hits: hitsTotal, ms: Math.round(elapsedMs), overLimit }),
   };
 }

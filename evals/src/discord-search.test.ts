@@ -168,6 +168,8 @@ describe.skipIf(!sqliteAvailable())("discord_search fixture 評価(ADR-0038)", (
         reconcile_interval_hours: 6,
         reconcile_window_days: 7,
         max_results: 20,
+        excerpt_chars: 200,
+        max_tool_calls: 1,
         max_fetch_per_channel: 10_000,
       },
       now: () => now,

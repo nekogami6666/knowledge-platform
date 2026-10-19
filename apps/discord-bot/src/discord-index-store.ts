@@ -9,6 +9,7 @@
  * - tombstones: 直近に削除した message_id。同期中の古い取得結果で削除済みの本文を復活させない。
  *
  * trigram は 3 文字未満の語に一致しないため、1〜2 文字の語は LIKE で補う(search 参照)。
+ * searchAny は事前検索(ADR-0038 追記 2026-10-08・ADR-0041)用の OR 検索で、ツールの search(AND)とは別。
  * 本ファイルは本文をログに出さない(§7.4)。
  */
 import Database from "better-sqlite3";
@@ -81,9 +82,30 @@ export interface SearchHit {
   permalink: string;
 }
 
+/** 1 文字以上の語を含む OR 検索(事前検索用・ADR-0038 追記 2026-10-08)。 */
+export interface AnySearchParams {
+  /** 検索語(空白で分割済み)。3 文字以上は FTS の OR、2 文字以下は一致数の数え上げ(と、3 文字以上が無いときの LIKE の OR)。 */
+  terms: readonly string[];
+  /** 検索してよいトップレベルのチャンネル(質問者に見える ∩ bot に見える = ADR-0038 D5)。空なら 0 件。 */
+  parentChannelIds: readonly string[];
+  sinceMs?: number;
+  untilMs?: number;
+  limit: number;
+}
+
+/** searchAny の 1 件。並びは matchedTerms の多い順 → bm25 → 新しい順。 */
+export interface ScoredSearchHit extends SearchHit {
+  /** FTS5 の bm25(小さいほど関連が強い・通常は負)。LIKE だけで取った候補は null。 */
+  bm25: number | null;
+  /** 本文に含まれた検索語の数(重複を除く・大小無視・2 文字以下の語も数える)。 */
+  matchedTerms: number;
+}
+
 export interface DiscordIndexStore {
   /** 挿入か更新。edited_at が保存済みより古い取得結果・削除済み(tombstone)は捨てる。 */
   upsertMessage(m: IndexedMessage): UpsertOutcome;
+  /** upsertMessage を 1 トランザクションでまとめて行う(取り込みの 1 ページ分・ADR-0038 追記 A4)。 */
+  upsertMany(ms: readonly IndexedMessage[]): UpsertOutcome[];
   /** 削除し tombstone を残す。戻りは実際に消えた本文の件数。 */
   deleteMessages(messageIds: readonly string[], nowMs: number): number;
   /** channel_id の作成時刻範囲 [fromMs, toMs] にある保存済み message_id(照合の削除判定用)。 */
@@ -109,6 +131,11 @@ export interface DiscordIndexStore {
   purgeOlderThan(cutoffMs: number): number;
   pruneTombstones(cutoffMs: number): number;
   search(params: SearchParams): SearchHit[];
+  /**
+   * 語の OR 検索(事前検索用)。検索範囲の絞り込みは search と同じ。候補を bm25 で多めに取り、
+   * 一致した語の数を数えて並べ直す(ADR-0038 追記 A3)。
+   */
+  searchAny(params: AnySearchParams): ScoredSearchHit[];
   /** チャンネル名(メタデータに無ければ含めない)。 */
   channelNames(channelIds: readonly string[]): Map<string, string>;
   /** トップレベルのチャンネル一覧(ツールの channel 引数の名前解決用)。 */
@@ -210,6 +237,12 @@ export function ftsPhrase(term: string): string {
   return `"${term.replace(/"/g, '""')}"`;
 }
 
+/** searchAny の語数の上限(長い文をそのまま渡されたときの防御)。 */
+const MAX_ANY_TERMS = 16;
+/** searchAny で bm25 順に取る候補の倍率(一致数で並べ直すため上限より多めに取る)。 */
+const ANY_CANDIDATE_FACTOR = 5;
+const ANY_MIN_CANDIDATES = 50;
+
 /** LIKE のパターン(% _ \ をエスケープして部分一致に)。ESCAPE '\' と組で使う。 */
 export function likePattern(term: string): string {
   return `%${term.replace(/[\\%_]/g, (c) => `\\${c}`)}%`;
@@ -265,6 +298,10 @@ export function createDiscordIndexStore(path: string): DiscordIndexStore {
     updateMsg.run(m);
     return "updated";
   };
+
+  const upsertManyTx = db.transaction((ms: readonly IndexedMessage[]): UpsertOutcome[] =>
+    ms.map((m) => upsertMessage(m)),
+  );
 
   const deleteMessages = db.transaction((ids: readonly string[], nowMs: number): number => {
     let n = 0;
@@ -325,6 +362,7 @@ export function createDiscordIndexStore(path: string): DiscordIndexStore {
 
   return {
     upsertMessage,
+    upsertMany: (ms) => (ms.length === 0 ? [] : upsertManyTx(ms)),
     deleteMessages: (ids, nowMs) => (ids.length === 0 ? 0 : deleteMessages(ids, nowMs)),
     listMessageIds(channelId, fromMs, toMs) {
       return db
@@ -408,6 +446,75 @@ export function createDiscordIndexStore(path: string): DiscordIndexStore {
         .prepare(sql)
         .all(params)
         .map((r) => toHit(r as MessageRow));
+    },
+    searchAny(p) {
+      if (p.parentChannelIds.length === 0 || p.limit <= 0) return [];
+      // 大小無視で重複を除く(trigram も大小無視)。
+      const seen = new Set<string>();
+      const terms: string[] = [];
+      for (const raw of p.terms) {
+        const t = raw.trim();
+        const key = t.toLowerCase();
+        if (t === "" || seen.has(key)) continue;
+        seen.add(key);
+        terms.push(t);
+        if (terms.length >= MAX_ANY_TERMS) break;
+      }
+      if (terms.length === 0) return [];
+      const ftsTerms = terms.filter((t) => [...t].length >= 3);
+      const where: string[] = ["m.parent_channel_id IN (SELECT value FROM json_each(@parents))"];
+      const params: Record<string, unknown> = {
+        parents: JSON.stringify(p.parentChannelIds),
+        candidates: Math.max(p.limit * ANY_CANDIDATE_FACTOR, ANY_MIN_CANDIDATES),
+      };
+      if (p.sinceMs !== undefined) {
+        where.push("m.created_at >= @since");
+        params.since = p.sinceMs;
+      }
+      if (p.untilMs !== undefined) {
+        where.push("m.created_at <= @until");
+        params.until = p.untilMs;
+      }
+      const cols = `m.message_id, m.guild_id, m.channel_id, m.parent_channel_id, m.thread_id,
+        m.author_name, m.created_at, m.edited_at, m.content, m.permalink`;
+      let sql: string;
+      if (ftsTerms.length > 0) {
+        // 語はすべてフレーズとして OR(FTS の構文を呼び出し元に組ませない)。
+        params.match = ftsTerms.map(ftsPhrase).join(" OR ");
+        sql = `SELECT ${cols}, bm25(messages_fts) AS score FROM messages_fts f
+               JOIN messages m ON m.id = f.rowid
+               WHERE messages_fts MATCH @match AND ${where.join(" AND ")}
+               ORDER BY score, m.created_at DESC LIMIT @candidates`;
+      } else {
+        // 3 文字以上の語が無い: 短い語の LIKE の OR(bm25 は無し・新しい順)。
+        const likes = terms.map((t, i) => {
+          params[`like${i}`] = likePattern(t);
+          return `m.content LIKE @like${i} ESCAPE '\\'`;
+        });
+        sql = `SELECT ${cols}, NULL AS score FROM messages m
+               WHERE ${where.join(" AND ")} AND (${likes.join(" OR ")})
+               ORDER BY m.created_at DESC LIMIT @candidates`;
+      }
+      const lowered = terms.map((t) => t.toLowerCase());
+      return db
+        .prepare(sql)
+        .all(params)
+        .map((r): ScoredSearchHit => {
+          const row = r as MessageRow & { score: number | null };
+          const body = row.content.toLowerCase();
+          return {
+            ...toHit(row),
+            bm25: row.score,
+            matchedTerms: lowered.filter((t) => body.includes(t)).length,
+          };
+        })
+        .sort(
+          (a, b) =>
+            b.matchedTerms - a.matchedTerms ||
+            (a.bm25 ?? Number.POSITIVE_INFINITY) - (b.bm25 ?? Number.POSITIVE_INFINITY) ||
+            b.createdAt - a.createdAt,
+        )
+        .slice(0, p.limit);
     },
     channelNames(channelIds) {
       const out = new Map<string, string>();
