@@ -17,7 +17,7 @@ import { createSqliteStore } from "@stratum/discord-bot/sqlite-store";
 import { createGhClientFromEnv, type GhClient } from "@stratum/gh-client";
 import { newId, parseEntry, type QuestionLog, validateRepo } from "@stratum/kb-core";
 import { createFsPromptStore, nullUsageRecorder } from "@stratum/llm";
-import { type GitExec, syncKb, withCloneToken } from "@stratum/shared";
+import { describeError, type GitExec, syncKb, withCloneToken } from "@stratum/shared";
 import { runFlywheelClose } from "./close.js";
 import { createFsConfigReader, loadGapConfig } from "./config.js";
 import { draftEntry } from "./draft.js";
@@ -319,7 +319,7 @@ async function main(): Promise<void> {
 }
 
 main().catch((e) => {
-  // シークレットは出さない(§9.1)。メッセージのみ。
-  console.error("gap-tracker failed:", e instanceof Error ? e.message : String(e));
+  // 原因(cause)まで 1 行で出す。資格情報・トークンは describeError が伏せる(§9.1)。
+  console.error("gap-tracker failed:", describeError(e));
   process.exitCode = 1;
 });

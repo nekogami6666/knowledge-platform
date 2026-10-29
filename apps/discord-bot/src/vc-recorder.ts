@@ -29,6 +29,27 @@ export interface RecorderHandle {
   /** 常に <local_root_dir>/recording.m4a(契約)。 */
   file_path: string;
   participant_ids?: string[];
+  /** 録音の長さ(sidecar が返す・失敗時も)。 */
+  duration_ms?: number;
+  /** 失敗時は error(理由)・decode_errors 等が入る(sidecar の契約)。 */
+  metadata?: { error?: string; decode_errors?: number; last_decode_error?: string | null };
+}
+
+/** sidecar が「誰の音声も入らなかった」ときに返す理由(無音・ミュート・短すぎ)。故障ではない。 */
+const NO_AUDIO_ERROR = "no participant audio was captured";
+
+/** finalize 失敗の理由を sidecar の応答から取り出して Error にする(原因を捨てない)。 */
+export function finalizeFailure(handle: RecorderHandle): Error & { noAudio: boolean } {
+  const reason = handle.metadata?.error;
+  const parts = [`recorder finalize status=${handle.status}`];
+  if (reason !== undefined && reason !== "") parts.push(`reason=${reason}`);
+  if (handle.duration_ms !== undefined) parts.push(`duration_ms=${handle.duration_ms}`);
+  if (handle.metadata?.decode_errors) parts.push(`decode_errors=${handle.metadata.decode_errors}`);
+  if (handle.metadata?.last_decode_error)
+    parts.push(`last_decode_error=${handle.metadata.last_decode_error}`);
+  return Object.assign(new Error(parts.join(" ")), {
+    noAudio: reason?.includes(NO_AUDIO_ERROR) ?? false,
+  });
 }
 
 export type FetchLike = (
@@ -192,7 +213,7 @@ export function createVcRecorderWatcher(deps: VcRecorderDeps): VcRecorderWatcher
       const handle =
         first.status === "finalizing" ? await pollUntilDone(session.record.meeting_id) : first;
       if (handle.status !== "ok") {
-        throw new Error(`recorder finalize status=${handle.status}`);
+        throw finalizeFailure(handle);
       }
       if (interview !== undefined && deps.chunkBinding !== undefined) {
         commitInterviewChunk(deps.chunkBinding, session.record.meeting_id, interview, handle);
@@ -232,7 +253,16 @@ export function createVcRecorderWatcher(deps: VcRecorderDeps): VcRecorderWatcher
         deps.chunkBinding.dropChunk(interview.sessionActionId, session.record.meeting_id);
       } else {
         // 録音は失われている可能性が高い(pending は積まない)。本人に案内して運用ログに残す。
-        log.error({ err, meetingId: session.record.meeting_id, cause }, "vc finalize failed");
+        const noAudio = (err as { noAudio?: boolean }).noAudio === true;
+        if (noAudio) {
+          // 発話なし・全員ミュート・数秒で退室 = 故障ではない(error 監視のノイズにしない)。
+          log.warn(
+            { err, meetingId: session.record.meeting_id, cause },
+            "vc 録音に音声がありませんでした(発話なし・ミュート・短すぎ)",
+          );
+        } else {
+          log.error({ err, meetingId: session.record.meeting_id, cause }, "vc finalize failed");
+        }
         try {
           await deps.dm(session.ownerId, RECORDING_FAILED_MESSAGE);
         } catch (dmErr) {
@@ -348,7 +378,7 @@ export function createVcRecorderWatcher(deps: VcRecorderDeps): VcRecorderWatcher
       const first = await deps.client.finalize(record);
       const handle = first.status === "finalizing" ? await pollUntilDone(cur.meetingId) : first;
       if (handle.status !== "ok") {
-        throw new Error(`recorder finalize status=${handle.status}`);
+        throw finalizeFailure(handle);
       }
       commitInterviewChunk(binding, cur.meetingId, { sessionActionId: id, seq: cur.seq }, handle);
       log.info({ meetingId: cur.meetingId, seq: cur.seq }, "interview chunk resumed(committed)");

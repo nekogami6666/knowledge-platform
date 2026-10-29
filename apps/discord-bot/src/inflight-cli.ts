@@ -7,6 +7,8 @@
  * - inflight_asks のうち受付から 15 分以内の行数だけを 1 行で出す。token の列は読まない(§9.1)。
  * - 表が無い(古い bot)なら 0。開けなければ stderr に理由を出して exit 1。
  */
+
+import { describeError } from "@stratum/shared";
 import Database from "better-sqlite3";
 import { countRecentInflight } from "./inflight-count.js";
 
@@ -23,6 +25,6 @@ function main(): void {
 try {
   main();
 } catch (err) {
-  console.error(`inflight-cli: ${err instanceof Error ? err.message : String(err)}`);
+  console.error(`inflight-cli: ${describeError(err)}`);
   process.exitCode = 1;
 }

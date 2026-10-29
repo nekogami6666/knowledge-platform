@@ -13,6 +13,7 @@
     "@stratum/gh-client": "workspace:*",
     "@stratum/kb-core": "workspace:*",
     "@stratum/llm": "workspace:*",
+    "@stratum/shared": "workspace:*",
     "js-yaml": "^4.2.0",
     "zod": "^3.25.76"
   },

@@ -14,6 +14,7 @@ import {
   nullUsageRecorder,
   type Transcriber,
 } from "@stratum/llm";
+import { describeError } from "@stratum/shared";
 import { type Client, Events, Routes } from "discord.js";
 import { setNotifySecrets } from "./ack.js";
 import {
@@ -702,7 +703,7 @@ async function main(): Promise<void> {
 }
 
 main().catch((err) => {
-  // シークレットは出さない(§9.1)。メッセージのみ。
-  console.error("fatal:", err instanceof Error ? err.message : String(err));
+  // 原因(cause)まで 1 行で出す。資格情報・トークンは describeError が伏せる(§9.1)。
+  console.error("fatal:", describeError(err));
   process.exitCode = 1;
 });

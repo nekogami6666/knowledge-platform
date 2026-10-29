@@ -13,7 +13,7 @@ import { promisify } from "node:util";
 import { createSqliteStore } from "@stratum/discord-bot/sqlite-store";
 import { createGhClientFromEnv, type GhClient } from "@stratum/gh-client";
 import { validateRepo } from "@stratum/kb-core";
-import { type GitExec, syncKb, withCloneToken } from "@stratum/shared";
+import { describeError, type GitExec, syncKb, withCloneToken } from "@stratum/shared";
 import { createFsConfigReader, loadFreshnessConfig } from "./config.js";
 import { isReal, parseEnv } from "./env.js";
 import { createLogger } from "./logger.js";
@@ -155,7 +155,7 @@ async function main(): Promise<void> {
 }
 
 main().catch((e) => {
-  // シークレットは出さない(§9.1)。メッセージのみ。
-  console.error("freshness-checker failed:", e instanceof Error ? e.message : String(e));
+  // 原因(cause)まで 1 行で出す。資格情報・トークンは describeError が伏せる(§9.1)。
+  console.error("freshness-checker failed:", describeError(e));
   process.exitCode = 1;
 });

@@ -14,6 +14,7 @@ import { promisify } from "node:util";
 import { createGhClientFromEnv, type GhClient } from "@stratum/gh-client";
 import { newId, validateRepo } from "@stratum/kb-core";
 import { createFsPromptStore, nullUsageRecorder } from "@stratum/llm";
+import { describeError } from "@stratum/shared";
 import { createFsConfigReader, loadExtractorConfig } from "./config.js";
 import type { GitExec } from "./diff.js";
 import { isRealPr, parseEnv, parsePositiveInt } from "./env.js";
@@ -118,7 +119,7 @@ async function main(): Promise<void> {
 }
 
 main().catch((e) => {
-  // シークレットは出さない(§9.1)。メッセージのみ。
-  console.error("extractor failed:", e instanceof Error ? e.message : String(e));
+  // 原因(cause)まで 1 行で出す。資格情報・トークンは describeError が伏せる(§9.1)。
+  console.error("extractor failed:", describeError(e));
   process.exitCode = 1;
 });

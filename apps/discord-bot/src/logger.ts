@@ -73,7 +73,8 @@ export function createLogger(
         redactByKeyDeep(obj, new WeakSet(), 0) as Record<string, unknown>,
     },
     // Error を {type,message,stack} に整形(秘密が混入しても (A) が消す)。
-    serializers: { err: stdSerializers.err },
+    // errWithCause: cause の name・message・status 等を構造のまま残す(原因の追跡用)。
+    serializers: { err: stdSerializers.errWithCause },
   };
   const base: DestinationStream = destination ?? {
     write: (s: string) => {

@@ -9,6 +9,7 @@ import type {
 import {
   createRecorderClient,
   createVcRecorderWatcher,
+  finalizeFailure,
   RECORDING_FAILED_MESSAGE,
   type RecorderClient,
   type RecorderHandle,
@@ -545,5 +546,33 @@ describe("createVcRecorderWatcher: abortActive(/interview cancel 用)", () => {
     const h = mkWatcher({ client });
     await h.watcher.abortActive("nothing");
     expect(abortCalls).toHaveLength(0);
+  });
+});
+
+describe("finalizeFailure", () => {
+  it("sidecar の理由・長さ・デコードエラーを message に載せ、無音を判別する", () => {
+    const e = finalizeFailure({
+      status: "failed",
+      file_path: "/x/recording.m4a",
+      duration_ms: 1200,
+      metadata: { error: "no participant audio was captured by the recorder", decode_errors: 0 },
+    });
+    expect(e.message).toBe(
+      "recorder finalize status=failed reason=no participant audio was captured by the recorder duration_ms=1200",
+    );
+    expect(e.noAudio).toBe(true);
+  });
+
+  it("理由が無い・別の理由なら noAudio は false", () => {
+    expect(finalizeFailure({ status: "aborted", file_path: "/x" }).message).toBe(
+      "recorder finalize status=aborted",
+    );
+    const e = finalizeFailure({
+      status: "failed",
+      file_path: "/x",
+      metadata: { error: "ffmpeg exited 1", decode_errors: 3, last_decode_error: "bad packet" },
+    });
+    expect(e.noAudio).toBe(false);
+    expect(e.message).toContain("decode_errors=3 last_decode_error=bad packet");
   });
 });

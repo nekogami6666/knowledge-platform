@@ -11,12 +11,23 @@ export type GhClientErrorCode =
   | "API_ERROR"; // その他の GitHub API / ネットワーク失敗
 
 /** packages/gh-client が投げる統一エラー。 */
+function httpStatusOf(cause: unknown): number | undefined {
+  if (typeof cause !== "object" || cause === null) return undefined;
+  const status = (cause as { status?: unknown }).status;
+  return typeof status === "number" ? status : undefined;
+}
+
 export class GhClientError extends Error {
   readonly name = "GhClientError";
   readonly code: GhClientErrorCode;
 
   constructor(code: GhClientErrorCode, message: string, options?: { cause?: unknown }) {
-    super(message, options?.cause === undefined ? undefined : { cause: options.cause });
+    // 原因の HTTP status を message 末尾に付ける(呼び出し側が message だけ出しても原因が分かる)。
+    const status = httpStatusOf(options?.cause);
+    super(
+      status === undefined ? message : `${message}(HTTP ${status})`,
+      options?.cause === undefined ? undefined : { cause: options.cause },
+    );
     this.code = code;
   }
 }
