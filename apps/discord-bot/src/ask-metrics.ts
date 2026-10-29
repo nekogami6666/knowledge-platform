@@ -30,7 +30,7 @@
  *     引数・パスは載せない)/ parallelTurns: 2 つ以上のツールを同時に呼んだ API 応答の数
  *   - firstTurnCacheRead / firstTurnCacheCreation: 最初の API 応答のキャッシュ読み取り / 作成トークン
  *     (system prompt・ツール定義がキャッシュに当たったかの参考値)
- * - Discord 本文検索(ADR-0038): discordSearch({ calls, hits, ms, overLimit }。機能 OFF なら null。本文は出さない)
+ * - Discord 本文検索(ADR-0038): discordSearch({ calls, hits, ms, overLimit, prefetched(System One の事前候補の件数)}。機能 OFF なら null。本文は出さない)
  * - 使用量(**全試行の合計**。形式エラーで再試行した回・最終的に失敗した回も含む。試行が無ければ null):
  *   searchAttempts(検索の試行回数)/ inputTokens / outputTokens / cacheCreationInputTokens /
  *   cacheReadInputTokens / totalCostUsd / modelUsage(モデル別の合計)。inputTokens はキャッシュ分を
@@ -203,7 +203,13 @@ export interface AskPipelineMetrics {
   /** 検索の使用量(全試行の合計・検索が失敗しても試行があれば入る)。 */
   usage: AskUsageMetrics | null;
   /** Discord 本文検索(ADR-0038)の呼び出し回数と返した件数。機能 OFF・stub では null / 省略。 */
-  discordSearch?: { calls: number; hits: number; ms?: number; overLimit?: number } | null;
+  discordSearch?: {
+    calls: number;
+    hits: number;
+    ms?: number;
+    overLimit?: number;
+    prefetched?: number;
+  } | null;
   failure: AskFailure | null;
 }
 

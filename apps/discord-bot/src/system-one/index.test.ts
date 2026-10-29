@@ -40,6 +40,33 @@ afterAll(() => rmSync(clones, { recursive: true, force: true }));
 const QUESTION = "分注ロボットの高湿度での脱調の対処は?";
 
 describe("createSystemOne(/ask のフック・ADR-0041)", () => {
+  it("呼び出しごとの Discord 候補源(質問者の範囲)を使い、Discord 候補に抜粋を載せる(ADR-0041 D9)", async () => {
+    const seen: string[][] = [];
+    const hook = createSystemOne({ mode: "on", weights: W, nowMs: () => NOW, nowIso: () => ISO });
+    const block = await hook.prepare({
+      queryId: "qd",
+      question: QUESTION,
+      synced,
+      cwd: clones,
+      discord: {
+        search: async (terms) => {
+          seen.push([...terms]);
+          return [
+            {
+              url: "https://discord.com/channels/1/2/3",
+              title: "#hw",
+              date: "2026-10-07",
+              text: "分注ロボットの脱調は高湿度で起きる。除湿機で対処した",
+            },
+          ];
+        },
+      },
+    });
+    expect(seen.length).toBe(1);
+    expect(block).toContain("Discord(url: https://discord.com/channels/1/2/3)");
+    expect(block).toMatch(/Discord\(url: [^\n]+\n {3}抜粋: 「[^」]*除湿機/);
+  });
+
   it("on: 候補ブロックを返し、判定を記録する(質問文・抜粋は記録しない)", async () => {
     const store = createMemoryStore();
     const hook = createSystemOne({

@@ -148,6 +148,27 @@ describe.skipIf(!sqliteAvailable())("createDiscordSearchSession(ADR-0038 D5/D6)"
     expect(session([]).tools).toEqual([]);
   });
 
+  it("事前候補(candidates): 質問者の範囲だけを OR 検索し、返した permalink の引用を許す(ADR-0041 D9)", async () => {
+    const s = session(["pub"]);
+    const docs = await s.candidates.search(["勤怠システム", "締め日"], null, null, 20);
+    expect(docs.map((d) => d.url).sort()).toEqual([
+      "https://discord.com/channels/100/200/1",
+      "https://discord.com/channels/100/400/2",
+    ]);
+    expect(docs.every((d) => d.title === "#general")).toBe(true);
+    expect(docs.map((d) => d.text).join("\n")).not.toContain("未公開の障害情報");
+    expect(docs[0]?.date).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    // 候補に出した permalink は引用の許可リストに入る(ツールを呼ばなくても引用できる)。
+    expect([...s.returnedPermalinks].sort()).toEqual(docs.map((d) => d.url).sort());
+    // ツールの回数予算は消費しない。
+    expect(s.stats()).toMatchObject({ calls: 0, prefetched: 2 });
+  });
+
+  it("事前候補: 範囲が空・語が空なら 0 件(ストアを引かない)", async () => {
+    expect(await session([]).candidates.search(["勤怠システム"], null, null, 20)).toEqual([]);
+    expect(await session(["pub"]).candidates.search([], null, null, 20)).toEqual([]);
+  });
+
   it("回数の上限(既定 1): 超えた呼び出しは検索せず定型文を返す・引数の誤りは数えない(ADR-0038 追記 A1)", async () => {
     let searched = 0;
     const counting: DiscordIndexStore = {
@@ -182,7 +203,7 @@ describe.skipIf(!sqliteAvailable())("createDiscordSearchSession(ADR-0038 D5/D6)"
     const s = session(["pub"], 0);
     expect(s.tools).toEqual([]);
     expect(s.returnedPermalinks.size).toBe(0);
-    expect(s.stats()).toEqual({ calls: 0, hits: 0, ms: 0, overLimit: 0 });
+    expect(s.stats()).toEqual({ calls: 0, hits: 0, ms: 0, overLimit: 0, prefetched: 0 });
   });
 
   it("抜粋の長さ(excerptChars)を設定で変えられ、既定は 200 字", async () => {

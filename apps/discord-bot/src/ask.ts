@@ -868,6 +868,8 @@ export async function handleAskRequest(req: AskRequest, deps: AskDeps): Promise<
         question: req.question,
         synced,
         cwd: deps.clonesDir,
+        // ADR-0041 D9: 質問者の閲覧範囲で絞った Discord を事前候補に入れる(ツールの往復を足さない)。
+        ...(deps.discordSearch !== undefined ? { discord: deps.discordSearch.candidates } : {}),
       })) ?? null;
     // git sync は中断できない(1 コマンド 60 秒の上限つき)ため、同期後に一度確かめてから検索に入る。
     if (isAborted()) return interrupted();

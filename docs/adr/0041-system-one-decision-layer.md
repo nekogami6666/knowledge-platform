@@ -204,3 +204,18 @@
 - §4.6(bot.db)に `system_one_decisions` を追記。
 - §5.3 の agentic search の節に「メモリ上のカタログ(HEAD 単位で作り直し・永続化しない)」を追記。
 - §10.2 に「System One の検索再現率(期待出典が候補に入る率)」を追記。
+
+## 追記(2026-10-29): Discord 候補の実装(未決事項 2 の解消)
+
+- 本番で `ASK_FASTPATH=on`・Discord 本文検索(ADR-0038)を有効化した後の実測で、エージェントが `discord_search` を
+  呼んだのは 6 件中 1 件だった(KB・議事録で見つかると探索を止める)。オーナーの要望は「Discord も検索に入れたいが
+  速度は落としたくない」。ツール呼び出しはエージェントのターンを 1 つ増やす(約 2.4 秒)。
+- **D10**: Discord の候補は、/ask ごとに作る `createDiscordSearchSession`(質問者の閲覧範囲 = ADR-0038 D5)が
+  `candidates`(`DiscordCandidateSource`)として提供し、`SystemOneHook.prepare` の**呼び出しごとの引数**で渡す
+  (範囲が質問者で変わるため、起動時の deps には持たない)。検索は事前検索用の OR 検索(`searchAny`・SQLite FTS5)で、
+  エージェントのターンを増やさない。
+- **D11**: 候補に出した permalink は `returnedPermalinks` に入れ、引用を許す(ADR-0038 D7 の「今回 bot が示した
+  permalink だけ」を保つ)。ツールの回数予算(`max_tool_calls`)は消費しない。件数は完了ログの `discordSearch.prefetched`。
+- **D12**: Discord の候補は Read できないため、確信度(high / mid)に関わらず候補ブロックに抜粋を載せる
+  (抜粋が無いと内容の確認に `discord_search` を呼ぶことになり、往復が戻る)。ファイルの候補は従来どおり high のみ抜粋。
+- 戻すとき: `discord-index.yaml` の `enabled: false`(Discord 全体)か `ASK_FASTPATH=off`(候補ブロック全体)。

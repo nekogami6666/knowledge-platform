@@ -13,6 +13,7 @@ import { type AgentInProcessTool, defineInProcessTool } from "@stratum/llm";
 import { z } from "zod";
 import type { DiscordIndexStore, SearchHit } from "./discord-index-store.js";
 import type { DiscordSearchScope } from "./discord-search-scope.js";
+import type { DiscordCandidateSource } from "./system-one/retrieve.js";
 import { isoJst } from "./time.js";
 
 export const DISCORD_SEARCH_TOOL_NAME = "discord_search";
@@ -102,6 +103,12 @@ export interface DiscordSearchSession {
   tools: AgentInProcessTool[];
   /** 今回ツールが返した permalink(引用の検証に使う)。 */
   returnedPermalinks: ReadonlySet<string>;
+  /**
+   * System One の候補源(ADR-0041 D9)。エージェントが動く前に質問の語で OR 検索し、当たった発言を候補ブロックに
+   * 入れる(ツール呼び出しの往復を足さずに Discord を検索に入れる)。範囲はツールと同じ質問者の閲覧範囲(ADR-0038 D5)。
+   * 返した permalink は returnedPermalinks に入れ、引用を許す(D7)。
+   */
+  candidates: DiscordCandidateSource;
   /** 観測用の集計(本文は含めない)。 */
   stats(): DiscordSearchStats;
 }
@@ -116,10 +123,12 @@ export interface DiscordSearchStats {
   ms: number;
   /** 上限(max_tool_calls)を超えて断った呼び出しの数。 */
   overLimit: number;
+  /** 事前検索(System One の候補源)で返した件数。 */
+  prefetched: number;
 }
 
 export interface DiscordSearchDeps {
-  store: Pick<DiscordIndexStore, "search" | "listChannels" | "channelNames">;
+  store: Pick<DiscordIndexStore, "search" | "searchAny" | "listChannels" | "channelNames">;
   scope: DiscordSearchScope;
   maxResults: number;
   excerptChars?: number;
@@ -161,6 +170,7 @@ export function createDiscordSearchSession(deps: DiscordSearchDeps): DiscordSear
   let hitsTotal = 0;
   let elapsedMs = 0;
   let overLimit = 0;
+  let prefetched = 0;
   const excerptChars = deps.excerptChars ?? DEFAULT_EXCERPT_CHARS;
   const maxToolCalls = deps.maxToolCalls ?? DEFAULT_MAX_TOOL_CALLS;
 
@@ -241,11 +251,42 @@ export function createDiscordSearchSession(deps: DiscordSearchDeps): DiscordSear
     },
   });
 
+  const candidates: DiscordCandidateSource = {
+    // 同期処理(SQLite)だが口が Promise なので async。失敗は System One 側が握る(前置き無しに倒れる)。
+    search: async (terms, since, until, limit) => {
+      if (deps.scope.channelIds.size === 0 || terms.length === 0) return [];
+      const sinceMs = since !== null ? parseDateBound(since, "start") : null;
+      const untilMs = until !== null ? parseDateBound(until, "end") : null;
+      const hits = deps.store
+        .searchAny({
+          terms,
+          parentChannelIds: [...deps.scope.channelIds],
+          ...(sinceMs !== null ? { sinceMs } : {}),
+          ...(untilMs !== null ? { untilMs } : {}),
+          limit,
+        })
+        .filter((h) => deps.scope.channelIds.has(h.parentChannelId));
+      if (hits.length === 0) return [];
+      const names = deps.store.channelNames([...new Set(hits.map((h) => h.parentChannelId))]);
+      prefetched += hits.length;
+      return hits.map((h) => {
+        returned.add(h.permalink);
+        return {
+          url: h.permalink,
+          title: `#${names.get(h.parentChannelId) ?? h.parentChannelId}`,
+          date: isoJst(new Date(h.createdAt)).slice(0, 10),
+          text: excerpt(h.content, terms, excerptChars),
+        };
+      });
+    },
+  };
+
   return {
     // 検索範囲が空(質問者が読めるチャンネルが無い・判定不能)か、回数の上限が 0 ならツール自体を渡さない。
     // セッションは残すため、引用の検証は「今回返した permalink だけ」(= 空集合)のまま厳格に効く(D7)。
     tools: deps.scope.channelIds.size > 0 && maxToolCalls > 0 ? [tool] : [],
     returnedPermalinks: returned,
-    stats: () => ({ calls, hits: hitsTotal, ms: Math.round(elapsedMs), overLimit }),
+    candidates,
+    stats: () => ({ calls, hits: hitsTotal, ms: Math.round(elapsedMs), overLimit, prefetched }),
   };
 }

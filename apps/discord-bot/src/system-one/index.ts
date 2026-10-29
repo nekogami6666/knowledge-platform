@@ -167,6 +167,11 @@ export interface SystemOnePrepareInput {
   synced: readonly SyncedRepo[];
   /** エージェントの cwd(clonesDir)。 */
   cwd: string;
+  /**
+   * 今回の質問者の閲覧範囲で絞った Discord の候補源(ADR-0041 D9 / ADR-0038 D5)。範囲は /ask ごとに違うため
+   * deps ではなく呼び出しごとに渡す。無ければ Discord は候補に入れない。
+   */
+  discord?: DiscordCandidateSource;
 }
 
 /** /ask へのフック(ask.ts が同期後・検索前に呼ぶ)。 */
@@ -296,7 +301,9 @@ export function createSystemOne(deps: SystemOneDeps): SystemOneHook {
           weights: w,
           nowMs: nowMs(),
           monotonicMs: mono,
-          ...(deps.discord !== undefined ? { discord: deps.discord } : {}),
+          ...((input.discord ?? deps.discord) !== undefined
+            ? { discord: (input.discord ?? deps.discord) as DiscordCandidateSource }
+            : {}),
           ...(deps.decider !== undefined ? { decider: deps.decider } : {}),
           dirOf: (repo) => {
             const d = dirs.get(repo);
