@@ -9,5 +9,7 @@ Description=stratum failure notifier for %i
 Type=oneshot
 # DISCORD_OPS_WEBHOOK を stratum.env から読む(chmod 600・§9.1)。未設定なら静かに成功終了。
 EnvironmentFile=__ENV_FILE__
+# 失敗中の印と出来事の記録(復旧通知・週次レポートが読む)。
+Environment=OPS_STATE_DIR=__DATA_DIR__/data/ops
 ExecStart=__REPO_DIR__/docs/deploy/notify-failure.sh %i
 SyslogIdentifier=stratum-notify-failure

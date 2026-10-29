@@ -6,6 +6,8 @@
 Description=stratum monthly docker image prune
 After=network-online.target
 OnFailure=stratum-notify-failure@%n.service
+# 失敗の後に成功したら「復旧しました」を送る(失敗中の印が無ければ何もしない)。
+OnSuccess=stratum-notify-recovered@%n.service
 
 [Service]
 Type=oneshot

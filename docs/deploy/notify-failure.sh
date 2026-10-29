@@ -6,6 +6,17 @@
 set -euo pipefail
 
 unit="${1:?usage: notify-failure.sh <unit>}"
+REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+CLI="$REPO_DIR/apps/discord-bot/dist/ops-notify-cli.js"
+
+# 原因の分類・まず試すこと・失敗中の印(復旧通知用)・週次集計の記録は ops-notify-cli が行う。
+# ビルドが壊れていて CLI が動かないときでも通知だけは届くよう、下の素朴な通知に落とす。
+if [ -f "$CLI" ] && journalctl --user -u "$unit" -n 40 -o cat --no-pager 2>/dev/null |
+  node "$CLI" failure "$unit"; then
+  exit 0
+fi
+echo "ops-notify-cli が使えないため、素朴な通知で送ります。" >&2
+
 if [ -z "${DISCORD_OPS_WEBHOOK:-}" ]; then
   echo "DISCORD_OPS_WEBHOOK 未設定。通知スキップ。"
   exit 0

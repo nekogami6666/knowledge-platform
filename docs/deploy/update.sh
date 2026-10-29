@@ -8,7 +8,9 @@ REPO_DIR="$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel)"
 cd "$REPO_DIR"
 
 echo "==> git pull (fast-forward only)"
+OLD_SHA="$(git rev-parse HEAD)"
 git pull --ff-only
+NEW_SHA="$(git rev-parse HEAD)"
 
 # gap-tracker(systemd 側・ADR-0014)はホストの dist を実行するため、ホストでも build する。
 # Node が無い(bot 専用 VM)場合はスキップ。
@@ -60,3 +62,17 @@ docker compose up -d
 
 echo ""
 echo "✅ 更新して再起動しました。ログ:  docker compose logs -f bot"
+
+# 本番更新の通知(#stratum-ops)。反映した commit の件名から fix / feat / perf を載せる(ops-notify-cli)。
+# webhook は stratum.env から読む(値は出さない)。通知に失敗しても更新自体は成功扱いにする。
+ENV_FILE="${STRATUM_ENV_FILE:-$HOME/stratum/stratum.env}"
+OPS_CLI="$REPO_DIR/apps/discord-bot/dist/ops-notify-cli.js"
+if [ "$OLD_SHA" != "$NEW_SHA" ] && command -v node >/dev/null 2>&1 && [ -f "$OPS_CLI" ] && [ -f "$ENV_FILE" ]; then
+  if git log --format=%s "$OLD_SHA..$NEW_SHA" |
+    DISCORD_OPS_WEBHOOK="$(sed -n 's/^DISCORD_OPS_WEBHOOK=//p' "$ENV_FILE" | tail -n 1)" \
+      OPS_STATE_DIR="$DATA_HOST/ops" node "$OPS_CLI" deploy "$OLD_SHA" "$NEW_SHA"; then
+    echo "==> #stratum-ops へ本番更新を通知しました"
+  else
+    echo "WARN: 本番更新の通知に失敗しました(更新自体は完了しています)" >&2
+  fi
+fi

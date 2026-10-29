@@ -6,15 +6,44 @@
  *
  * bot 本体には webhook 配線を足さない(bot の外向き I/O は Gateway 限定を維持)。投稿はこの CLI だけが行う。
  */
+import { readdirSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import { z } from "zod";
 import { createLogger } from "./logger.js";
+import { type OpsEvent, parseOpsEvents } from "./ops-notify.js";
 import { createSqliteStore } from "./sqlite-store.js";
 import { runStatsReport } from "./stats.js";
 
 const envSchema = z.object({
   DB_PATH: z.string().default("./data/bot.db"),
   DISCORD_OPS_WEBHOOK: z.string().optional(),
+  /** ops-notify-cli と同じ置き場(失敗中の印・出来事の記録)。無ければ「運用」節を出さない。 */
+  OPS_STATE_DIR: z.string().optional(),
 });
+
+/** 運用の出来事を読む。置き場が無い・読めないときは undefined(週次レポート自体は出す)。 */
+function readOps(
+  dir: string | undefined,
+): { events: OpsEvent[]; unresolved: string[] } | undefined {
+  if (dir === undefined) return undefined;
+  try {
+    let events: OpsEvent[] = [];
+    try {
+      events = parseOpsEvents(readFileSync(join(dir, "events.jsonl"), "utf8"));
+    } catch {
+      // まだ出来事が無い
+    }
+    let unresolved: string[] = [];
+    try {
+      unresolved = readdirSync(join(dir, "failing")).sort();
+    } catch {
+      // 印の置き場がまだ無い
+    }
+    return { events, unresolved };
+  } catch {
+    return undefined;
+  }
+}
 
 async function main(): Promise<void> {
   const env = envSchema.parse(process.env);
@@ -44,7 +73,14 @@ async function main(): Promise<void> {
   };
 
   try {
-    await runStatsReport({ store, now: () => new Date(), post, logger });
+    const ops = readOps(env.OPS_STATE_DIR);
+    await runStatsReport({
+      store,
+      now: () => new Date(),
+      post,
+      logger,
+      ...(ops !== undefined ? { ops } : {}),
+    });
   } finally {
     store.close();
   }

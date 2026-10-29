@@ -205,4 +205,28 @@ describe("runStatsReport", () => {
     expect(posted[0]).toContain("/ask: 2 件");
     expect(summary.window.up).toBe(2);
   });
+
+  it("運用の出来事があれば「運用」節を足す・無ければ足さない", async () => {
+    const posted: string[] = [];
+    const deps = {
+      store: { listQueries: () => [] },
+      now: () => NOW,
+      post: async (c: string) => {
+        posted.push(c);
+      },
+      logger: { info: vi.fn() },
+    };
+    await runStatsReport({
+      ...deps,
+      ops: {
+        events: [{ ts: IN, kind: "failure", unit: "stratum-freshness.service", category: "auth" }],
+        unresolved: ["stratum-freshness.service"],
+      },
+    });
+    await runStatsReport(deps);
+    expect(posted[0]).toContain("**運用(VM タイマー)**");
+    expect(posted[0]).toContain("stratum-freshness.service: 1 回・認証・権限");
+    expect(posted[0]).toContain("⚠️ 失敗中のまま");
+    expect(posted[1]).not.toContain("運用(VM タイマー)");
+  });
 });

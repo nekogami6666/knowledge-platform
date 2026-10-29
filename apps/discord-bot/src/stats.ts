@@ -9,6 +9,7 @@
  * (time.ts)なので、同形式の since 文字列との**辞書順比較 = 時系列比較**でウィンドウを絞れる。
  */
 import type { QueryRecord } from "./db.js";
+import { aggregateOpsEvents, formatOpsWeekly, type OpsEvent } from "./ops-notify.js";
 import { isoJst } from "./time.js";
 
 /** KPI 目標(§1.4)。未達は表示で ⚠️ を付ける。 */
@@ -150,12 +151,19 @@ export interface StatsReportDeps {
   /** レポート本文の送信(webhook POST 等)。テストで注入する。 */
   post: (content: string) => Promise<void>;
   logger: { info: (obj: object, msg: string) => void };
+  /** 運用の出来事(VM タイマーの失敗・復旧・本番更新・ops-notify)。あれば「運用」節を足す。 */
+  ops?: { events: readonly OpsEvent[]; unresolved: readonly string[] };
 }
 
 /** 週次レポートのオーケストレータ(stats-cli.ts が実 seam で呼ぶ)。集計 → 本文 → 送信。 */
 export async function runStatsReport(deps: StatsReportDeps): Promise<StatsSummary> {
   const summary = aggregateStats(deps.store.listQueries(), deps.now());
-  await deps.post(formatStatsMessage(summary));
+  let content = formatStatsMessage(summary);
+  if (deps.ops !== undefined) {
+    const weekly = aggregateOpsEvents(deps.ops.events, summary.window.since, deps.ops.unresolved);
+    content = [content, "", ...formatOpsWeekly(weekly)].join("\n");
+  }
+  await deps.post(content);
   deps.logger.info(
     { asks: summary.window.asks, usefulRate: summary.window.usefulRate },
     "stats report posted",

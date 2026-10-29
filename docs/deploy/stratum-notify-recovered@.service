@@ -1,0 +1,12 @@
+# systemd "user" template unit — 失敗していた stratum タイマーが成功したら #stratum-ops へ「復旧しました」を送る。
+# 各 stratum-*.service の [Unit] に `OnSuccess=stratum-notify-recovered@%n.service` を張って使う。
+# 失敗中の印(stratum-notify-failure@ が残す)が無ければ何もしない。
+[Unit]
+Description=stratum recovery notifier for %i
+
+[Service]
+Type=oneshot
+EnvironmentFile=__ENV_FILE__
+Environment=OPS_STATE_DIR=__DATA_DIR__/data/ops
+ExecStart=__REPO_DIR__/docs/deploy/notify-recovered.sh %i
+SyslogIdentifier=stratum-notify-recovered
