@@ -311,7 +311,7 @@ describe("buildRepoManifest (§6.2 repo 対応表)", () => {
     expect(buildRepoManifest([])).toBe("");
   });
 
-  it("description が無ければ従来と同一のバイト列(eval の manifest を変えない)", () => {
+  it("description が無いリポは従来と同じ行(org/name の順に並べる)", () => {
     expect(
       buildRepoManifest([
         { repo: "org/minutes", dir: "minutes" },
@@ -320,8 +320,8 @@ describe("buildRepoManifest (§6.2 repo 対応表)", () => {
     ).toBe(
       [
         "## 検索対象リポジトリ(このコーパスでの対応)",
-        "- org/minutes → サブディレクトリ `minutes/`",
         "- org/fw → サブディレクトリ `dispenser-fw/`",
+        "- org/minutes → サブディレクトリ `minutes/`",
         "引用の repo にはこの org/name を使い、path は各サブディレクトリ配下からの相対パスにすること。",
         "",
       ].join("\n"),
@@ -335,6 +335,22 @@ describe("buildRepoManifest (§6.2 repo 対応表)", () => {
     ]);
     expect(m).toContain("- org/minutes → サブディレクトリ `minutes/` — 開発定例の議事録\n");
     expect(m).toContain("- org/fw → サブディレクトリ `dispenser-fw/`\n");
+  });
+
+  it("入力の順序に依らず同じリポ集合なら同じバイト列(プロンプトキャッシュを効かせる)", () => {
+    const a = { repo: "org/minutes", dir: "minutes", description: "議事録" };
+    const b = { repo: "org/kb", dir: "kb" };
+    const c = { repo: "org/app", dir: "app-2" };
+    const d = { repo: "org/app", dir: "app-1" };
+    const m = buildRepoManifest([a, b, c, d]);
+    expect(buildRepoManifest([d, c, b, a])).toBe(m);
+    expect(buildRepoManifest([b, d, a, c])).toBe(m);
+    expect(m.split("\n").slice(1, 5)).toEqual([
+      "- org/app → サブディレクトリ `app-1/`",
+      "- org/app → サブディレクトリ `app-2/`",
+      "- org/kb → サブディレクトリ `kb/`",
+      "- org/minutes → サブディレクトリ `minutes/` — 議事録",
+    ]);
   });
 
   it("description の改行・連続空白は 1 行に畳み、manifest の行構造を壊さない", () => {
@@ -370,11 +386,11 @@ describe("sanitizeRepoDescription", () => {
 });
 
 describe("handleAskRequest synthetic 統合(§6.2 受け入れ条件)", () => {
-  it("systemPrompt に repo manifest とプロンプト本文を前置きして検索する(PR-6a)", async () => {
-    let capturedSystemPrompt = "";
+  it("systemPrompt はプロンプト本文だけ、repo manifest は後半(systemPromptDynamic)に分けて渡す(PR-6a・キャッシュ)", async () => {
+    let captured: { systemPrompt: string; systemPromptDynamic?: string } | undefined;
     const { deps } = makeDeps({
       search: async (input) => {
-        capturedSystemPrompt = input.systemPrompt;
+        captured = input;
         return {
           value: { answer: "ok", citations: [], notFound: true },
           usage: { inputTokens: 1, outputTokens: 1 },
@@ -382,8 +398,10 @@ describe("handleAskRequest synthetic 統合(§6.2 受け入れ条件)", () => {
       },
     });
     await handleAskRequest(req, deps);
-    expect(capturedSystemPrompt).toContain("org/minutes → サブディレクトリ `minutes/`");
-    expect(capturedSystemPrompt).toContain("Q&A システムプロンプト本文");
+    // 静的な本文が先頭(manifest が変わってもキャッシュの前半は同じバイト列)。
+    expect(captured?.systemPrompt).toBe("Q&A システムプロンプト本文");
+    expect(captured?.systemPromptDynamic).toContain("org/minutes → サブディレクトリ `minutes/`");
+    expect(captured?.systemPromptDynamic).not.toContain("Q&A システムプロンプト本文");
   });
 
   it("AC1: 出典付き回答 → answered で queries に記録(出典脚注つき)", async () => {
@@ -503,6 +521,10 @@ describe("handleAskRequest synthetic 統合(§6.2 受け入れ条件)", () => {
         },
         requestedModel: "m",
         actualModel: "m",
+        startupMs: 1500,
+        toolCalls: { Grep: 2, Read: 3, StructuredOutput: 1 },
+        parallelTurns: 1,
+        firstTurnCacheRead: 7000,
       }),
       // 呼ばれるたびに 1 秒進む(開始 → sync → prompt → search → recordQuery 直前 → validate)。
       monotonicMs: () => (t += 1000),
@@ -527,6 +549,11 @@ describe("handleAskRequest synthetic 統合(§6.2 受け入れ条件)", () => {
         validCitations: 1,
         requestedModel: "m",
         actualModel: "m",
+        startupMs: 1500,
+        toolCalls: { Grep: 2, Read: 3, StructuredOutput: 1 },
+        parallelTurns: 1,
+        firstTurnCacheRead: 7000,
+        firstTurnCacheCreation: null, // 無い値は null(0 と区別する)
       },
       // 試行ごとの通知をしない差し替えの検索は最終結果の値(試行回数は不明 = null)。
       usage: {
@@ -1087,7 +1114,7 @@ describe("handleAskRequest リポ単位同期(ADR-0036 D5・段階 1-2)", () => 
       syncer: h.syncer,
       perRepo: { registry, ttlMs: TTL, maxStalenessMs: MAX_STALE, nowMs: () => clock.now },
       search: async (input) => {
-        prompts.push(input.systemPrompt);
+        prompts.push(`${input.systemPrompt}\n${input.systemPromptDynamic ?? ""}`);
         return { value: answer, usage: { inputTokens: 1, outputTokens: 1 } };
       },
       logWarn: (data) => warns.push(data),

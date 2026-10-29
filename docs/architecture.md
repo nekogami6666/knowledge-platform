@@ -279,7 +279,7 @@ sequenceDiagram
     participant ST as sqlite-store
     U->>AK: /ask 質問文
     AK->>SY: sync(repos) = git fetch --depth=1 + reset --hard
-    AK->>QS: search({systemPrompt + repo manifest, question, cwd})
+    AK->>QS: search({systemPrompt = qa/answer 本文, systemPromptDynamic = repo manifest, question, cwd})
     QS->>AG: runAgentSearch(role=standard, schema=qaAnswer)
     AG-->>QS: {answer, citations, notFound}
     AK->>AK: validateCitations(allowlist照合 + SHA付与 + stale注記)
@@ -291,6 +291,12 @@ sequenceDiagram
         AK-->>U: 回答 + 出典脚注 + 👍/👎 ボタン
     end
 ```
+
+> **system prompt の順序(/ask 高速化)**: 静的な `qa/answer` 本文を先頭に、利用者の閲覧範囲・clone の有無で
+> 変わる repo manifest(org/name 順で決定的)を後ろに置き、Agent SDK の `SYSTEM_PROMPT_DYNAMIC_BOUNDARY` で
+> 分けて渡す(`runAgentSearch` の `systemPromptDynamic`)。manifest が変わっても本文側のプロンプトキャッシュが効く。
+> 完了ログ `/ask: 完了` の項目(工程別の時間・`startupMs`・`nonApiMs`・`toolCalls`・`parallelTurns` 等)は
+> [ask-metrics.ts](../apps/discord-bot/src/ask-metrics.ts) 冒頭の一覧が正。
 
 `validateCitations`([ask.ts](../apps/discord-bot/src/ask.ts))が守るもの:
 - Discord permalink は正規表現、GitHub repo は **同期済み allowlist に含まれること**、file は path-traversal ガード + 実在チェック。

@@ -2,6 +2,7 @@ import { LlmError } from "@stratum/llm";
 import { describe, expect, it } from "vitest";
 import {
   type AskPipelineMetrics,
+  type AskSearchMetrics,
   buildAskCompletionLog,
   classifyAskError,
   createUsageAccumulator,
@@ -76,6 +77,11 @@ describe("buildAskCompletionLog(1 行の完了ログ)", () => {
       validCitations: 1,
       requestedModel: "m",
       actualModel: "m",
+      startupMs: 1800,
+      toolCalls: { Grep: 3, Read: 4, StructuredOutput: 1 },
+      parallelTurns: 2,
+      firstTurnCacheRead: 6000,
+      firstTurnCacheCreation: 0,
     },
     usage: {
       searchAttempts: 2,
@@ -119,8 +125,35 @@ describe("buildAskCompletionLog(1 行の完了ログ)", () => {
       totalCostUsd: 0.07,
       requestedModel: "m",
       actualModel: "m",
+      // /ask 高速化の計測: 起動・API 以外の時間・ツール利用・最初の応答のキャッシュ。
+      startupMs: 1800,
+      nonApiMs: 2000, // searchMs 30_000 − durationApiMs 28_000
+      toolCalls: { Grep: 3, Read: 4, StructuredOutput: 1 },
+      parallelTurns: 2,
+      firstTurnCacheRead: 6000,
+      firstTurnCacheCreation: 0,
     });
     expect("failedStage" in f).toBe(false);
+  });
+
+  it("nonApiMs は searchMs と durationApiMs の両方があるときだけ(無ければ null)", () => {
+    const base = {
+      outcome: "answered",
+      queryId: "q1",
+      queueWaitMs: 0,
+      deliveryMs: 0,
+      totalMs: 1,
+      expired: false,
+      fallbackChunks: 0,
+    };
+    const search = metrics.search as AskSearchMetrics;
+    const noApi = buildAskCompletionLog({
+      ...base,
+      metrics: { ...metrics, search: { ...search, durationApiMs: null } },
+    });
+    expect(noApi.nonApiMs).toBeNull();
+    const failed = buildAskCompletionLog({ ...base, metrics: { ...metrics, search: null } });
+    expect(failed).toMatchObject({ nonApiMs: null, startupMs: null, toolCalls: null });
   });
 
   it("パイプライン内の失敗は受付からの経過(キュー待ち + 失敗時点)に直して載せる", () => {

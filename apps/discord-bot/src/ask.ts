@@ -66,16 +66,25 @@ export function sanitizeRepoDescription(description: string | undefined): string
     .trimEnd()}…`;
 }
 
+/** manifest の並び順(org/name → subdir の順にコード単位で比較。ロケールに依存させない)。 */
+function compareRepoSpec(a: RepoSpec, b: RepoSpec): number {
+  if (a.repo !== b.repo) return a.repo < b.repo ? -1 : 1;
+  if (a.dir !== b.dir) return a.dir < b.dir ? -1 : 1;
+  return 0;
+}
+
 /**
- * 検索対象 repo の「subdir ↔ org/name」対応表を systemPrompt に前置する manifest を組む(§6.2)。
+ * 検索対象 repo の「subdir ↔ org/name」対応表(manifest)を組む(§6.2)。system prompt の**後半**
+ * (プロンプト本文の後・QaSearchInput.systemPromptDynamic)に置く。
  * cwd 配下のサブディレクトリ名しか見えないエージェントに、引用すべき `repo`(org/name)を教える。
  * これが無いと本番 /ask でモデルが正しい repo を引用できない(eval と同一の manifest を共用する)。
  * description があれば行末に ` — 説明` を足し、探索するリポを絞る手がかりにする(ADR-0036 D6)。
- * description が無いリポの行は従来と同一(eval の manifest・ベースラインを変えない)。
+ * 行は org/name の順に並べ、入力の順序(列挙・同期の完了順)に依らず同じリポ集合なら同じバイト列にする
+ * (プロンプトキャッシュを効かせるため・/ask 高速化)。
  */
 export function buildRepoManifest(repos: readonly RepoSpec[]): string {
   if (repos.length === 0) return "";
-  const lines = repos.map((r) => {
+  const lines = [...repos].sort(compareRepoSpec).map((r) => {
     const base = `- ${r.repo} → サブディレクトリ \`${r.dir}/\``;
     const description = sanitizeRepoDescription(r.description);
     return description === undefined ? base : `${base} — ${description}`;
@@ -299,7 +308,13 @@ export function validateCitations(
 export type AskProgressEvent = { kind: "sync" } | { kind: "search" } | AgentProgressEvent;
 
 export interface QaSearchInput {
+  /** system prompt の静的な前半(qa/answer の本文)。 */
   systemPrompt: string;
+  /**
+   * system prompt の後半に置く、/ask ごとに変わりうる部分(repo 対応表)。runAgentSearch の
+   * systemPromptDynamic へ透過し、静的な前半をプロンプトキャッシュに残す(/ask 高速化)。
+   */
+  systemPromptDynamic?: string;
   question: string;
   cwd: string;
   /** 進捗の購読(ADR-0035 D5)。runAgentSearch へ透過する。 */
@@ -815,10 +830,10 @@ export async function handleAskRequest(req: AskRequest, deps: AskDeps): Promise<
 
     stage = "prompt";
     const prompt = await loadPrompt("qa", "answer", deps.promptStore);
-    // §6.2: repo 対応表を前置きし、モデルが正しい org/name で引用できるようにする(PR-6a)。
-    // all_visible 有効時は clone のあるリポだけを載せる(ADR-0036)。
+    // §6.2: repo 対応表を渡し、モデルが正しい org/name で引用できるようにする(PR-6a)。
+    // all_visible 有効時は clone のあるリポだけを載せる(ADR-0036)。対応表は利用者の閲覧範囲・
+    // clone の有無で変わるため、静的な本文の**後**に置く(本文をプロンプトキャッシュに残す・/ask 高速化)。
     const manifest = buildRepoManifest(repos);
-    const systemPrompt = manifest === "" ? prompt.body : `${manifest}\n${prompt.body}`;
     // git sync は中断できない(1 コマンド 60 秒の上限つき)ため、同期後に一度確かめてから検索に入る。
     if (isAborted()) return interrupted();
     timings.promptMs = endStage();
@@ -828,7 +843,8 @@ export async function handleAskRequest(req: AskRequest, deps: AskDeps): Promise<
     // ADR-0038 D6: Discord 本文検索が有効なら、質問者の範囲に閉じた discord_search を渡す。
     const discordTools = deps.discordSearch?.tools ?? [];
     const result = await deps.search({
-      systemPrompt,
+      systemPrompt: prompt.body,
+      ...(manifest !== "" ? { systemPromptDynamic: manifest } : {}),
       question: req.question,
       cwd: deps.clonesDir,
       ...(deps.onProgress !== undefined ? { onProgress: deps.onProgress } : {}),

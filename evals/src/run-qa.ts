@@ -5,7 +5,7 @@
  * ADR-0002: corpus は synthetic のみ。
  */
 import { buildRepoManifest, createQaSearch } from "@stratum/discord-bot/qa";
-import { createFsPromptStore, loadPrompt } from "@stratum/llm";
+import { createFsPromptStore, loadPrompt, type PromptStore } from "@stratum/llm";
 import { loadGoldenQa } from "./golden.js";
 import { type JudgedQuestion, judgeAnswer, scoreValidity, type ValidityScore } from "./judge.js";
 import { type QaResult, type RunScore, scoreRun } from "./score.js";
@@ -30,13 +30,33 @@ export interface GoldenEvalResult {
   results: QaResult[];
 }
 
+/** /ask と同じ形の system prompt(静的な qa/answer 本文 + 後半の repo 対応表)。 */
+export interface QaSystemPrompt {
+  systemPrompt: string;
+  systemPromptDynamic?: string;
+}
+
+/**
+ * qa/answer を読み、本番 /ask(ask.ts handleAskRequest)と同じ順序で system prompt を組む
+ * (本文を先頭、manifest を後半 = systemPromptDynamic)。golden eval と速度ベンチが共用する。
+ */
+export async function loadQaSystemPrompt(
+  promptStore: PromptStore,
+  repos: readonly { repo: string; dir: string }[],
+): Promise<QaSystemPrompt> {
+  const qaPrompt = await loadPrompt("qa", "answer", promptStore);
+  const manifest = buildRepoManifest(repos);
+  return {
+    systemPrompt: qaPrompt.body,
+    ...(manifest !== "" ? { systemPromptDynamic: manifest } : {}),
+  };
+}
+
 /** golden 全件を実 Claude で評価し、出典一致 + 回答妥当性を返す。 */
 export async function runGoldenEval(input: GoldenEvalInput): Promise<GoldenEvalResult> {
   const golden = loadGoldenQa(input.goldenYaml);
   const promptStore = createFsPromptStore(input.promptsDir);
-  const qaPrompt = await loadPrompt("qa", "answer", promptStore);
-  const manifest = buildRepoManifest(input.repos);
-  const systemPrompt = manifest === "" ? qaPrompt.body : `${manifest}\n${qaPrompt.body}`;
+  const qaSystemPrompt = await loadQaSystemPrompt(promptStore, input.repos);
   const search = createQaSearch();
 
   const results: QaResult[] = [];
@@ -44,7 +64,7 @@ export async function runGoldenEval(input: GoldenEvalInput): Promise<GoldenEvalR
     // ADR-0035 D6: 所要時間とターン数も残す(正答率と併せて探索予算・ノブの効果を見る)。
     const t0 = performance.now();
     const { value, numTurns } = await search({
-      systemPrompt,
+      ...qaSystemPrompt,
       question: g.question,
       cwd: input.corpusDir,
     });

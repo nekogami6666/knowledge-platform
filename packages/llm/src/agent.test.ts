@@ -785,3 +785,114 @@ describe("プロセス内ツール(ADR-0038 D6: mcpServers の例外)", () => {
     ).toThrow();
   });
 });
+
+describe("/ask 高速化の計測(起動・ツール利用・最初の応答のキャッシュ)", () => {
+  const success = {
+    type: "result",
+    subtype: "success",
+    structured_output: { answer: "A", notFound: false },
+    usage: { input_tokens: 1, output_tokens: 1 },
+  };
+
+  it("startupMs は query() 開始から最初のメッセージまで(単調クロックの差分)", async () => {
+    const ticks = [100, 1_850, 9_999];
+    const res = await runAgentSearch(baseOpts, {
+      queryFn: streamOf({ type: "system", subtype: "init" }, success),
+      monotonicMs: () => ticks.shift() ?? 9_999,
+    });
+    expect(res.startupMs).toBe(1_750);
+  });
+
+  it("toolCalls はツール名ごとの回数、parallelTurns は 2 つ以上の tool_use を含む API 応答の数(message.id 単位)", async () => {
+    const res = await runAgentSearch(baseOpts, {
+      queryFn: streamOf(
+        { type: "system", subtype: "init" },
+        // 応答 m1: SDK はブロックごとに分けて流す(同じ id)。Grep + Glob の並列 = 1 ターン。
+        { type: "assistant", message: { id: "m1", content: [{ type: "thinking" }] } },
+        {
+          type: "assistant",
+          message: { id: "m1", content: [{ type: "tool_use", name: "Grep", input: { q: "x" } }] },
+        },
+        { type: "assistant", message: { id: "m1", content: [{ type: "tool_use", name: "Glob" }] } },
+        // 応答 m2: Read 1 つ(並列ではない)。
+        { type: "assistant", message: { id: "m2", content: [{ type: "tool_use", name: "Read" }] } },
+        // 応答 m3: 1 メッセージに Read ×2 + discord_search(プロセス内ツールは接頭辞を外す)。
+        {
+          type: "assistant",
+          message: {
+            id: "m3",
+            content: [
+              { type: "tool_use", name: "Read" },
+              { type: "tool_use", name: "Read" },
+              { type: "tool_use", name: inProcessToolName("discord_search") },
+            ],
+          },
+        },
+        // 想定外の名前はログに載せず other に畳む。id の無いメッセージは 1 件 = 1 応答。
+        {
+          type: "assistant",
+          message: { id: "m4", content: [{ type: "tool_use", name: "a b/c" }] },
+        },
+        {
+          type: "assistant",
+          message: { content: [{ type: "tool_use", name: "StructuredOutput" }] },
+        },
+        success,
+      ),
+    });
+    expect(res.toolCalls).toEqual({
+      Grep: 1,
+      Glob: 1,
+      Read: 3,
+      discord_search: 1,
+      other: 1,
+      StructuredOutput: 1,
+    });
+    expect(res.parallelTurns).toBe(2);
+  });
+
+  it("firstTurnCacheRead / Creation は最初の assistant の message.usage から取る(無ければキー無し)", async () => {
+    const res = await runAgentSearch(baseOpts, {
+      queryFn: streamOf(
+        {
+          type: "assistant",
+          message: {
+            id: "m1",
+            content: [],
+            usage: { cache_read_input_tokens: 4_000, cache_creation_input_tokens: 300 },
+          },
+        },
+        {
+          type: "assistant",
+          message: { id: "m2", content: [], usage: { cache_read_input_tokens: 9_000 } },
+        },
+        success,
+      ),
+    });
+    expect(res.firstTurnCacheRead).toBe(4_000);
+    expect(res.firstTurnCacheCreation).toBe(300);
+    const res2 = await runAgentSearch(baseOpts, { queryFn: streamOf(success) });
+    expect("firstTurnCacheRead" in res2).toBe(false);
+    expect(res2.toolCalls).toEqual({});
+    expect(res2.parallelTurns).toBe(0);
+  });
+
+  it("systemPromptDynamic があれば 静的本文 → 境界 → 動的部分 の配列で渡し、無ければ文字列のまま", async () => {
+    const seenOf = async (extra: { systemPromptDynamic?: string }) => {
+      let seen: Options | undefined;
+      const queryFn: AgentQueryFn = ({ options }) => {
+        seen = options;
+        return streamOf(success)({ prompt: "", options });
+      };
+      await runAgentSearch({ ...baseOpts, ...extra }, { queryFn });
+      return seen?.systemPrompt;
+    };
+    expect(await seenOf({ systemPromptDynamic: "## 対応表" })).toEqual([
+      "sys",
+      "__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__",
+      "## 対応表",
+    ]);
+    expect(await seenOf({ systemPromptDynamic: "" })).toBe("sys");
+    expect(await seenOf({})).toBe("sys");
+  });
+});

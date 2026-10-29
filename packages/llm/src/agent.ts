@@ -24,6 +24,7 @@ import {
   type HookCallback,
   type Options,
   query,
+  SYSTEM_PROMPT_DYNAMIC_BOUNDARY,
   type ThinkingConfig,
   tool,
 } from "@anthropic-ai/claude-agent-sdk";
@@ -193,8 +194,15 @@ export interface AgentSearchOptions<T> {
   app: string;
   /** モデルロール(§5.2)。モデル ID は models.ts から解決する。 */
   role: ModelRole;
-  /** system prompt 本文(loadPrompt で読んだ body)。 */
+  /** system prompt 本文(loadPrompt で読んだ body)。呼び出しをまたいで変わらない静的な部分を置く。 */
   systemPrompt: string;
+  /**
+   * system prompt の後半に置く、呼び出しごとに変わりうる部分(/ask の repo 対応表など)。
+   * 空でなければ SDK の `SYSTEM_PROMPT_DYNAMIC_BOUNDARY` で `systemPrompt` と分けて渡し、静的な前半だけを
+   * セッションをまたぐプロンプトキャッシュの対象にする(後半が変わっても前半のキャッシュは効く)。
+   * 未指定・空なら従来どおり `systemPrompt` の文字列 1 つを渡す。
+   */
+  systemPromptDynamic?: string;
   /** ユーザの質問。 */
   prompt: string;
   /** 検索対象のローカル clone ルート(cwd)。 */
@@ -277,6 +285,24 @@ export interface AgentSearchResult<T> {
   totalCostUsd?: number;
   /** モデル別の使用量(result.modelUsage を必要な数値だけに絞ったもの・観測用)。 */
   modelUsage?: Record<string, AgentModelUsage>;
+  /**
+   * query() の開始から最初の SDK メッセージ(通常 system init)までの ms(subprocess の起動コスト・観測用)。
+   * メッセージが 1 件も無ければ undefined。
+   */
+  startupMs?: number;
+  /**
+   * ツール名ごとの呼び出し回数(assistant の tool_use ブロックを数えたもの・観測用)。プロセス内ツールは
+   * `mcp__stratum__` を外した名前(例 discord_search)。引数・パス・出力は持たない。
+   */
+  toolCalls?: Record<string, number>;
+  /** 2 つ以上の tool_use を含んだ API 応答(= 並列にツールを呼んだターン)の数(観測用)。 */
+  parallelTurns?: number;
+  /**
+   * 最初の API 応答のキャッシュ読み取り / 作成トークン(assistant の message.usage・参考値)。
+   * system prompt・ツール定義の前半がキャッシュに当たったかを見る。usage が無ければ undefined。
+   */
+  firstTurnCacheRead?: number;
+  firstTurnCacheCreation?: number;
 }
 
 /**
@@ -338,6 +364,8 @@ export interface LlmDeps {
   queryFn?: AgentQueryFn;
   /** usage 記録先。既定は no-op。 */
   usage?: UsageRecorder;
+  /** 単調クロック ms(startupMs の計測用。既定 performance.now・テストで差し替え)。 */
+  monotonicMs?: () => number;
 }
 
 const defaultQueryFn: AgentQueryFn = (params) => query(params);
@@ -368,7 +396,7 @@ interface ResultMessage {
 /** Agent SDK の assistant メッセージ(tool_use ブロック抽出に必要な部分のみ)。 */
 interface AssistantMessage {
   type: "assistant";
-  message?: { content?: unknown; model?: unknown };
+  message?: { id?: unknown; content?: unknown; model?: unknown; usage?: unknown };
 }
 
 function isAssistantMessage(m: unknown): m is AssistantMessage {
@@ -391,6 +419,67 @@ export function toolNamesOf(m: AssistantMessage): string[] {
     }
   }
   return names;
+}
+
+/** ログに載せてよいツール名(英数字・`_`・`-` のみ)。それ以外は "other" に畳む。 */
+const LOGGABLE_TOOL_NAME_RE = /^[A-Za-z0-9_-]{1,64}$/;
+const IN_PROCESS_TOOL_PREFIX = `mcp__${IN_PROCESS_MCP_SERVER}__`;
+
+/** 観測用のツール名(プロセス内ツールは接頭辞を外す。想定外の名前は "other")。 */
+function loggableToolName(name: string): string {
+  const short = name.startsWith(IN_PROCESS_TOOL_PREFIX)
+    ? name.slice(IN_PROCESS_TOOL_PREFIX.length)
+    : name;
+  return LOGGABLE_TOOL_NAME_RE.test(short) ? short : "other";
+}
+
+/** 1 回の実行のツール利用の集計(観測用)。 */
+interface AgentToolStats {
+  toolCalls: Record<string, number>;
+  parallelTurns: number;
+}
+
+/**
+ * SDK のメッセージ列からツール利用を集計する(観測用)。SDK はストリーム中、1 つの API 応答を
+ * content ブロックごとの assistant メッセージに分けて流す(同じ message.id を共有する)ため、
+ * 並列呼び出しの判定は message.id ごとに tool_use を数える。id が無いメッセージは 1 件を 1 応答とみなす。
+ */
+function createToolStatsCollector(): {
+  add(m: AssistantMessage): void;
+  stats(): AgentToolStats;
+} {
+  const toolCalls: Record<string, number> = {};
+  const perResponse = new Map<unknown, number>();
+  return {
+    add(m) {
+      const names = toolNamesOf(m);
+      if (names.length === 0) return;
+      for (const n of names) {
+        const k = loggableToolName(n);
+        toolCalls[k] = (toolCalls[k] ?? 0) + 1;
+      }
+      const id = m.message?.id;
+      const key = typeof id === "string" && id !== "" ? id : Symbol();
+      perResponse.set(key, (perResponse.get(key) ?? 0) + names.length);
+    },
+    stats: () => ({
+      toolCalls: { ...toolCalls },
+      parallelTurns: [...perResponse.values()].filter((n) => n >= 2).length,
+    }),
+  };
+}
+
+/** assistant メッセージの message.usage からキャッシュ読み取り / 作成トークンを抜く(無ければ undefined)。 */
+function cacheUsageOf(
+  m: AssistantMessage,
+): { read: number | undefined; creation: number | undefined } | undefined {
+  const u = m.message?.usage;
+  if (typeof u !== "object" || u === null) return undefined;
+  const r = u as Record<string, unknown>;
+  return {
+    read: finiteOrUndefined(r.cache_read_input_tokens),
+    creation: finiteOrUndefined(r.cache_creation_input_tokens),
+  };
 }
 
 function isResultMessage(m: unknown): m is ResultMessage {
@@ -470,8 +559,14 @@ export async function runAgentSearch<T>(
   const requestedModel = modelIdFor(opts.role);
   const inProcessTools = opts.inProcessTools ?? [];
   const inProcessNames = inProcessTools.map((t) => inProcessToolName(t.name));
+  // 静的な本文 → 境界 → 呼び出しごとに変わる部分(manifest 等)の順にし、前半をキャッシュに残す。
+  const dynamic = opts.systemPromptDynamic ?? "";
+  const systemPrompt: Options["systemPrompt"] =
+    dynamic === ""
+      ? opts.systemPrompt
+      : [opts.systemPrompt, SYSTEM_PROMPT_DYNAMIC_BOUNDARY, dynamic];
   const options: Options = {
-    systemPrompt: opts.systemPrompt,
+    systemPrompt,
     model: requestedModel,
     cwd: opts.cwd,
     permissionMode: "dontAsk",
@@ -504,12 +599,21 @@ export async function runAgentSearch<T>(
   let result: ResultMessage | undefined;
   let turn = 0;
   let actualModel: string | undefined;
+  // 観測用(/ask 高速化の計測): 起動コスト・ツール利用・最初の応答のキャッシュ。
+  const clock = deps.monotonicMs ?? (() => performance.now());
+  const queryStartedAt = clock();
+  let startupMs: number | undefined;
+  let firstTurnCache: { read: number | undefined; creation: number | undefined } | undefined;
+  const toolStats = createToolStatsCollector();
   try {
     for await (const msg of queryFn({ prompt: opts.prompt, options })) {
+      startupMs ??= Math.round(clock() - queryStartedAt);
       if (isResultMessage(msg)) result = msg;
-      else if (isAssistantMessage(msg) && actualModel === undefined) {
+      else if (isAssistantMessage(msg)) {
+        toolStats.add(msg);
+        firstTurnCache ??= cacheUsageOf(msg);
         const m = msg.message?.model;
-        if (typeof m === "string" && m !== "") actualModel = m;
+        if (actualModel === undefined && typeof m === "string" && m !== "") actualModel = m;
       }
       if (opts.onProgress !== undefined && isAssistantMessage(msg)) {
         turn += 1;
@@ -602,5 +706,11 @@ export async function runAgentSearch<T>(
       : {}),
     requestedModel,
     ...(actualModel !== undefined ? { actualModel } : {}),
+    ...(startupMs !== undefined ? { startupMs } : {}),
+    ...toolStats.stats(),
+    ...(firstTurnCache?.read !== undefined ? { firstTurnCacheRead: firstTurnCache.read } : {}),
+    ...(firstTurnCache?.creation !== undefined
+      ? { firstTurnCacheCreation: firstTurnCache.creation }
+      : {}),
   };
 }

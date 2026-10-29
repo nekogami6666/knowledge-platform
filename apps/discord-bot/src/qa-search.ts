@@ -99,6 +99,9 @@ export function createQaSearch(deps: QaSearchFactoryDeps = {}): QaSearch {
               app: "discord-bot",
               role: "qa",
               systemPrompt: input.systemPrompt,
+              ...(input.systemPromptDynamic !== undefined
+                ? { systemPromptDynamic: input.systemPromptDynamic }
+                : {}),
               prompt: input.question,
               cwd: input.cwd,
               outputSchema: qaAnswerSchema,

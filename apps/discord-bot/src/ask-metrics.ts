@@ -20,6 +20,13 @@
  * - 検索の観測値(最終結果から・検索が成功しなかった場合は null): numTurns / durationApiMs /
  *   deniedToolCalls / notFound / citations(モデルが返した数)/ validCitations(検証を通った数)/
  *   requestedModel / actualModel
+ * - 検索の内訳(/ask 高速化の計測。最終結果から・無ければ null):
+ *   - startupMs: query() の開始 → 最初の SDK メッセージ(Claude Code subprocess の起動コスト)
+ *   - nonApiMs: searchMs − durationApiMs(起動・ツール実行・SDK 内部の時間。再試行があると前の試行分も含む)
+ *   - toolCalls: ツール名ごとの呼び出し回数({ Read, Grep, Glob, discord_search, StructuredOutput, … }。
+ *     引数・パスは載せない)/ parallelTurns: 2 つ以上のツールを同時に呼んだ API 応答の数
+ *   - firstTurnCacheRead / firstTurnCacheCreation: 最初の API 応答のキャッシュ読み取り / 作成トークン
+ *     (system prompt・ツール定義がキャッシュに当たったかの参考値)
  * - Discord 本文検索(ADR-0038): discordSearch({ calls, hits, ms, overLimit }。機能 OFF なら null。本文は出さない)
  * - 使用量(**全試行の合計**。形式エラーで再試行した回・最終的に失敗した回も含む。試行が無ければ null):
  *   searchAttempts(検索の試行回数)/ inputTokens / outputTokens / cacheCreationInputTokens /
@@ -57,6 +64,15 @@ export interface AskSearchMetrics {
   validCitations: number;
   requestedModel: string | null;
   actualModel: string | null;
+  /** query() 開始 → 最初の SDK メッセージの ms(subprocess の起動コスト)。 */
+  startupMs: number | null;
+  /** ツール名ごとの呼び出し回数(引数・パスは持たない)。 */
+  toolCalls: Record<string, number> | null;
+  /** 2 つ以上のツールを同時に呼んだ API 応答の数。 */
+  parallelTurns: number | null;
+  /** 最初の API 応答のキャッシュ読み取り / 作成トークン(参考値)。 */
+  firstTurnCacheRead: number | null;
+  firstTurnCacheCreation: number | null;
 }
 
 /** 検索の使用量(全試行の合計)。キャッシュ・費用はどの試行にも無ければ null。 */
@@ -199,6 +215,11 @@ export function searchMetricsOf(
     validCitations,
     requestedModel: r.requestedModel ?? null,
     actualModel: r.actualModel ?? null,
+    startupMs: r.startupMs ?? null,
+    toolCalls: r.toolCalls ?? null,
+    parallelTurns: r.parallelTurns ?? null,
+    firstTurnCacheRead: r.firstTurnCacheRead ?? null,
+    firstTurnCacheCreation: r.firstTurnCacheCreation ?? null,
   };
 }
 
@@ -282,6 +303,8 @@ export function buildAskCompletionLog(input: AskCompletionInput): Record<string,
   const m = input.metrics;
   const s = m?.search ?? null;
   const u = m?.usage ?? null;
+  const searchMs = m?.searchMs ?? null;
+  const durationApiMs = s?.durationApiMs ?? null;
   const fields: Record<string, unknown> = {
     outcome: input.outcome,
     queryId: input.queryId,
@@ -289,7 +312,7 @@ export function buildAskCompletionLog(input: AskCompletionInput): Record<string,
     queueWaitMs: input.queueWaitMs,
     syncMs: m?.syncMs ?? null,
     promptMs: m?.promptMs ?? null,
-    searchMs: m?.searchMs ?? null,
+    searchMs,
     validateMs: m?.validateMs ?? null,
     deliveryMs: input.deliveryMs,
     elapsedMs: m?.elapsedMs ?? null,
@@ -301,7 +324,13 @@ export function buildAskCompletionLog(input: AskCompletionInput): Record<string,
     reposExcluded: m?.sync?.reposExcluded ?? null,
     staleAgeMs: m?.sync?.staleAgeMs ?? null,
     numTurns: s?.numTurns ?? null,
-    durationApiMs: s?.durationApiMs ?? null,
+    durationApiMs,
+    startupMs: s?.startupMs ?? null,
+    nonApiMs: searchMs !== null && durationApiMs !== null ? searchMs - durationApiMs : null,
+    toolCalls: s?.toolCalls ?? null,
+    parallelTurns: s?.parallelTurns ?? null,
+    firstTurnCacheRead: s?.firstTurnCacheRead ?? null,
+    firstTurnCacheCreation: s?.firstTurnCacheCreation ?? null,
     deniedToolCalls: s?.deniedToolCalls ?? null,
     notFound: s?.notFound ?? null,
     citations: s?.citations ?? null,
