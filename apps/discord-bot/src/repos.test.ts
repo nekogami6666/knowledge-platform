@@ -336,6 +336,225 @@ describe("createGitRepoSyncer.fetchTimeOnDisk(再起動直後の最終成功時�
   });
 });
 
+describe("createGitRepoSyncer の高速化(並列・fast 経路・reset の省略・ADR-0035 追記 2026-10-08)", () => {
+  const tmpDirs: string[] = [];
+  afterEach(async () => {
+    await Promise.all(tmpDirs.splice(0).map((d) => rm(d, { recursive: true, force: true })));
+  });
+  const makeClonesDir = async (): Promise<string> => {
+    const d = await mkdtemp(join(tmpdir(), "bot-repos-fast-"));
+    tmpDirs.push(d);
+    return d;
+  };
+  const spec: RepoSpec = { repo: "org/a", dir: "a", url: "https://x@github.com/org/a.git" };
+
+  /**
+   * 状態を持つ fake git(既存 clone・移行済み)。fetch は remote の SHA を FETCH_HEAD に置き、
+   * reset --hard は HEAD を FETCH_HEAD へ進めて作業ツリーをクリーンにする。
+   * `.git/config` の更新時刻は configMtime(fs fake で返す)。
+   */
+  function stateful() {
+    const st = {
+      head: "sha1",
+      remote: "sha1",
+      fetched: "",
+      status: "",
+      symlinks: "false" as string | null,
+      configMtime: 100,
+      failFetch: false,
+    };
+    const calls: string[][] = [];
+    const exec: GitExec = async (args) => {
+      calls.push([...args]);
+      const op = args[2];
+      if (op === "rev-parse" && args[3] === "--git-dir") return { stdout: ".git\n" };
+      if (op === "rev-parse" && args[3] === "HEAD" && args[4] === "FETCH_HEAD") {
+        return { stdout: `${st.head}\n${st.fetched}\n` };
+      }
+      if (op === "rev-parse") return { stdout: `${st.head}\n` };
+      if (op === "config" && args[3] === "--get") {
+        if (st.symlinks === null) throw new Error("exit 1");
+        return { stdout: `${st.symlinks}\n` };
+      }
+      if (op === "fetch") {
+        if (st.failFetch) throw new Error("network down");
+        st.fetched = st.remote;
+      }
+      if (op === "status") return { stdout: st.status };
+      if (args.includes("reset")) {
+        st.head = st.fetched;
+        st.status = "";
+      }
+      return { stdout: "" };
+    };
+    const fs: RepoFs = {
+      mtimeMs: async (p) => (p.endsWith("/.git/config") ? st.configMtime : null),
+      readText: async () => null,
+    };
+    const ops = (from = 0): string[] =>
+      calls.slice(from).map((a) => (a[0] === "-C" ? a.slice(2) : a).join(" "));
+    return { st, calls, exec, fs, ops };
+  }
+
+  it("syncEach は複数リポを並列に同期し、結果は specs と同順で返す", async () => {
+    const c = await makeClonesDir();
+    let active = 0;
+    let maxActive = 0;
+    const exec: GitExec = async (args) => {
+      if (args[2] === "rev-parse" && args[3] === "--git-dir") return { stdout: ".git\n" };
+      if (args[2] === "fetch") {
+        active += 1;
+        maxActive = Math.max(maxActive, active);
+        await new Promise((r) => setTimeout(r, 20));
+        active -= 1;
+      }
+      return { stdout: `${args[1]?.endsWith("/a") ? "sha-a" : "sha-b"}\n` };
+    };
+    const results = await createGitRepoSyncer(c, exec).syncEach([
+      { repo: "org/a", dir: "a", url: "https://github.com/org/a.git" },
+      { repo: "org/b", dir: "b", url: "https://github.com/org/b.git" },
+    ]);
+    expect(maxActive).toBe(2); // 2 リポの fetch が同時に走った
+    expect(
+      results.map((r) => (r.status === "synced" ? r.synced.resolvedCommit : r.status)),
+    ).toEqual(["sha-a", "sha-b"]);
+  });
+
+  it("同じ dir が重複して渡されたら直列にする(同一 clone へ同時に書き込まない)", async () => {
+    const c = await makeClonesDir();
+    let active = 0;
+    let maxActive = 0;
+    const exec: GitExec = async (args) => {
+      if (args[2] === "rev-parse" && args[3] === "--git-dir") return { stdout: ".git\n" };
+      if (args[2] === "fetch") {
+        active += 1;
+        maxActive = Math.max(maxActive, active);
+        await new Promise((r) => setTimeout(r, 10));
+        active -= 1;
+      }
+      return { stdout: "sha\n" };
+    };
+    const s: RepoSpec = { repo: "org/a", dir: "a", url: "https://github.com/org/a.git" };
+    const results = await createGitRepoSyncer(c, exec).syncEach([s, s]);
+    expect(maxActive).toBe(1);
+    expect(results.map((r) => r.status)).toEqual(["synced", "synced"]);
+  });
+
+  it("2 回目以降は scrub・HEAD 有無・core.symlinks の確認を省き、変化もクリーンなら reset/clean も省く", async () => {
+    const c = await makeClonesDir();
+    const g = stateful();
+    const syncer = createGitRepoSyncer(c, g.exec, g.fs);
+    const [first] = await syncer.syncEach([spec]);
+    // 初回(full 経路): scrub・HEAD 有無・symlink 移行の確認をする。
+    expect(g.ops()).toContain(
+      `config remote.origin.url ${CLEAN_URL.replace("knowledge-base", "a")}`,
+    );
+    expect(g.ops()).toContain("rev-parse --verify -q HEAD");
+    expect(g.ops()).toContain("config --get core.symlinks");
+    // fetch の結果が HEAD と同じでクリーンなので、初回でも reset/clean は省く。
+    expect(first?.status === "synced" && first.resetSkipped).toBe(true);
+
+    const mark = g.calls.length;
+    const [second] = await syncer.syncEach([spec]);
+    expect(g.ops(mark)).toEqual([
+      "rev-parse --git-dir", // 独立リポの確認は毎回(ADR-0037・親リポ破壊の防止)
+      `fetch --depth=1 ${spec.url}`,
+      "rev-parse HEAD FETCH_HEAD",
+      "status --porcelain",
+    ]);
+    expect(second).toMatchObject({
+      status: "synced",
+      resetSkipped: true,
+      synced: { resolvedCommit: "sha1" },
+    });
+  });
+
+  it("fetch で HEAD が進んだら reset/clean する(status は見ない)", async () => {
+    const c = await makeClonesDir();
+    const g = stateful();
+    const syncer = createGitRepoSyncer(c, g.exec, g.fs);
+    await syncer.syncEach([spec]);
+    g.st.remote = "sha2";
+    const mark = g.calls.length;
+    const [r] = await syncer.syncEach([spec]);
+    expect(g.ops(mark)).toEqual([
+      "rev-parse --git-dir",
+      `fetch --depth=1 ${spec.url}`,
+      "rev-parse HEAD FETCH_HEAD",
+      "-c core.symlinks=false reset --hard FETCH_HEAD",
+      "clean -fd",
+      "rev-parse HEAD",
+    ]);
+    expect(r).toMatchObject({
+      status: "synced",
+      resetSkipped: false,
+      synced: { resolvedCommit: "sha2" },
+    });
+  });
+
+  it("HEAD が同じでも作業ツリーが汚れていれば(書き込み・未追跡の残骸)reset/clean する", async () => {
+    const c = await makeClonesDir();
+    const g = stateful();
+    const syncer = createGitRepoSyncer(c, g.exec, g.fs);
+    await syncer.syncEach([spec]);
+    g.st.status = "?? litter.md\n";
+    const mark = g.calls.length;
+    const [r] = await syncer.syncEach([spec]);
+    expect(g.ops(mark)).toContain("status --porcelain");
+    expect(g.ops(mark)).toContain("-c core.symlinks=false reset --hard FETCH_HEAD");
+    expect(g.ops(mark)).toContain("clean -fd");
+    expect(r).toMatchObject({ status: "synced", resetSkipped: false });
+  });
+
+  it("`.git/config` が変わった・同期に失敗した後は full 経路(scrub・確認)に戻る", async () => {
+    const c = await makeClonesDir();
+    const g = stateful();
+    const syncer = createGitRepoSyncer(c, g.exec, g.fs);
+    const scrubbed = (from: number): boolean =>
+      g.ops(from).some((o) => o.startsWith("config remote.origin.url"));
+    await syncer.syncEach([spec]);
+    // 手動の再 clone・他プロセスの origin 書き換え等で config が変わった。
+    g.st.configMtime = 200;
+    let mark = g.calls.length;
+    await syncer.syncEach([spec]);
+    expect(scrubbed(mark)).toBe(true);
+    // 確認し直した後は再び fast 経路。
+    mark = g.calls.length;
+    await syncer.syncEach([spec]);
+    expect(scrubbed(mark)).toBe(false);
+    // 同期に失敗したら次回は full 経路。
+    g.st.failFetch = true;
+    expect((await syncer.syncEach([spec]))[0]?.status).toBe("failed");
+    g.st.failFetch = false;
+    mark = g.calls.length;
+    await syncer.syncEach([spec]);
+    expect(scrubbed(mark)).toBe(true);
+    expect(g.ops(mark)).toContain("config --get core.symlinks");
+  });
+
+  it("config の時刻が取れない clone は毎回 full 経路", async () => {
+    const c = await makeClonesDir();
+    const g = stateful();
+    const syncer = createGitRepoSyncer(c, g.exec, { ...g.fs, mtimeMs: async () => null });
+    await syncer.syncEach([spec]);
+    const mark = g.calls.length;
+    await syncer.syncEach([spec]);
+    expect(g.ops(mark)).toContain("config --get core.symlinks");
+  });
+
+  it("未移行(core.symlinks 未設定)の clone は fetch 結果が同じでも index を空にして reset する", async () => {
+    const c = await makeClonesDir();
+    const g = stateful();
+    g.st.symlinks = null;
+    const [r] = await createGitRepoSyncer(c, g.exec, g.fs).syncEach([spec]);
+    expect(g.ops()).not.toContain("rev-parse HEAD FETCH_HEAD");
+    expect(g.ops()).toContain("read-tree --empty");
+    expect(g.ops()).toContain("-c core.symlinks=false reset --hard FETCH_HEAD");
+    expect(g.ops()).toContain("config core.symlinks false");
+    expect(r).toMatchObject({ status: "synced", resetSkipped: false });
+  });
+});
+
 // 実 git 統合(§10.1): 「scrub 済み origin でも URL 引数 fetch で default branch 追従でき、
 // 未追跡残骸は clean で消え、tracked は温存される」を実 git の意味論で固定する。
 describe("createGitRepoSyncer 実 git 統合(scrub + URL 引数 fetch)", () => {
@@ -446,6 +665,44 @@ describe("createGitRepoSyncer 実 git 統合(scrub + URL 引数 fetch)", () => {
     const after = await syncer.inspect(spec);
     expect(after?.clean).toBe(true);
     expect(after?.synced.resolvedCommit).not.toBe(recorded);
+  });
+
+  // ADR-0035 追記(2026-10-08): reset/clean の省略を実 git の意味論で固定する。
+  it("変化が無くクリーンなら reset/clean を省き、残骸・書き込みがあれば reset/clean で消す", async () => {
+    const root = await mkdtemp(join(tmpdir(), "bot-repos-skipreset-real-"));
+    tmpDirs.push(root);
+    const { url, push } = await makeOrigin(root, true);
+    const clonesDir = join(root, "clones");
+    const syncer = createGitRepoSyncer(clonesDir);
+    const spec: RepoSpec = { repo: "org/kb", dir: "kb", url };
+    const kbDir = join(clonesDir, "kb");
+
+    const [cloned] = await syncer.syncEach([spec]); // 新規 clone
+    if (cloned?.status !== "synced") throw new Error("sync failed");
+    expect(cloned.resetSkipped).toBe(false);
+    const [same] = await syncer.syncEach([spec]); // fast 経路・remote 不変・クリーン
+    expect(same).toMatchObject({ status: "synced", resetSkipped: true, synced: cloned.synced });
+    expect(await syncer.inspect(spec)).toEqual({ synced: cloned.synced, clean: true });
+    // 再起動直後の最終成功時刻の推定(FETCH_HEAD と HEAD の一致)も成り立つ。
+    expect(await syncer.fetchTimeOnDisk(spec)).not.toBeNull();
+
+    // 未追跡の残骸・tracked の書き換えは status で検知し、reset/clean で消す。
+    await writeFile(join(kbDir, "litter.md"), "x\n");
+    await writeFile(join(kbDir, "tracked.md"), "local edit\n");
+    const [dirty] = await syncer.syncEach([spec]);
+    expect(dirty).toMatchObject({ status: "synced", resetSkipped: false, synced: cloned.synced });
+    expect(await exists(join(kbDir, "litter.md"))).toBe(false);
+    expect(await readFile(join(kbDir, "tracked.md"), "utf8")).toBe("v1\n");
+
+    // remote が進めば reset で追従する。
+    await push("next.md", "v2\n");
+    const [moved] = await syncer.syncEach([spec]);
+    expect(moved).toMatchObject({ status: "synced", resetSkipped: false });
+    expect(moved?.status === "synced" && moved.synced.resolvedCommit).not.toBe(
+      cloned.synced.resolvedCommit,
+    );
+    expect(await readFile(join(kbDir, "next.md"), "utf8")).toBe("v2\n");
+    expect((await syncer.inspect(spec))?.clean).toBe(true);
   });
 
   // 段階 1-2: 再起動直後の最終成功時刻は、実 git が書く FETCH_HEAD / HEAD の更新時刻から補う。

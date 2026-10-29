@@ -16,6 +16,12 @@
  * コミットされた `x -> /data/bot.db` 型の symlink が agent の読み取り面で外部へ解決されない
  * (本丸の封じ込めは packages/llm の realpath ガード。ここは clone 側のもう一層)。
  *
+ * 同期の高速化(ADR-0035 追記 2026-10-08): syncEach はリポごとに並列に同期する(各 clone は別ディレクトリ)。
+ * このプロセスで一度 full 経路の同期に成功した clone は、`.git/config` が変わっていない限り origin の scrub・
+ * core.symlinks の確認・HEAD 有無の確認を省く(fast 経路)。fetch の結果が今の HEAD と同じで作業ツリーが
+ * クリーンなら `reset --hard` / `clean -fd` も省く(書き込みが無いので検索内容と SHA は一致したまま)。
+ * 想定外(確認の失敗・同期の失敗・config の変化)は full 経路へ戻す。
+ *
  * `RepoSyncer` は注入可能な seam。テストは fake の git を渡し、本番は既定の execFile を使う
  * (CLAUDE.md §12.2: native/外部プロセス依存のグルーは統合テストで代替)。
  */
@@ -34,6 +40,12 @@ export type GitExec = (args: readonly string[]) => Promise<{ stdout: string }>;
  * interaction token(15 分)が先に失効する。cold な --depth=1 fetch でも十分な 60 秒。
  */
 export const GIT_EXEC_TIMEOUT_MS = 60_000;
+
+/**
+ * syncEach で同時に同期するリポ数の上限(ADR-0035 追記 2026-10-08)。/ask の sync_on_ask は数件だが、
+ * all_visible の sync_on_ask を広く取ったときに clone/fetch を一斉に起動しないよう抑える。
+ */
+export const SYNC_EACH_CONCURRENCY = 4;
 
 const defaultGitExec: GitExec = (args) => exec("git", [...args], { timeout: GIT_EXEC_TIMEOUT_MS });
 
@@ -97,7 +109,16 @@ export interface SyncedRepo {
  * empty = clone はできたが commit が無い空リポ(GitHub で作っただけのリポ等)。失敗ではない。
  */
 export type RepoSyncResult =
-  | { status: "synced"; spec: RepoSpec; synced: SyncedRepo }
+  | {
+      status: "synced";
+      spec: RepoSpec;
+      synced: SyncedRepo;
+      /**
+       * fetch の結果が今の HEAD と同じで作業ツリーもクリーンだったため reset/clean を省いたか
+       * (ADR-0035 追記 2026-10-08・完了ログの reposSkippedReset 用)。未指定は false 扱い。
+       */
+      resetSkipped?: boolean;
+    }
   | { status: "empty"; spec: RepoSpec }
   | { status: "failed"; spec: RepoSpec; error: unknown };
 
@@ -107,7 +128,8 @@ export interface RepoSyncer {
   /**
    * 各 repo を最新化し、リポ単位の結果を specs と同順で返す(throw しない・ADR-0036 D5)。
    * 1 リポの失敗で後続を止めない。空リポは status "empty"(警告対象にしない)。
-   * all_visible 有効時の /ask と定期同期が使う。
+   * リポごとに並列で同期する(上限 SYNC_EACH_CONCURRENCY・同じ dir は直列)。
+   * /ask(syncForAskPerRepo)・定期同期・/ask の裏の先回り同期が使う。
    */
   syncEach(specs: readonly RepoSpec[]): Promise<RepoSyncResult[]>;
   /**
@@ -191,9 +213,66 @@ export function createGitRepoSyncer(
     }
   }
 
+  /**
+   * このプロセスで full 経路の同期に成功した clone(absDir → 確認時の scrub 済み url と `.git/config` の
+   * 更新時刻)。次回以降は origin の scrub・core.symlinks の確認・HEAD 有無の確認を省く(fast 経路)。
+   * `.git/config` の更新時刻が変わった(手動の再 clone・他プロセスによる origin の書き換え等)・url が
+   * 変わった・同期に失敗したときは使わない(full 経路でやり直す)。fetch / reset / clean は config を書かない。
+   */
+  const verified = new Map<string, { url: string; configMtimeMs: number }>();
+  const configPath = (absDir: string): string => join(absDir, ".git", "config");
+
+  async function isVerified(absDir: string, url: string): Promise<boolean> {
+    const v = verified.get(absDir);
+    if (v === undefined || v.url !== stripCredentials(url)) return false;
+    return (await fs.mtimeMs(configPath(absDir))) === v.configMtimeMs;
+  }
+
+  /** full 経路の成功後に呼ぶ。config の時刻が取れなければ記録しない(次回も full 経路)。 */
+  async function markVerified(absDir: string, url: string): Promise<void> {
+    const mtime = await fs.mtimeMs(configPath(absDir));
+    if (mtime === null) verified.delete(absDir);
+    else verified.set(absDir, { url: stripCredentials(url), configMtimeMs: mtime });
+  }
+
+  /**
+   * fetch 直後に、FETCH_HEAD が今の HEAD と同じで作業ツリーがクリーン(`status --porcelain` が空・未追跡も
+   * 含む)なら、その SHA を返す(reset/clean を省いてよい)。それ以外・確認の失敗は null(reset/clean する)。
+   * `clean -fd` は ignored を消さず、status も ignored を出さないため、省いても作業ツリーは同じになる。
+   */
+  async function upToDateCleanHead(absDir: string): Promise<string | null> {
+    try {
+      const { stdout } = await gitExec(["-C", absDir, "rev-parse", "HEAD", "FETCH_HEAD"]);
+      const [head, fetched, ...rest] = stdout.trim().split(/\s+/);
+      if (head === undefined || head === "" || head !== fetched || rest.length > 0) return null;
+      const st = await gitExec(["-C", absDir, "status", "--porcelain"]);
+      return st.stdout.trim() === "" ? head : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** 1 リポの同期結果(内部表現)。 */
+  type SyncOneResult = { synced: SyncedRepo; resetSkipped: boolean } | "empty";
+
   /** 1 リポを同期する。allowEmpty(syncEach)のときだけ空リポを "empty" として返す。 */
-  async function syncOne(spec: RepoSpec, allowEmpty: boolean): Promise<SyncedRepo | "empty"> {
+  async function syncOne(spec: RepoSpec, allowEmpty: boolean): Promise<SyncOneResult> {
     const absDir = join(clonesDir, spec.dir);
+    try {
+      return await syncOneInner(spec, absDir, allowEmpty);
+    } catch (err) {
+      // 失敗した clone は次回 full 経路で確かめ直す。
+      verified.delete(absDir);
+      throw err;
+    }
+  }
+
+  async function syncOneInner(
+    spec: RepoSpec,
+    absDir: string,
+    allowEmpty: boolean,
+  ): Promise<SyncOneResult> {
+    // 独立リポの確認は fast 経路でも毎回行う(親リポを reset --hard で壊さない・VM 実害 2026-07-17)。
     const gitDir = await probeGitDir(absDir);
     if (gitDir !== null && gitDir !== ".git") {
       // 親リポの内側。rev-parse HEAD も親の commit を返す(permalink 汚染)ため fail-loud。
@@ -201,41 +280,60 @@ export function createGitRepoSyncer(
         `${absDir} は独立した git リポではありません(--git-dir: ${gitDir})。clones 配下は各ディレクトリを独立リポとして配置してください`,
       );
     }
+    let knownHead: string | null = null;
     if (spec.url !== undefined) {
       // 既存なら fetch/reset、無ければ clone。冪等(§7.1)。
       if (gitDir !== null) {
-        // 冪等 scrub: 旧デプロイの clone や set-url 前クラッシュで origin にトークンが
-        // 残っていても、毎 sync で無害化する(remote 不在でも通る config 書き)。
-        await gitExec(["-C", absDir, "config", "remote.origin.url", stripCredentials(spec.url)]);
-        // 空リポの clone: remote もまだ空なら fetch しない(fetch は remote HEAD 不在で失敗する)。
-        // remote に commit が入っていれば通常の fetch/reset に進む(空 clone からの初回展開)。
-        if (allowEmpty && !(await hasHead(absDir))) {
-          const remote = await gitExec(["ls-remote", spec.url, "HEAD"]);
-          if (remote.stdout.trim() === "") return "empty";
-        }
-        // ADR-0037: core.symlinks=false へ移行済みの clone か(未設定は exit 1 で throw)。
-        let symlinksDisabled: boolean;
-        try {
-          const v = await gitExec(["-C", absDir, "config", "--get", "core.symlinks"]);
-          symlinksDisabled = v.stdout.trim() === "false";
-        } catch {
-          symlinksDisabled = false;
+        // fast 経路: このプロセスで確認済み・config 不変なら scrub / 空リポ / symlink 移行の確認を省く
+        // (いずれも前回の full 経路で済んでおり、config が変わっていないので今も成り立つ)。
+        const fast = await isVerified(absDir, spec.url);
+        let symlinksDisabled = true;
+        if (!fast) {
+          // 冪等 scrub: 旧デプロイの clone や set-url 前クラッシュで origin にトークンが
+          // 残っていても、毎 sync で無害化する(remote 不在でも通る config 書き)。
+          await gitExec(["-C", absDir, "config", "remote.origin.url", stripCredentials(spec.url)]);
+          // 空リポの clone: remote もまだ空なら fetch しない(fetch は remote HEAD 不在で失敗する)。
+          // remote に commit が入っていれば通常の fetch/reset に進む(空 clone からの初回展開)。
+          if (allowEmpty && !(await hasHead(absDir))) {
+            const remote = await gitExec(["ls-remote", spec.url, "HEAD"]);
+            if (remote.stdout.trim() === "") return "empty";
+          }
+          // ADR-0037: core.symlinks=false へ移行済みの clone か(未設定は exit 1 で throw)。
+          try {
+            const v = await gitExec(["-C", absDir, "config", "--get", "core.symlinks"]);
+            symlinksDisabled = v.stdout.trim() === "false";
+          } catch {
+            symlinksDisabled = false;
+          }
         }
         // url を引数で渡す(origin の保存 URL に依存しない=トークンを config に残さない)。
         // refspec 無しの fetch は remote HEAD(= default branch)を FETCH_HEAD に置く。
         await gitExec(["-C", absDir, "fetch", "--depth=1", spec.url]);
-        if (!symlinksDisabled) {
-          // 展開済みの symlink は stat 一致のため reset では書き直されない。index を空にして
-          // reset --hard に全ファイルを再展開させる(移行時の 1 回だけ)。
-          await gitExec(["-C", absDir, "read-tree", "--empty"]);
-        }
-        await gitExec(["-C", absDir, "-c", "core.symlinks=false", "reset", "--hard", "FETCH_HEAD"]);
-        // reset --hard は未追跡ファイルを消さない。他プロセス(gap-tracker 等)の staging
-        // 残骸が検索対象に混入し、未 commit ファイルへの permalink を生成しうるため clean する。
-        await gitExec(["-C", absDir, "clean", "-fd"]);
-        // 再展開が成功してから永続化する(途中失敗なら次回 sync で移行をやり直す)。
-        if (!symlinksDisabled) {
-          await gitExec(["-C", absDir, "config", "core.symlinks", "false"]);
+        // 移行済みで、fetch の結果が今の HEAD と同じ・作業ツリーがクリーンなら reset/clean は不要
+        // (未移行 = symlink の再展開が必要な clone は必ず reset する)。
+        knownHead = symlinksDisabled ? await upToDateCleanHead(absDir) : null;
+        if (knownHead === null) {
+          if (!symlinksDisabled) {
+            // 展開済みの symlink は stat 一致のため reset では書き直されない。index を空にして
+            // reset --hard に全ファイルを再展開させる(移行時の 1 回だけ)。
+            await gitExec(["-C", absDir, "read-tree", "--empty"]);
+          }
+          await gitExec([
+            "-C",
+            absDir,
+            "-c",
+            "core.symlinks=false",
+            "reset",
+            "--hard",
+            "FETCH_HEAD",
+          ]);
+          // reset --hard は未追跡ファイルを消さない。他プロセス(gap-tracker 等)の staging
+          // 残骸が検索対象に混入し、未 commit ファイルへの permalink を生成しうるため clean する。
+          await gitExec(["-C", absDir, "clean", "-fd"]);
+          // 再展開が成功してから永続化する(途中失敗なら次回 sync で移行をやり直す)。
+          if (!symlinksDisabled) {
+            await gitExec(["-C", absDir, "config", "core.symlinks", "false"]);
+          }
         }
       } else {
         // -c はクローン先の .git/config に永続化され、初回 checkout から symlink を通常ファイル化する。
@@ -246,8 +344,26 @@ export function createGitRepoSyncer(
         if (allowEmpty && !(await hasHead(absDir))) return "empty";
       }
     }
-    const { stdout } = await gitExec(["-C", absDir, "rev-parse", "HEAD"]);
-    return { repo: spec.repo, absDir, resolvedCommit: stdout.trim() };
+    const resolvedCommit =
+      knownHead ?? (await gitExec(["-C", absDir, "rev-parse", "HEAD"])).stdout.trim();
+    // scrub・移行・HEAD の存在まで確かめた clone として記録する(url 無しの synthetic は対象外)。
+    if (spec.url !== undefined) await markVerified(absDir, spec.url);
+    return {
+      synced: { repo: spec.repo, absDir, resolvedCommit },
+      resetSkipped: knownHead !== null,
+    };
+  }
+
+  /** syncEach の 1 リポ分(throw しない)。 */
+  async function syncEachOne(spec: RepoSpec): Promise<RepoSyncResult> {
+    try {
+      const r = await syncOne(spec, true);
+      return r === "empty"
+        ? { status: "empty", spec }
+        : { status: "synced", spec, synced: r.synced, resetSkipped: r.resetSkipped };
+    } catch (error) {
+      return { status: "failed", spec, error };
+    }
   }
 
   async function resolveHead(spec: RepoSpec): Promise<SyncedRepo | null> {
@@ -276,23 +392,30 @@ export function createGitRepoSyncer(
       for (const spec of specs) {
         const r = await syncOne(spec, false);
         // allowEmpty=false では "empty" は返らない(空リポは rev-parse HEAD が throw する)。
-        if (r !== "empty") out.push(r);
+        if (r !== "empty") out.push(r.synced);
       }
       return out;
     },
     async syncEach(specs) {
       await mkdir(clonesDir, { recursive: true });
-      const out: RepoSyncResult[] = [];
-      for (const spec of specs) {
-        try {
-          const r = await syncOne(spec, true);
-          out.push(
-            r === "empty" ? { status: "empty", spec } : { status: "synced", spec, synced: r },
-          );
-        } catch (error) {
-          out.push({ status: "failed", spec, error });
+      // リポごとに別ディレクトリなので並列に同期する(所要時間をリポ数の和 → 最も遅い 1 件へ)。
+      // 同じ dir が重複して渡されたときだけ同じグループで直列にする(同一 clone への同時書き込みを避ける)。
+      const groups = new Map<string, number[]>();
+      specs.forEach((spec, i) => {
+        const g = groups.get(spec.dir);
+        if (g === undefined) groups.set(spec.dir, [i]);
+        else g.push(i);
+      });
+      const pending = [...groups.values()];
+      const out: RepoSyncResult[] = new Array(specs.length);
+      const worker = async (): Promise<void> => {
+        for (let g = pending.shift(); g !== undefined; g = pending.shift()) {
+          for (const i of g) out[i] = await syncEachOne(specs[i] as RepoSpec);
         }
-      }
+      };
+      await Promise.all(
+        Array.from({ length: Math.min(SYNC_EACH_CONCURRENCY, pending.length) }, worker),
+      );
       return out;
     },
     resolveHead,

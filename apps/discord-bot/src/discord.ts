@@ -828,7 +828,9 @@ async function runAcceptedAsk(a: AcceptedAsk): Promise<void> {
     isExpired: isExpiredInteractionError,
     signal,
   });
-  reporter.setQueueAhead(queue.pending);
+  // ADR-0035 追記(2026-10-08): /ask は high(enqueue の既定)。追い越す low(裏方の同期)は「前に N 件」に
+  // 数えない。
+  reporter.setQueueAhead(queue.aheadOf("high"));
 
   let result: AskResult;
   // 段階 1-1: キュー待ち・配送の計測(残りの工程は handleAskRequest が AskResult.metrics で返す)。

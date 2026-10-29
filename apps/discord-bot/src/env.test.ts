@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseEnv, parsePositiveIntEnv } from "./env.js";
+import { parseEnv, parseNonNegativeIntEnv, parsePositiveIntEnv } from "./env.js";
 
 // Claude on AWS の必須 env 一式(ADR-0009)。
 const base = {
@@ -97,5 +97,28 @@ describe("parsePositiveIntEnv(/ask 調整ノブ・ADR-0035)", () => {
     expect(parsePositiveIntEnv("ASK_TIMEOUT_MS", "1.5", 600_000, warn)).toBe(600_000);
     expect(warns).toHaveLength(4);
     expect(warns[0]).toEqual({ env: "ASK_TIMEOUT_MS", raw: "abc" });
+  });
+});
+
+describe("parseNonNegativeIntEnv(0 で無効にできるノブ・ADR-0035 追記 2026-10-08)", () => {
+  it("未設定・空は fallback、0 以上の整数はその値(0 = 無効)", () => {
+    const warns: string[] = [];
+    const warn = (_d: Record<string, unknown>, m: string) => warns.push(m);
+    expect(parseNonNegativeIntEnv("ASK_BACKGROUND_SYNC_MS", undefined, 45_000, warn)).toBe(45_000);
+    expect(parseNonNegativeIntEnv("ASK_BACKGROUND_SYNC_MS", " ", 45_000, warn)).toBe(45_000);
+    expect(parseNonNegativeIntEnv("ASK_BACKGROUND_SYNC_MS", "0", 45_000, warn)).toBe(0);
+    expect(parseNonNegativeIntEnv("ASK_BACKGROUND_SYNC_MS", "30000", 45_000, warn)).toBe(30_000);
+    expect(warns).toEqual([]);
+  });
+
+  it("不正値(非整数・負)は warn して fallback", () => {
+    const warns: Record<string, unknown>[] = [];
+    const warn = (d: Record<string, unknown>) => warns.push(d);
+    expect(parseNonNegativeIntEnv("ASK_BACKGROUND_SYNC_MS", "-1", 45_000, warn)).toBe(45_000);
+    expect(parseNonNegativeIntEnv("ASK_BACKGROUND_SYNC_MS", "abc", 45_000, warn)).toBe(45_000);
+    expect(warns).toEqual([
+      { env: "ASK_BACKGROUND_SYNC_MS", raw: "-1" },
+      { env: "ASK_BACKGROUND_SYNC_MS", raw: "abc" },
+    ]);
   });
 });

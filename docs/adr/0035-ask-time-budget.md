@@ -221,3 +221,65 @@ ADR-0036 3b-1 で同期・検索・鮮度確認の書き込みが同じ `SerialQ
   `reposExcluded` / `staleAgeMs` を載せる(旧 `/ask: 検索範囲(ADR-0036)` の info ログは完了ログへ統合)。
 - **定期同期**(ADR-0036 D5・3b-2)は全リポ化のときだけ使う。手動指定の 3 リポでは TTL 再利用で足りる見込みで、
   完了ログの `syncMs` / `reposReused` で確かめる。
+
+## 追記(2026-10-08): 同期をクリティカルパスから外す・キューの優先度
+
+本番の /ask は 5〜30 秒(例: 27.4 秒 = `syncMs` 3.7 秒 + `searchMs` 23.6 秒)。目標は中央値 20 秒以下・最大 45 秒
+以下。質問は TTL(60 秒)をまたいで散発的に来るため、TTL 再利用(段階 1-2)にはほとんど当たらず、毎回
+手動指定の 3 リポ(KB・議事録 2 つ)を **1 リポずつ順に**同期していた。1 リポの同期は git を 8 回起動する
+(`rev-parse --git-dir` / `config remote.origin.url` / `rev-parse --verify HEAD` / `config --get core.symlinks` /
+`fetch` / `reset --hard` / `clean -fd` / `rev-parse HEAD`)。TTL の確認(`inspect`)も 1 リポずつだった。
+また /ask は all_visible の定期同期のチャンク(5 リポ)の列の後ろに並んでいた。
+
+- **D9: リポ単位の同期を並列にする。** 各 clone は別ディレクトリなので、`syncEach` はリポごとに並列で同期する
+  (上限 4・同じ dir が重複したときだけ直列)。/ask 側の TTL の確認・同期失敗時の前回データの確認・
+  `sync_on_ask` 外のリポの HEAD 解決も並列にする(記録・ログ・manifest の順序は従来どおり scope の順)。
+  同期の所要時間は「リポ数の和」から「最も遅い 1 リポ」になる。書き込み(fetch / reset / clean)は引き続き
+  `SerialQueue` のタスク内だけで行い、検索中の clone は書き換えない。
+- **D10: 確認済みの clone は確認を省く(fast 経路)。** このプロセスで一度 full 経路の同期に成功した clone は、
+  `.git/config` の更新時刻が変わっていなければ、origin の scrub(`config remote.origin.url`)・空リポの確認
+  (`rev-parse --verify HEAD`)・symlink 移行の確認(`config --get core.symlinks`)を省く。いずれも前回の full 経路で
+  確かめ・書いた内容で、fetch / reset / clean は `.git/config` を書かないため今も成り立つ。手動の再 clone・
+  他プロセスによる origin の書き換え(更新時刻が変わる)・url の変化・同期の失敗・config の時刻が取れない
+  場合は full 経路に戻す。独立リポの確認(`rev-parse --git-dir`・親リポを壊さない)は毎回行う。
+- **D11: 変化が無ければ reset / clean を省く。** symlink 移行済みの clone で、fetch 後に `rev-parse HEAD FETCH_HEAD`
+  が同じ SHA で、`status --porcelain`(未追跡も含む・除外なし)が空なら `reset --hard` / `clean -fd` を省き、
+  その SHA を resolvedCommit にする。`clean -fd` は ignored を消さず status も ignored を出さないため、省いても
+  作業ツリーは同じ(差は空の未追跡ディレクトリだけで、検索で読める内容は無い)。HEAD が進んだ・汚れている・
+  確認に失敗した・未移行(symlink の再展開が必要)なら従来どおり reset / clean する。`.git/FETCH_HEAD` と HEAD は
+  一致したままなので、再起動直後の最終成功時刻の推定(`fetchTimeOnDisk`)も従来どおり使える。
+  定常の 1 リポは git 起動 8 回 → 4 回(`--git-dir` / `fetch` / `rev-parse HEAD FETCH_HEAD` / `status`)になる。
+- **D12: /ask の先回り同期。** env `ASK_BACKGROUND_SYNC_MS`(既定 45 秒・0 で無効)ごとに、**直列キューが空の
+  ときだけ** `sync_on_ask` のリポを low 優先度のタスクで同期し、`RepoRegistry.recordFetched` に記録する。次の
+  /ask は TTL 内の再利用(`inspect` のみ・ネットワーク不要)に当たり、同期を待たない。
+  - 次の周期までに TTL を過ぎないリポ(直前の /ask・定期同期が同期した)は省く(`経過 + 間隔 < TTL`)。
+    無効化(鮮度確認の書き込み)・未同期のリポは常に対象。空リポは対象外(/ask 側が従来どおり扱う)。
+  - キューに何かある(/ask・鮮度確認・定期同期のチャンク)ときは積まない。前回の分が終わる前にも積まない。
+  - 失敗は `recordError` に記録し、リポごとに失敗に転じたときだけ warn する(45 秒ごとに繰り返さない)。
+    次の /ask は TTL 切れで自分で同期し、従来の前回データ利用・エラー判定に進む。
+  - 正常終了(D7)では `stopTimers` でタイマを止め、以後は積まない・積まれた分も同期しない。
+  - 間隔は TTL より短くする(以上なら起動時に warn)。GitHub への fetch はアイドル時に 3 リポ × 80 回/時。
+- **D13: キューの優先度。** `SerialQueue.enqueue(task, { priority: "high" | "low" })`(既定 high = 従来の FIFO)。
+  待機中は high → low の順に取り出し、同じ優先度は FIFO。**実行中のタスクは中断しない**(同時実行は常に 1)。
+  - high: /ask・鮮度確認の 👍/🗑(利用者のボタン操作なので /ask と FIFO)。
+  - low: all_visible の定期同期(範囲の差し替え・チャンク)・/ask の先回り同期・ロールバック後の managed clone の片付け。
+  - 進捗表示の「前に N 件」は `aheadOf("high")`(実行中 + 待機中の high)で、追い越す low は数えない。
+  - low は high が続く限り待つ(飢餓)。/ask は低頻度で、定期同期は次の周期で追いつくため許容する。
+- **D14: 定期同期のチャンクを 5 → 2 リポにする(`REPO_SYNC_CHUNK_SIZE`)。** 実行中のチャンクは中断しないため、
+  /ask の追加待ちの上限を縮める(定常の fetch で 1〜2 秒)。チャンク内は従来どおり 1 リポずつ(終了処理の打ち切り単位)。
+- **観測**: 完了ログに `reposSkippedReset`(`reposFetched` のうち reset / clean を省いた数)を追加する。
+  先回り同期が効いていれば `reposReused` が増え `syncMs` が数十 ms になる。`queueWaitMs` で優先度の効果を見る。
+- **封じ込め(ADR-0037)・トークン(ADR-0013 D1(b))は変えない。** clone は `core.symlinks=false`、reset は常に
+  `-c core.symlinks=false`、fetch は URL 引数渡し。fast 経路で毎回の scrub を省くのは「前回 scrub した config が
+  変わっていない」ときだけ。
+- **ロールバック**: 先回り同期は `ASK_BACKGROUND_SYNC_MS=0` で止まる(/ask が従来どおり同期する)。
+  並列化・fast 経路・reset の省略・優先度には env の切り替えを設けない(挙動を戻すにはコードの revert)。
+  いずれも失敗時は従来経路(full 経路・reset / clean)に倒れる。
+
+### design.md への転記(人間)
+
+- §6.2 処理フロー step 2: 「origin は毎同期でトークン無し URL に冪等上書き」→「origin はトークン無し URL に
+  冪等上書き(このプロセスで上書き済みで `.git/config` が変わっていなければ省く)」。fetch 後に変化が無く
+  作業ツリーがクリーンなら `reset --hard` / `clean -fd` を省く旨、リポ単位の同期は並列で行う旨、
+  `ASK_BACKGROUND_SYNC_MS`(既定 45 秒)の先回り同期を追記。
+- §6.2 直列キュー: 「/ask・鮮度確認は高優先度、定期同期・先回り同期・片付けは低優先度(実行中は中断しない)」を追記。

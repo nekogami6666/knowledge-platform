@@ -1159,6 +1159,7 @@ describe("handleAskRequest リポ単位同期(ADR-0036 D5・段階 1-2)", () => 
       reposAvailable: 3,
       reposFetched: 2,
       reposReused: 0,
+      reposSkippedReset: 0,
       reposStale: 0,
       reposExcluded: 0,
       staleAgeMs: null,
@@ -1303,6 +1304,42 @@ describe("handleAskRequest リポ単位同期(ADR-0036 D5・段階 1-2)", () => 
       expect(h.syncedSpecs).toEqual(["org/knowledge-base", "org/biz-minutes"]);
       expect(results.map((r) => r.metrics?.sync?.reposReused)).toEqual([0, 2, 2]);
       expect(store.listQueries()).toHaveLength(3);
+    });
+
+    it("TTL 内の確認(inspect)はリポごとに並列に行う(ADR-0035 追記 2026-10-08)", async () => {
+      const registry = createRepoRegistry([kb, minutes]);
+      const h = harness();
+      const { deps, clock } = perRepoDeps(registry, h, noAnswer);
+      await handleAskRequest(req, deps);
+      const inspect = h.syncer.inspect;
+      let active = 0;
+      let maxActive = 0;
+      h.syncer.inspect = async (spec) => {
+        active += 1;
+        maxActive = Math.max(maxActive, active);
+        await new Promise((r) => setTimeout(r, 5));
+        active -= 1;
+        return inspect(spec);
+      };
+      clock.now += 1000;
+      const res = await handleAskRequest(req, deps);
+      expect(maxActive).toBe(2);
+      expect(res.metrics?.sync).toMatchObject({ reposReused: 2, reposFetched: 0 });
+    });
+
+    it("fetch したが reset/clean を省いたリポを reposSkippedReset に数える(reposFetched の内数)", async () => {
+      const registry = createRepoRegistry([kb, minutes]);
+      const h = harness();
+      const syncEach = h.syncer.syncEach;
+      h.syncer.syncEach = async (specs) =>
+        (await syncEach(specs)).map((r) =>
+          r.status === "synced" && r.spec.repo === "org/knowledge-base"
+            ? { ...r, resetSkipped: true }
+            : r,
+        );
+      const { deps } = perRepoDeps(registry, h, noAnswer);
+      const res = await handleAskRequest(req, deps);
+      expect(res.metrics?.sync).toMatchObject({ reposFetched: 2, reposSkippedReset: 1 });
     });
   });
 

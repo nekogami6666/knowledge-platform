@@ -546,7 +546,7 @@ export interface PerRepoSyncOutcome {
  * - sync_on_ask のリポ:
  *   1. TTL 再利用: 最終成功同期が ttlMs 以内・無効化されていない・作業ツリーがクリーン・HEAD が記録 SHA と
  *      一致(`status --porcelain` と `rev-parse` だけで確認)なら fetch しない。
- *   2. それ以外はリポ単位で同期する(syncEach)。
+ *   2. それ以外はリポ単位で同期する(syncEach・リポごとに並列。1. の確認・3. の前回データ確認も並列)。
  *   3. 同期に失敗したら、最終成功同期が maxStalenessMs 以内なら前回データで検索する。作業ツリーが汚れて
  *      いれば HEAD に戻してから使い、引用の ref は実 HEAD にする(脚注で時点を明示)。
  *      最終成功時刻はプロセス内の記録を優先し、無ければ(再起動直後)clone の `.git/FETCH_HEAD` の
@@ -590,15 +590,18 @@ export async function syncForAskPerRepo(
   };
   const toSync: ScopedRepo[] = [];
   let reused = 0;
-  for (const spec of scope.filter((r) => r.syncOnAsk)) {
-    const rec = await reusable(spec);
+  // リポごとに別の clone なので確認は並列に行う(ADR-0035 追記 2026-10-08)。判定の順序は scope の順。
+  const onAsk = scope.filter((r) => r.syncOnAsk);
+  const reuse = await Promise.all(onAsk.map((spec) => reusable(spec)));
+  onAsk.forEach((spec, i) => {
+    const rec = reuse[i];
     if (rec === undefined) {
       toSync.push(spec);
     } else {
       usable.set(spec.repo, rec);
       reused += 1;
     }
-  }
+  });
 
   // 3. 前回データ(許容期間内・クリーンな作業ツリー)。使えなければ理由を返す。
   const lastSuccessAt = async (spec: ScopedRepo): Promise<number | undefined> => {
@@ -631,18 +634,24 @@ export async function syncForAskPerRepo(
     }
   };
 
-  // 2. 同期。
+  // 2. 同期(syncEach がリポごとに並列で行う)。
   const results = await deps.syncer.syncEach(toSync);
   const syncedAt = nowMs();
   const stale: StaleRepo[] = [];
   const unavailable: { repo: string; error: unknown }[] = [];
   let fetched = 0;
+  let skippedReset = 0;
   let excluded = 0;
-  for (const r of results) {
+  // 失敗したリポの前回データ確認もリポごとに並列で行う(記録・ログは results の順)。
+  const fallbacks = await Promise.all(
+    results.map((r) => (r.status === "failed" ? staleFallback(r.spec as ScopedRepo) : null)),
+  );
+  for (const [i, r] of results.entries()) {
     if (r.status === "synced") {
       registry.recordFetched(r.synced, syncedAt);
       usable.set(r.spec.repo, r.synced);
       fetched += 1;
+      if (r.resetSkipped === true) skippedReset += 1;
       continue;
     }
     if (r.status === "empty") {
@@ -652,7 +661,8 @@ export async function syncForAskPerRepo(
     }
     registry.recordError(r.spec.repo, r.error);
     const spec = r.spec as ScopedRepo;
-    const fb = await staleFallback(spec);
+    const fb = fallbacks[i];
+    if (fb === null || fb === undefined) continue; // results は failed なので到達しない(型の絞り込み用)
     if (!fb.ok) {
       if (spec.managed) {
         // 列挙由来のリポ 1 件の失敗で /ask 全体を止めない。今回の対象から外す(usable に入れない)。
@@ -695,20 +705,31 @@ export async function syncForAskPerRepo(
   };
   const available: ScopedRepo[] = [];
   const synced: SyncedRepo[] = [];
-  for (const spec of scope) {
-    if (registry.isEmpty(spec.repo)) continue; // 空リポ(引用できるファイルが無い)
+  // 記録の無い sync_on_ask 外のリポは HEAD を並列に解決する(結果の順序は scope の順)。
+  const heads = await Promise.all(
+    scope.map((spec) =>
+      !registry.isEmpty(spec.repo) &&
+      !spec.syncOnAsk &&
+      usable.get(spec.repo) === undefined &&
+      registry.lastSynced(spec.repo) === undefined
+        ? head(spec)
+        : undefined,
+    ),
+  );
+  scope.forEach((spec, i) => {
+    if (registry.isEmpty(spec.repo)) return; // 空リポ(引用できるファイルが無い)
     let s = usable.get(spec.repo);
     if (s === undefined && !spec.syncOnAsk) {
       s = registry.lastSynced(spec.repo);
       if (s === undefined) {
-        s = await head(spec);
+        s = heads[i];
         if (s !== undefined) registry.recordSynced(s);
       }
     }
-    if (s === undefined) continue; // clone 未取得(初回 clone 待ち)・壊れた clone は対象外
+    if (s === undefined) return; // clone 未取得(初回 clone 待ち)・壊れた clone は対象外
     available.push(spec);
     synced.push(s);
-  }
+  });
   return {
     available,
     synced,
@@ -718,6 +739,7 @@ export async function syncForAskPerRepo(
       reposAvailable: available.length,
       reposFetched: fetched,
       reposReused: reused,
+      reposSkippedReset: skippedReset,
       reposStale: stale.length,
       reposExcluded: excluded,
       staleAgeMs:

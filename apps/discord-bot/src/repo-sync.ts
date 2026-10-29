@@ -41,8 +41,10 @@ export const DEFAULT_REPO_SYNC_INTERVAL_MS = 600_000;
 /**
  * 1 タスクで同期するリポ数。/ask はチャンクの合間に割り込めるため、/ask の追加待ちは
  * 最大 1 チャンク分(定常の fetch で数秒・初回 clone でもリポ数件分)に収まる。
+ * チャンクは low 優先度で積むため、待機中のチャンクは /ask に追い越される(ADR-0035 追記 2026-10-08)。
+ * 実行中のチャンクは中断しないので、/ask の追加待ちを縮めるため 5 → 2 に減らした(同)。
  */
-export const REPO_SYNC_CHUNK_SIZE = 5;
+export const REPO_SYNC_CHUNK_SIZE = 2;
 
 /**
  * org リポ列挙の上限(ms)。GitHub API が停滞しても起動(login 前に列挙する)と定期同期
@@ -370,7 +372,10 @@ export interface PeriodicRepoSyncDeps {
   syncer: RepoSyncer;
   /** 検索範囲の再決定(resolveScopeOnce を包む)。null = 列挙失敗(前回の範囲を維持・削除しない)。 */
   resolveScope: () => Promise<ScopedRepo[] | null>;
-  /** /ask と同じ直列キューへの投入(SerialQueue.enqueue)。 */
+  /**
+   * /ask と同じ直列キューへの投入(SerialQueue.enqueue)。index.ts は low 優先度で積む
+   * (待機中の定期同期は /ask に追い越される・ADR-0035 追記 2026-10-08)。
+   */
   enqueue: <T>(task: () => Promise<T>) => Promise<T>;
   /** 削除・記録の口。isStopped は終了処理の開始(/ask の受付停止)を渡す。 */
   cleanup: CloneCleanupDeps;

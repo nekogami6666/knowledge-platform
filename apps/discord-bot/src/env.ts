@@ -54,6 +54,11 @@ const envSchema = z
     ASK_SYNC_TTL_MS: z.string().optional(),
     /** 同期に失敗したとき前回データで検索してよい期間 ms(既定 21600000 = 6 時間・段階 1-2)。 */
     ASK_SYNC_MAX_STALENESS_MS: z.string().optional(),
+    /**
+     * /ask の先回り同期の間隔 ms(既定 45000・0 で無効・ADR-0035 追記 2026-10-08)。キューが空のときだけ
+     * sync_on_ask のリポを low 優先度で同期し、次の /ask が TTL 内の再利用に当たるようにする。
+     */
+    ASK_BACKGROUND_SYNC_MS: z.string().optional(),
     /** all_visible の定期同期の間隔 ms(既定 600000・ADR-0036 D5)。all_visible が無ければ未使用。 */
     REPO_SYNC_INTERVAL_MS: z.string().optional(),
     /** VC 録音 sidecar の URL(ADR-0020。compose 内部ネットワーク・例 http://recorder:9488)。未設定なら VC 入口 OFF。 */
@@ -104,6 +109,23 @@ export function parsePositiveIntEnv(
   if (raw === undefined || raw.trim() === "") return fallback;
   const n = Number(raw);
   if (Number.isInteger(n) && n > 0) return n;
+  warn({ env: name, raw }, `不正な ${name} のため既定(${fallback})で実行します`);
+  return fallback;
+}
+
+/**
+ * 任意の非負整数 env を解釈する(0 = 機能を無効にする ノブ用・ASK_BACKGROUND_SYNC_MS)。
+ * 未設定・空なら fallback。不正値(非整数・負)は warn を出して fallback に倒す(起動を止めない)。
+ */
+export function parseNonNegativeIntEnv(
+  name: string,
+  raw: string | undefined,
+  fallback: number,
+  warn: (data: Record<string, unknown>, msg: string) => void,
+): number {
+  if (raw === undefined || raw.trim() === "") return fallback;
+  const n = Number(raw);
+  if (Number.isInteger(n) && n >= 0) return n;
   warn({ env: name, raw }, `不正な ${name} のため既定(${fallback})で実行します`);
   return fallback;
 }

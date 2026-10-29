@@ -28,6 +28,7 @@ import {
   handleAskRequest,
   INTERRUPTED_MESSAGE,
 } from "./ask.js";
+import { createAskBackgroundSync, DEFAULT_ASK_BACKGROUND_SYNC_MS } from "./ask-background-sync.js";
 import {
   createAskLifecycle,
   createShutdownHandler,
@@ -56,7 +57,7 @@ import { createDiscordIndexStore, type DiscordIndexStore } from "./discord-index
 import { createDiscordIndexSync } from "./discord-index-sync.js";
 import { searchScopeFromInteraction } from "./discord-search-scope.js";
 import { createDiscordSearchSession } from "./discord-search-tool.js";
-import { parseEnv, parsePositiveIntEnv } from "./env.js";
+import { parseEnv, parseNonNegativeIntEnv, parsePositiveIntEnv } from "./env.js";
 import { createFreshnessDmWorker, type FreshnessApplyDeps } from "./freshness-flow.js";
 import type { InterviewCommandDeps } from "./interview-commands.js";
 import {
@@ -230,6 +231,8 @@ async function main(): Promise<void> {
   const promptStore = createFsPromptStore(env.PROMPTS_DIR);
   // §6.2 /ask の直列キュー。定期同期(ADR-0036 D5)と鮮度確認の KB 書き込みも同じキューに載せ、
   // 検索中の reset --hard・書き込み途中の同期を起こさない(ADR-0035 の既知レース)。
+  // 優先度(ADR-0035 追記 2026-10-08): 利用者の操作(/ask・鮮度確認の 👍/🗑)は high(既定)、
+  // 裏方の同期(定期同期・/ask の先回り同期・ロールバック後の片付け)は low。
   const queue = new SerialQueue();
 
   // §6.7(ADR-0019 D2/D3): 鮮度確認 DM への 👍✏️🗑 応答。👍/🗑 は main 直 commit のため
@@ -246,7 +249,8 @@ async function main(): Promise<void> {
       baseBranch: "main",
       // KB clone を触る区間(sync → 書き込み → validate → commit)を /ask・定期同期と直列化する。
       // syncKbClone は区間の内側で呼ばれるためキューに積まない(積むとデッドロック)。
-      runExclusive: (task) => queue.enqueue(task),
+      // 利用者のボタン操作なので /ask と同じ high(/ask とは FIFO)。
+      runExclusive: (task) => queue.enqueue(task, { priority: "high" }),
       // 段階 1-2: KB の作業ツリーを触ったら、次の /ask は TTL 内でも KB を同期し直す。
       onKbTreeTouched: () => registry.invalidate(kbRepo),
       syncKbClone: async () => {
@@ -635,7 +639,8 @@ async function main(): Promise<void> {
       registry,
       syncer,
       resolveScope: () => resolveScopeOnce(scopeDeps),
-      enqueue: (task) => queue.enqueue(task),
+      // low: 待機中のチャンクは /ask に追い越される(ADR-0035 追記 2026-10-08)。
+      enqueue: (task) => queue.enqueue(task, { priority: "low" }),
       cleanup: cleanupDeps,
       logger,
     });
@@ -647,6 +652,37 @@ async function main(): Promise<void> {
     );
     periodicSync.start(intervalMs);
     logger.info({ intervalMs }, "all_visible の定期同期を有効化しました(ADR-0036 D5)");
+  }
+
+  // ADR-0035 追記(2026-10-08): /ask の先回り同期。キューが空のときだけ sync_on_ask のリポを low 優先度で
+  // 同期し、次の /ask が TTL 内の再利用に当たるようにする(0 で無効 = 従来どおり /ask が同期する)。
+  const askBackgroundSyncMs = parseNonNegativeIntEnv(
+    "ASK_BACKGROUND_SYNC_MS",
+    env.ASK_BACKGROUND_SYNC_MS,
+    DEFAULT_ASK_BACKGROUND_SYNC_MS,
+    (data, msg) => logger.warn(data, msg),
+  );
+  const askBackgroundSync = createAskBackgroundSync({
+    registry,
+    syncer,
+    isQueueIdle: () => queue.pending === 0,
+    enqueueLow: (task) => queue.enqueue(task, { priority: "low" }),
+    ttlMs: askSyncTtlMs,
+    isStopped: () => !askLifecycle.accepting,
+    logger,
+  });
+  if (askBackgroundSyncMs > 0) {
+    askBackgroundSync.start(askBackgroundSyncMs);
+    logger.info(
+      { intervalMs: askBackgroundSyncMs, ttlMs: askSyncTtlMs },
+      "/ask の先回り同期を有効化しました(ADR-0035 追記)",
+    );
+    if (askBackgroundSyncMs >= askSyncTtlMs) {
+      logger.warn(
+        { intervalMs: askBackgroundSyncMs, ttlMs: askSyncTtlMs },
+        "ASK_BACKGROUND_SYNC_MS が ASK_SYNC_TTL_MS 以上のため、/ask の多くは TTL 切れで同期を待ちます(TTL より短くしてください)",
+      );
+    }
   }
 
   // 起動時レジューム(ADR-0015 D5): 再起動前に受け付けた pending を拾う。
@@ -675,7 +711,7 @@ async function main(): Promise<void> {
       // all_visible を外した(ロールバック)後: bot が作った clone は範囲外なので一度だけ片付ける
       // (agent の cwd は CLONES_DIR のため、残すと manifest に無くても読める)。
       void queue
-        .enqueue(() => removeOutOfScopeClones(registry.scope(), cleanupDeps))
+        .enqueue(() => removeOutOfScopeClones(registry.scope(), cleanupDeps), { priority: "low" })
         .catch((err: unknown) => logger.warn({ err }, "managed clone の片付けに失敗しました"));
     }
     voiceWorker?.kick();
@@ -698,6 +734,8 @@ async function main(): Promise<void> {
       clearInterval(freshnessTimer);
       // ADR-0036 D5: 定期同期のタイマを止め、実行中の回は次のリポの前で打ち切る(以後 bot.db に触らない)。
       periodicSync?.stop();
+      // ADR-0035 追記(2026-10-08): /ask の先回り同期も止める(以後積まない・積まれた分も同期しない)。
+      askBackgroundSync.stop();
       if (discordIndexTimer !== undefined) clearInterval(discordIndexTimer);
       // ADR-0042: 待機中・準備中の subprocess を閉じる(/ask の終了処理の後なので新たには用意されない)。
       return askPrewarm?.dispose();

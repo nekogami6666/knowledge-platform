@@ -15,7 +15,8 @@
  *   - elapsedMs: handleAskRequest の所要時間(queries.elapsed_ms と同じ値)
  *   - totalMs: 受付 → 配送完了
  * - リポ同期(段階 1-2。リポ単位の同期でなければ null): reposInScope / reposAvailable /
- *   reposFetched(今回 fetch)/ reposReused(TTL 内で再利用)/ reposStale(同期失敗 → 前回データ)/
+ *   reposFetched(今回 fetch)/ reposReused(TTL 内で再利用)/ reposSkippedReset(fetch したが変化が無く reset/clean を
+ *   省いた・reposFetched の内数)/ reposStale(同期失敗 → 前回データ)/
  *   reposExcluded(列挙由来のリポで同期失敗 → 今回の対象外)/ staleAgeMs(前回データのうち最も古いものの経過)
  * - 検索の観測値(最終結果から・検索が成功しなかった場合は null): numTurns / durationApiMs /
  *   deniedToolCalls / notFound / citations(モデルが返した数)/ validCitations(検証を通った数)/
@@ -178,6 +179,8 @@ export interface AskSyncMetrics {
   reposFetched: number;
   /** TTL 内で fetch せずに再利用したリポ数。 */
   reposReused: number;
+  /** reposFetched のうち、fetch の結果が HEAD と同じで作業ツリーもクリーンなため reset/clean を省いた数。 */
+  reposSkippedReset: number;
   /** 同期に失敗し前回データで検索したリポ数。 */
   reposStale: number;
   /** 列挙由来(all_visible)のリポで、同期に失敗し前回データも使えず今回の対象から外した数。 */
@@ -325,6 +328,7 @@ export function buildAskCompletionLog(input: AskCompletionInput): Record<string,
     reposAvailable: m?.sync?.reposAvailable ?? null,
     reposFetched: m?.sync?.reposFetched ?? null,
     reposReused: m?.sync?.reposReused ?? null,
+    reposSkippedReset: m?.sync?.reposSkippedReset ?? null,
     reposStale: m?.sync?.reposStale ?? null,
     reposExcluded: m?.sync?.reposExcluded ?? null,
     staleAgeMs: m?.sync?.staleAgeMs ?? null,
