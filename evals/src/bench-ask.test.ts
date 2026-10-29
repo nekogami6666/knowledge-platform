@@ -87,6 +87,32 @@ describe("runAskBench(実 API を使わない差し替え検索で)", () => {
       toolCalls: { Grep: 2, Read: 1 },
       parallelTurns: 1,
       totalCostUsd: 1,
+      prewarmed: 0,
+      startupMsPrewarmed: null,
+      startupMsCold: { mean: 900, p50: 900, max: 900 },
+    });
+  });
+
+  it("prewarmed(ADR-0042)を行に載せ、集計で事前起動あり / なしの startupMs を分ける", async () => {
+    let n = 0;
+    const search: QaSearch = async () => {
+      n += 1;
+      return {
+        value: { answer: "a", citations: [], notFound: false },
+        usage: { inputTokens: 1, outputTokens: 1 },
+        startupMs: n === 1 ? 1800 : 40,
+        prewarmed: n !== 1,
+      };
+    };
+    const rows = await runAskBench(
+      { golden, limit: 3, systemPrompt: { systemPrompt: "本文" }, corpusDir: "/corpus" },
+      { search },
+    );
+    expect(rows.map((r) => r.prewarmed)).toEqual([false, true, true]);
+    expect(summarizeBench(rows)).toMatchObject({
+      prewarmed: 2,
+      startupMsPrewarmed: { mean: 40, p50: 40, max: 40 },
+      startupMsCold: { mean: 1800, p50: 1800, max: 1800 },
     });
   });
 });

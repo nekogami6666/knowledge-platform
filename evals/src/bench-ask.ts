@@ -17,6 +17,8 @@ export interface BenchRow {
   numTurns?: number;
   durationApiMs?: number;
   startupMs?: number;
+  /** 事前起動した subprocess を使ったか(ADR-0042・BENCH_PREWARM=on で比べる)。 */
+  prewarmed?: boolean;
   toolCalls?: Record<string, number>;
   parallelTurns?: number;
   firstTurnCacheRead?: number;
@@ -44,6 +46,11 @@ export interface BenchSummary {
   elapsedMs: Dist | null;
   numTurns: Dist | null;
   startupMs: Dist | null;
+  /** 事前起動した subprocess を使った問の数(ADR-0042)。 */
+  prewarmed: number;
+  /** 事前起動を使った問 / 使わなかった問ごとの startupMs(比較用)。 */
+  startupMsPrewarmed: Dist | null;
+  startupMsCold: Dist | null;
   /** 全問のツール呼び出し回数の合計(ツール名ごと)。 */
   toolCalls: Record<string, number>;
   /** 全問の並列ターン数の合計。 */
@@ -87,6 +94,9 @@ export function summarizeBench(rows: readonly BenchRow[]): BenchSummary {
     elapsedMs: distOf(rows.map((r) => r.elapsedMs)),
     numTurns: distOf(nums((r) => r.numTurns)),
     startupMs: distOf(nums((r) => r.startupMs)),
+    prewarmed: ok.filter((r) => r.prewarmed === true).length,
+    startupMsPrewarmed: distOf(nums((r) => (r.prewarmed === true ? r.startupMs : undefined))),
+    startupMsCold: distOf(nums((r) => (r.prewarmed === true ? undefined : r.startupMs))),
     toolCalls,
     parallelTurns: ok.reduce((a, r) => a + (r.parallelTurns ?? 0), 0),
     totalCostUsd:
@@ -146,6 +156,7 @@ export async function runAskBench(input: BenchInput, deps: BenchDeps): Promise<B
         ...(r.numTurns !== undefined ? { numTurns: r.numTurns } : {}),
         ...(r.durationApiMs !== undefined ? { durationApiMs: r.durationApiMs } : {}),
         ...(r.startupMs !== undefined ? { startupMs: r.startupMs } : {}),
+        ...(r.prewarmed !== undefined ? { prewarmed: r.prewarmed } : {}),
         ...(r.toolCalls !== undefined ? { toolCalls: r.toolCalls } : {}),
         ...(r.parallelTurns !== undefined ? { parallelTurns: r.parallelTurns } : {}),
         ...(r.firstTurnCacheRead !== undefined ? { firstTurnCacheRead: r.firstTurnCacheRead } : {}),

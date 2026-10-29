@@ -21,7 +21,9 @@
  *   deniedToolCalls / notFound / citations(モデルが返した数)/ validCitations(検証を通った数)/
  *   requestedModel / actualModel
  * - 検索の内訳(/ask 高速化の計測。最終結果から・無ければ null):
- *   - startupMs: query() の開始 → 最初の SDK メッセージ(Claude Code subprocess の起動コスト)
+ *   - startupMs: query() の開始 → 最初の SDK メッセージ(Claude Code subprocess の起動コスト)。
+ *     事前起動した subprocess を使ったときは claim → 最初の SDK メッセージ
+ *   - prewarmed: 事前起動した subprocess を使ったか(ADR-0042。true / false。検索が成功しなければ null)
  *   - nonApiMs: searchMs − durationApiMs(起動・ツール実行・SDK 内部の時間。再試行があると前の試行分も含む)
  *   - toolCalls: ツール名ごとの呼び出し回数({ Read, Grep, Glob, discord_search, StructuredOutput, … }。
  *     引数・パスは載せない)/ parallelTurns: 2 つ以上のツールを同時に呼んだ API 応答の数
@@ -64,8 +66,10 @@ export interface AskSearchMetrics {
   validCitations: number;
   requestedModel: string | null;
   actualModel: string | null;
-  /** query() 開始 → 最初の SDK メッセージの ms(subprocess の起動コスト)。 */
+  /** query() 開始 → 最初の SDK メッセージの ms(subprocess の起動コスト。事前起動なら claim から)。 */
   startupMs: number | null;
+  /** 事前起動した subprocess を使ったか(ADR-0042)。結果に無ければ null。 */
+  prewarmed: boolean | null;
   /** ツール名ごとの呼び出し回数(引数・パスは持たない)。 */
   toolCalls: Record<string, number> | null;
   /** 2 つ以上のツールを同時に呼んだ API 応答の数。 */
@@ -216,6 +220,7 @@ export function searchMetricsOf(
     requestedModel: r.requestedModel ?? null,
     actualModel: r.actualModel ?? null,
     startupMs: r.startupMs ?? null,
+    prewarmed: r.prewarmed ?? null,
     toolCalls: r.toolCalls ?? null,
     parallelTurns: r.parallelTurns ?? null,
     firstTurnCacheRead: r.firstTurnCacheRead ?? null,
@@ -326,6 +331,7 @@ export function buildAskCompletionLog(input: AskCompletionInput): Record<string,
     numTurns: s?.numTurns ?? null,
     durationApiMs,
     startupMs: s?.startupMs ?? null,
+    prewarmed: s?.prewarmed ?? null,
     nonApiMs: searchMs !== null && durationApiMs !== null ? searchMs - durationApiMs : null,
     toolCalls: s?.toolCalls ?? null,
     parallelTurns: s?.parallelTurns ?? null,

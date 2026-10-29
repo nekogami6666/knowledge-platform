@@ -209,8 +209,11 @@ export function createAskLifecycle(deps: AskLifecycleDeps): AskLifecycle {
 
 export interface GracefulShutdownDeps {
   lifecycle: Pick<AskLifecycle, "shutdown">;
-  /** 定期処理のタイマ解除など(任意・失敗は warn)。 */
-  stopTimers?: () => void;
+  /**
+   * 定期処理のタイマ解除など(任意・失敗は warn)。Promise を返したら待ってから切断へ進む
+   * (事前起動した subprocess の破棄・ADR-0042)。
+   */
+  stopTimers?: () => unknown;
   /** Discord クライアントの切断(client.destroy)。 */
   destroyClient: () => Promise<void>;
   /** bot.db を閉じる。 */

@@ -522,6 +522,7 @@ describe("handleAskRequest synthetic 統合(§6.2 受け入れ条件)", () => {
         requestedModel: "m",
         actualModel: "m",
         startupMs: 1500,
+        prewarmed: true,
         toolCalls: { Grep: 2, Read: 3, StructuredOutput: 1 },
         parallelTurns: 1,
         firstTurnCacheRead: 7000,
@@ -550,6 +551,7 @@ describe("handleAskRequest synthetic 統合(§6.2 受け入れ条件)", () => {
         requestedModel: "m",
         actualModel: "m",
         startupMs: 1500,
+        prewarmed: true, // ADR-0042: 事前起動した subprocess を使ったか
         toolCalls: { Grep: 2, Read: 3, StructuredOutput: 1 },
         parallelTurns: 1,
         firstTurnCacheRead: 7000,

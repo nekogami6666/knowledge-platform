@@ -1,4 +1,4 @@
-import { LlmError } from "@stratum/llm";
+import { createAgentPrewarmPool, LlmError } from "@stratum/llm";
 import { describe, expect, it } from "vitest";
 import {
   type AgentSearchFn,
@@ -24,6 +24,24 @@ describe("createQaSearch(タイムアウトの明示・㉞ 失敗耐性)", () =>
     await createQaSearch({ runSearch, timeoutMs: 300_000 })(INPUT);
     expect(seen).toEqual([600_000, 300_000]);
     expect(DEFAULT_ASK_TIMEOUT_MS).toBe(600_000); // §6.2「上限 600 秒」の正典値ピン(ADR-0035 D1)
+  });
+
+  it("prewarm(ADR-0042)は渡したときだけ runAgentSearch の deps に載せる(未指定なら従来どおり)", async () => {
+    const seen: unknown[] = [];
+    const runSearch = (async (_opts: unknown, deps?: Record<string, unknown>) => {
+      seen.push(deps);
+      return ANSWER;
+    }) as unknown as AgentSearchFn;
+    const prewarm = createAgentPrewarmPool({
+      prewarmFn: async () => {
+        throw new Error("使われない");
+      },
+    });
+    await createQaSearch({ runSearch })(INPUT);
+    await createQaSearch({ runSearch, prewarm })(INPUT);
+    expect(seen[0]).not.toHaveProperty("prewarm");
+    expect(seen[1]).toHaveProperty("prewarm", prewarm);
+    await prewarm.dispose();
   });
 
   it("TIMEOUT はリトライしない(再送は 15 分の interaction 期限内の待ち時間を倍にするだけ)", async () => {

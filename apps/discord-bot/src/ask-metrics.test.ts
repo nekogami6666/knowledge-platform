@@ -78,6 +78,7 @@ describe("buildAskCompletionLog(1 行の完了ログ)", () => {
       requestedModel: "m",
       actualModel: "m",
       startupMs: 1800,
+      prewarmed: true,
       toolCalls: { Grep: 3, Read: 4, StructuredOutput: 1 },
       parallelTurns: 2,
       firstTurnCacheRead: 6000,
@@ -127,6 +128,8 @@ describe("buildAskCompletionLog(1 行の完了ログ)", () => {
       actualModel: "m",
       // /ask 高速化の計測: 起動・API 以外の時間・ツール利用・最初の応答のキャッシュ。
       startupMs: 1800,
+      // ADR-0042: 事前起動した subprocess を使ったか。
+      prewarmed: true,
       nonApiMs: 2000, // searchMs 30_000 − durationApiMs 28_000
       toolCalls: { Grep: 3, Read: 4, StructuredOutput: 1 },
       parallelTurns: 2,
@@ -153,7 +156,12 @@ describe("buildAskCompletionLog(1 行の完了ログ)", () => {
     });
     expect(noApi.nonApiMs).toBeNull();
     const failed = buildAskCompletionLog({ ...base, metrics: { ...metrics, search: null } });
-    expect(failed).toMatchObject({ nonApiMs: null, startupMs: null, toolCalls: null });
+    expect(failed).toMatchObject({
+      nonApiMs: null,
+      startupMs: null,
+      prewarmed: null,
+      toolCalls: null,
+    });
   });
 
   it("パイプライン内の失敗は受付からの経過(キュー待ち + 失敗時点)に直して載せる", () => {

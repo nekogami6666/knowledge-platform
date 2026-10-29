@@ -9,8 +9,11 @@ import { join } from "node:path";
 import { createGhClientFromAuth, createGhClientFromEnv, type GhClient } from "@stratum/gh-client";
 import { validateRepo } from "@stratum/kb-core";
 import {
+  type AgentPrewarmPool,
+  createAgentPrewarmPool,
   createFsPromptStore,
   createOpenAiTranscriber,
+  DEFAULT_PREWARM_IDLE_MS,
   nullUsageRecorder,
   type Transcriber,
 } from "@stratum/llm";
@@ -306,12 +309,26 @@ async function main(): Promise<void> {
     DEFAULT_ASK_SYNC_MAX_STALENESS_MS,
     (data, msg) => logger.warn(data, msg),
   );
+  // ADR-0042: Claude Code subprocess の事前起動(既定 off)。待機は最大 1 本・ASK_PREWARM_IDLE_MS で閉じる。
+  // 失敗・不一致は警告して従来の起動に倒れる(/ask は止まらない)。正常終了の stopTimers で閉じる。
+  let askPrewarm: AgentPrewarmPool | undefined;
+  if (env.ASK_PREWARM === "on") {
+    const idleMs = parsePositiveIntEnv(
+      "ASK_PREWARM_IDLE_MS",
+      env.ASK_PREWARM_IDLE_MS,
+      DEFAULT_PREWARM_IDLE_MS,
+      (data, msg) => logger.warn(data, msg),
+    );
+    askPrewarm = createAgentPrewarmPool({ idleMs, onWarn: (data, msg) => logger.warn(data, msg) });
+    logger.info({ idleMs }, "/ask の subprocess 事前起動を有効化しました(ADR-0042)");
+  }
   const search = createQaSearch({
     usage: nullUsageRecorder,
     timeoutMs: effectiveAskTimeoutMs,
     ...(askMaxTurns !== undefined ? { maxTurns: askMaxTurns } : {}),
     ...(env.ASK_EFFORT !== undefined ? { effort: env.ASK_EFFORT } : {}),
     ...(env.ASK_THINKING !== undefined ? { thinking: env.ASK_THINKING } : {}),
+    ...(askPrewarm !== undefined ? { prewarm: askPrewarm } : {}),
   });
 
   const onAsk: AskHandler = (question, ctx) => {
@@ -682,6 +699,8 @@ async function main(): Promise<void> {
       // ADR-0036 D5: 定期同期のタイマを止め、実行中の回は次のリポの前で打ち切る(以後 bot.db に触らない)。
       periodicSync?.stop();
       if (discordIndexTimer !== undefined) clearInterval(discordIndexTimer);
+      // ADR-0042: 待機中・準備中の subprocess を閉じる(/ask の終了処理の後なので新たには用意されない)。
+      return askPrewarm?.dispose();
     },
     destroyClient: () => bot.destroy(),
     closeStore: () => {

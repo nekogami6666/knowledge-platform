@@ -10,6 +10,7 @@
  */
 import {
   type AgentEffort,
+  type AgentPrewarmPool,
   type AgentRunUsage,
   type AgentSearchOptions,
   type AgentSearchResult,
@@ -63,6 +64,11 @@ export interface QaSearchFactoryDeps {
   effort?: AgentEffort;
   /** 拡張思考(既定 SDK 任せ。env ASK_THINKING・ADR-0035 D6)。 */
   thinking?: AgentThinking;
+  /**
+   * subprocess の事前起動(ADR-0042。env ASK_PREWARM=on のときだけ index.ts が渡す)。未指定 = 従来どおり
+   * 毎回 query() で起動する。
+   */
+  prewarm?: AgentPrewarmPool;
 }
 
 /**
@@ -124,7 +130,7 @@ export function createQaSearch(deps: QaSearchFactoryDeps = {}): QaSearch {
               ...(deps.effort !== undefined ? { effort: deps.effort } : {}),
               ...(deps.thinking !== undefined ? { thinking: deps.thinking } : {}),
             },
-            { usage },
+            { usage, ...(deps.prewarm !== undefined ? { prewarm: deps.prewarm } : {}) },
           );
         } finally {
           input.onAttempt?.(attemptUsage);

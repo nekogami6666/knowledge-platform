@@ -41,6 +41,13 @@ describe("parseEnv", () => {
     expect(() => parseEnv({ ...base, ASK_THINKING: "enabled" })).toThrow();
   });
 
+  it("ASK_PREWARM は未設定なら undefined(= off)、on / off 以外は throw(ADR-0042)", () => {
+    expect(parseEnv(base).ASK_PREWARM).toBeUndefined();
+    expect(parseEnv({ ...base, ASK_PREWARM: "on" }).ASK_PREWARM).toBe("on");
+    expect(parseEnv({ ...base, ASK_PREWARM: "off" }).ASK_PREWARM).toBe("off");
+    expect(() => parseEnv({ ...base, ASK_PREWARM: "true" })).toThrow();
+  });
+
   it("DISCORD_TOKEN が無ければ throw", () => {
     expect(() => parseEnv({ ...base, DISCORD_TOKEN: undefined })).toThrow();
   });

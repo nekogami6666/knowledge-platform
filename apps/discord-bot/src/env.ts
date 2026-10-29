@@ -39,6 +39,13 @@ const envSchema = z
     /** /ask の拡張思考(adaptive/disabled。未設定 = SDK 既定・ADR-0035 D6 の実験ノブ)。 */
     ASK_THINKING: z.enum(["adaptive", "disabled"]).optional(),
     /**
+     * /ask の Claude Code subprocess の事前起動(ADR-0042)。on で有効。未設定・off は従来どおり毎回起動する
+     * (計測が済むまで本番の挙動を変えないため既定 off)。
+     */
+    ASK_PREWARM: z.enum(["on", "off"]).optional(),
+    /** 事前起動した subprocess を待機させておく上限 ms(既定 1800000 = 30 分・ADR-0042 D6)。超えたら閉じる。 */
+    ASK_PREWARM_IDLE_MS: z.string().optional(),
+    /**
      * 正常終了(SIGTERM)で処理中の /ask を待つ上限 ms(既定 60000・ADR-0035 追記)。
      * compose の stop_grace_period(90 秒)より十分短くする(中断後の後処理に最大 15 秒使う)。
      */

@@ -189,6 +189,36 @@ describe("createAskLifecycle", () => {
 });
 
 describe("createShutdownHandler", () => {
+  it("stopTimers が Promise を返したら(事前起動した subprocess の破棄・ADR-0042)待ってから切断する", async () => {
+    const order: string[] = [];
+    let release: () => void = () => {};
+    const handler = createShutdownHandler({
+      lifecycle: {
+        shutdown: async () => ({ inflightAtStart: 0, drained: true, aborted: 0, unsettled: 0 }),
+      },
+      stopTimers: () =>
+        new Promise<void>((res) => {
+          order.push("timers");
+          release = () => {
+            order.push("prewarm-disposed");
+            res();
+          };
+        }),
+      destroyClient: async () => {
+        order.push("discord");
+      },
+      closeStore: () => order.push("db"),
+      exit: (code) => order.push(`exit:${code}`),
+      log: { info: () => {}, warn: () => {} },
+    });
+    const p = handler("SIGTERM");
+    await flush();
+    expect(order).toEqual(["timers"]);
+    release();
+    await p;
+    expect(order).toEqual(["timers", "prewarm-disposed", "discord", "db", "exit:0"]);
+  });
+
   it("/ask の終了処理 → タイマ解除 → Discord 切断 → DB を閉じる → exit(0) の順・2 回目のシグナルは無視", async () => {
     const order: string[] = [];
     let release: () => void = () => {};

@@ -6,15 +6,21 @@
 
 // --- Agent SDK ラッパ(agentic search) ---
 export {
+  type AgentClaimOptions,
   type AgentEffort,
   type AgentInProcessTool,
   type AgentModelUsage,
+  type AgentPrewarmFn,
+  type AgentPrewarmPool,
+  type AgentPrewarmPoolOptions,
   type AgentProgressEvent,
   type AgentQueryFn,
   type AgentRunUsage,
   type AgentSearchOptions,
   type AgentSearchResult,
+  type AgentSpareProcess,
   type AgentThinking,
+  createAgentPrewarmPool,
   createContainmentHook,
   DEFAULT_ALLOWED_TOOLS,
   DEFAULT_DISALLOWED_TOOLS,
@@ -26,6 +32,8 @@ export {
   runAgentSearch,
   sanitizeModelUsage,
 } from "./agent.js";
+// --- subprocess の事前起動(ADR-0042)---
+export { DEFAULT_PREWARM_IDLE_MS, type PrewarmWarn } from "./agent-prewarm.js";
 // --- エラー ---
 export { LlmError, type LlmErrorCode, RETRYABLE_LLM_CODES } from "./errors.js";
 // --- モデル設定 ---
