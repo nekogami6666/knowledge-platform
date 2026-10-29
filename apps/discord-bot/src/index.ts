@@ -88,6 +88,7 @@ import {
 } from "./repo-sync.js";
 import { createGitRepoSyncer } from "./repos.js";
 import { createSqliteStore } from "./sqlite-store.js";
+import { createSystemOneFromMode } from "./system-one/index.js";
 import { isoJst } from "./time.js";
 import {
   createRecorderClient,
@@ -313,6 +314,14 @@ async function main(): Promise<void> {
     DEFAULT_ASK_SYNC_MAX_STALENESS_MS,
     (data, msg) => logger.warn(data, msg),
   );
+  // ADR-0041: System One 判定層(env ASK_FASTPATH。既定 off = 作らない・本番の挙動は変わらない)。
+  const systemOne = createSystemOneFromMode(env.ASK_FASTPATH, {
+    store,
+    nowIso: () => isoJst(),
+    logWarn: (data, msg) => logger.warn(data, msg),
+  });
+  if (systemOne !== undefined)
+    logger.info({ mode: systemOne.mode }, "System One 判定層は有効です(ADR-0041)");
   // ADR-0042: Claude Code subprocess の事前起動(既定 off)。待機は最大 1 本・ASK_PREWARM_IDLE_MS で閉じる。
   // 失敗・不一致は警告して従来の起動に倒れる(/ask は止まらない)。正常終了の stopTimers で閉じる。
   let askPrewarm: AgentPrewarmPool | undefined;
@@ -371,6 +380,7 @@ async function main(): Promise<void> {
       // ADR-0035 D5: discord 側の進捗表示へ sync/search/tool_use を流す。
       ...(ctx.onProgress !== undefined ? { onProgress: ctx.onProgress } : {}),
       ...(discordSearch !== undefined ? { discordSearch } : {}),
+      ...(systemOne !== undefined ? { systemOne } : {}),
     };
     return handleAskRequest(
       {

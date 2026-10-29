@@ -9,6 +9,7 @@ import type {
   ManagedCloneStore,
   QueryRecord,
   SharedAnswerStore,
+  SystemOneDecisionStore,
 } from "./db.js";
 
 /**
@@ -412,3 +413,76 @@ describe.skipIf(!sqliteAvailable())(
     });
   },
 );
+
+describe.skipIf(!sqliteAvailable())("system_one_decisions(ADR-0041 D6・判定の記録)", () => {
+  let createStore: (path: string) => BotStore & SystemOneDecisionStore;
+  type RawDb = {
+    exec(sql: string): void;
+    pragma(s: string, o?: { simple: boolean }): unknown;
+    close(): void;
+  };
+  let openRaw: (path: string) => RawDb;
+  let dir: string;
+  beforeAll(async () => {
+    ({ createSqliteStore: createStore } = await import("./sqlite-store.js"));
+    const Database = createRequire(import.meta.url)("better-sqlite3") as new (
+      path: string,
+    ) => RawDb;
+    openRaw = (p) => new Database(p);
+    dir = mkdtempSync(join(tmpdir(), "system-one-"));
+  });
+  afterAll(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+  const row = (queryId: string) => ({
+    queryId,
+    createdAt: "2026-10-08T10:00:00+09:00",
+    mode: "shadow" as const,
+    gate: "high",
+    pAnswerable: 0.91,
+    pTimeSensitive: 0.12,
+    pNeedsCode: 0.02,
+    primarySource: "minutes",
+    primaryDistJson: '{"minutes":0.7}',
+    candidatesJson: '[{"kind":"minutes","repo":"org/m","path":"a.md","expected":3.1}]',
+    elapsedMs: 4,
+    weightsVersion: "v1",
+  });
+
+  it("記録 → 引用の更新 → 読み戻し(未知 id の更新は no-op)", () => {
+    const s = createStore(":memory:");
+    s.recordSystemOneDecision(row("q1"));
+    expect(s.getSystemOneDecision("q1")).toEqual({ ...row("q1"), citedJson: null, citedAt: null });
+    s.setSystemOneCited("q1", '[{"kind":"github_file"}]', "2026-10-08T10:00:10+09:00");
+    s.setSystemOneCited("unknown", "[]", "t");
+    expect(s.getSystemOneDecision("q1")).toMatchObject({
+      citedJson: '[{"kind":"github_file"}]',
+      citedAt: "2026-10-08T10:00:10+09:00",
+    });
+    expect(s.getSystemOneDecision("unknown")).toBeUndefined();
+    s.close();
+  });
+
+  it("既存 DB を開くと表が追加され、user_version とデータは変わらない・何度開いても冪等", () => {
+    const p = join(dir, "v1.db");
+    const old = createStore(p);
+    old.recordQuery(sampleQuery({ id: "old-q" }));
+    old.close();
+    const raw = openRaw(p);
+    raw.exec("DROP TABLE system_one_decisions");
+    expect(raw.pragma("user_version", { simple: true })).toBe(1);
+    raw.close();
+
+    const s = createStore(p);
+    s.recordSystemOneDecision(row("old-q"));
+    // bot が開いたまま、別プロセス相当(ホスト側バッチ)がもう一度開く。
+    const again = createStore(p);
+    expect(again.getSystemOneDecision("old-q")?.gate).toBe("high");
+    expect(again.getQuery("old-q")?.question).toBe("?");
+    again.close();
+    s.close();
+    const after = openRaw(p);
+    expect(after.pragma("user_version", { simple: true })).toBe(1);
+    after.close();
+  });
+});

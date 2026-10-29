@@ -31,6 +31,10 @@
     "./discord-search": {
       "types": "./dist/discord-search.d.ts",
       "default": "./dist/discord-search.js"
+    },
+    "./system-one": {
+      "types": "./dist/system-one/index.d.ts",
+      "default": "./dist/system-one/index.js"
     }
   },
   "scripts": {

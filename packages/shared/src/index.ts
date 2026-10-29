@@ -6,3 +6,4 @@
 export { describeError, maskSecrets } from "./describe-error.js";
 export { withCloneToken } from "./git-auth.js";
 export { type GitExec, type SyncedKb, stripCredentials, syncKb } from "./kb-sync.js";
+export { minutesDateFromPath } from "./source-date.js";

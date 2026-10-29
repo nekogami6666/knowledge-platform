@@ -50,6 +50,11 @@ const envSchema = z
      * compose の stop_grace_period(90 秒)より十分短くする(中断後の後処理に最大 15 秒使う)。
      */
     SHUTDOWN_GRACE_MS: z.string().optional(),
+    /**
+     * /ask の System One 判定層(ADR-0041 D8)。off(既定)= 作らない / shadow = 判定と記録だけ /
+     * on = 候補ブロックを前置きする。
+     */
+    ASK_FASTPATH: z.enum(["on", "off", "shadow"]).optional(),
     /** /ask の同期の TTL 再利用 ms(既定 60000・段階 1-2)。この時間内の再同期は fetch しない。 */
     ASK_SYNC_TTL_MS: z.string().optional(),
     /** 同期に失敗したとき前回データで検索してよい期間 ms(既定 21600000 = 6 時間・段階 1-2)。 */

@@ -54,6 +54,17 @@ describe("createQaSearch(タイムアウトの明示・㉞ 失敗耐性)", () =>
     expect(calls).toBe(1);
   });
 
+  it("promptPrefix があれば質問の前に置き、無ければ質問文だけ(ADR-0041 D5)", async () => {
+    const prompts: unknown[] = [];
+    const runSearch = (async (opts: { prompt?: unknown }) => {
+      prompts.push(opts.prompt);
+      return ANSWER;
+    }) as unknown as AgentSearchFn;
+    await createQaSearch({ runSearch })(INPUT);
+    await createQaSearch({ runSearch })({ ...INPUT, promptPrefix: "## 候補" });
+    expect(prompts).toEqual(["Q", "## 候補\n\nQ"]);
+  });
+
   it("onProgress を runAgentSearch の opts へ透過する(ADR-0035 D5)", async () => {
     let seen: unknown;
     const runSearch = (async (opts: { onProgress?: unknown }) => {

@@ -404,6 +404,71 @@ describe("handleAskRequest synthetic 統合(§6.2 受け入れ条件)", () => {
     expect(captured?.systemPromptDynamic).not.toContain("Q&A システムプロンプト本文");
   });
 
+  it("ADR-0041: System One 未指定(ASK_FASTPATH=off)なら promptPrefix を渡さない", async () => {
+    const inputs: Record<string, unknown>[] = [];
+    const { deps } = makeDeps({
+      search: async (input) => {
+        inputs.push({ ...input });
+        return {
+          value: { answer: "ok", citations: [], notFound: true },
+          usage: { inputTokens: 1, outputTokens: 1 },
+        };
+      },
+    });
+    await handleAskRequest(req, deps);
+    expect("promptPrefix" in (inputs[0] ?? {})).toBe(false);
+    expect(inputs[0]?.question).toBe(req.question);
+  });
+
+  it("ADR-0041: System One があれば同期後に候補ブロックを作って検索へ渡し、検証済みの引用を記録する", async () => {
+    const calls: unknown[] = [];
+    let prefix: unknown;
+    const { deps } = makeDeps({
+      systemOne: {
+        mode: "on",
+        prepare: async (input) => {
+          calls.push({ prepare: input.queryId, q: input.question, synced: input.synced.length });
+          return "## 候補(System One・確信度: 高)";
+        },
+        recordCited: (queryId, cited) => calls.push({ cited: queryId, n: cited.length }),
+      },
+      search: async (input) => {
+        prefix = input.promptPrefix;
+        return {
+          value: {
+            answer: "温度補正は入っています。",
+            citations: [{ kind: "github_file", repo: "org/minutes", path: "2026/x.md" }],
+            notFound: false,
+          },
+          usage: { inputTokens: 1, outputTokens: 1 },
+        };
+      },
+    });
+    const res = await handleAskRequest(req, deps);
+    expect(res.status).toBe("answered");
+    expect(prefix).toBe("## 候補(System One・確信度: 高)");
+    expect(calls).toEqual([
+      { prepare: res.queryId, q: req.question, synced: 1 },
+      { cited: res.queryId, n: 1 },
+    ]);
+  });
+
+  it("ADR-0041: 候補ブロックが null(low・shadow)なら promptPrefix を渡さない", async () => {
+    const inputs: Record<string, unknown>[] = [];
+    const { deps } = makeDeps({
+      systemOne: { mode: "shadow", prepare: async () => null, recordCited: () => {} },
+      search: async (input) => {
+        inputs.push({ ...input });
+        return {
+          value: { answer: "ok", citations: [], notFound: true },
+          usage: { inputTokens: 1, outputTokens: 1 },
+        };
+      },
+    });
+    await handleAskRequest(req, deps);
+    expect("promptPrefix" in (inputs[0] ?? {})).toBe(false);
+  });
+
   it("AC1: 出典付き回答 → answered で queries に記録(出典脚注つき)", async () => {
     const answer: QaAnswer = {
       answer: "温度補正は入っています。",

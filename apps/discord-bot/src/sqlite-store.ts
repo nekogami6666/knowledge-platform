@@ -18,6 +18,8 @@ import type {
   RateLimitResult,
   SharedAnswer,
   SharedAnswerStore,
+  SystemOneDecisionRecord,
+  SystemOneDecisionStore,
 } from "./db.js";
 
 type DB = Database.Database;
@@ -125,6 +127,49 @@ function ensureManagedClonesTable(db: DB): void {
   `);
 }
 
+/**
+ * System One の判定の記録(ADR-0041 D6)。**user_version を消費しない**(inflight_asks と同じ流儀)。
+ * 追加のみ・冪等で開くたびに実行する。bot.db を共有するホスト側バッチは本表を読まない
+ * (較正用の書き出しは system-one-export-labels CLI が読み取り専用で行う)。質問文・抜粋は入れない。
+ */
+function ensureSystemOneDecisionsTable(db: DB): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS system_one_decisions (
+      query_id TEXT PRIMARY KEY,
+      created_at TEXT NOT NULL,
+      mode TEXT NOT NULL,
+      gate TEXT NOT NULL,
+      p_answerable REAL,
+      p_time_sensitive REAL,
+      p_needs_code REAL,
+      primary_source TEXT,
+      primary_dist_json TEXT,
+      candidates_json TEXT NOT NULL,
+      elapsed_ms INTEGER NOT NULL,
+      weights_version TEXT NOT NULL,
+      cited_json TEXT,
+      cited_at TEXT
+    );
+  `);
+}
+
+interface SystemOneRow {
+  query_id: string;
+  created_at: string;
+  mode: SystemOneDecisionRecord["mode"];
+  gate: string;
+  p_answerable: number | null;
+  p_time_sensitive: number | null;
+  p_needs_code: number | null;
+  primary_source: string | null;
+  primary_dist_json: string | null;
+  candidates_json: string;
+  elapsed_ms: number;
+  weights_version: string;
+  cited_json: string | null;
+  cited_at: string | null;
+}
+
 // sqlite の行は snake_case。`SELECT *` を `as QueryRecord`(camelCase)へ素キャストすると
 // 各フィールドが実行時 undefined になる(メモリ実装と乖離)。必ず下記マッパで写す。
 interface QueryRow {
@@ -186,7 +231,7 @@ function toPendingAction(r: ActionRow): PendingAction {
 /** better-sqlite3 による BotStore。path はファイルパス(":memory:" も可)。 */
 export function createSqliteStore(
   path: string,
-): BotStore & InflightAskStore & SharedAnswerStore & ManagedCloneStore {
+): BotStore & InflightAskStore & SharedAnswerStore & ManagedCloneStore & SystemOneDecisionStore {
   const db: DB = new Database(path);
   db.pragma("journal_mode = WAL");
   db.pragma("busy_timeout = 5000");
@@ -194,6 +239,7 @@ export function createSqliteStore(
   ensureInflightAsksTable(db);
   ensureSharedAnswersTable(db);
   ensureManagedClonesTable(db);
+  ensureSystemOneDecisionsTable(db);
 
   // @feedback を列・VALUES の双方に含めること。QueryRecord に feedback がある以上、
   // 列を欠くと better-sqlite3 の named-param 厳密一致で recordQuery が実行時に throw する。
@@ -249,6 +295,17 @@ export function createSqliteStore(
     ON CONFLICT (dir) DO UPDATE SET repo = excluded.repo
   `);
   const deleteManaged = db.prepare("DELETE FROM managed_clones WHERE dir = ?");
+  const upsertSystemOne = db.prepare(`
+    INSERT OR REPLACE INTO system_one_decisions (query_id, created_at, mode, gate, p_answerable,
+      p_time_sensitive, p_needs_code, primary_source, primary_dist_json, candidates_json, elapsed_ms,
+      weights_version, cited_json, cited_at)
+    VALUES (@queryId, @createdAt, @mode, @gate, @pAnswerable, @pTimeSensitive, @pNeedsCode,
+      @primarySource, @primaryDistJson, @candidatesJson, @elapsedMs, @weightsVersion, NULL, NULL)
+  `);
+  const updateSystemOneCited = db.prepare(
+    "UPDATE system_one_decisions SET cited_json = ?, cited_at = ? WHERE query_id = ?",
+  );
+  const selectSystemOne = db.prepare("SELECT * FROM system_one_decisions WHERE query_id = ?");
 
   return {
     recordQuery(q: QueryRecord) {
@@ -352,6 +409,45 @@ export function createSqliteStore(
     },
     removeManagedClone(dir) {
       deleteManaged.run(dir);
+    },
+    recordSystemOneDecision(r) {
+      upsertSystemOne.run({
+        queryId: r.queryId,
+        createdAt: r.createdAt,
+        mode: r.mode,
+        gate: r.gate,
+        pAnswerable: r.pAnswerable,
+        pTimeSensitive: r.pTimeSensitive,
+        pNeedsCode: r.pNeedsCode,
+        primarySource: r.primarySource,
+        primaryDistJson: r.primaryDistJson,
+        candidatesJson: r.candidatesJson,
+        elapsedMs: r.elapsedMs,
+        weightsVersion: r.weightsVersion,
+      });
+    },
+    setSystemOneCited(queryId, citedJson, citedAt) {
+      updateSystemOneCited.run(citedJson, citedAt, queryId);
+    },
+    getSystemOneDecision(queryId): SystemOneDecisionRecord | undefined {
+      const r = selectSystemOne.get(queryId) as SystemOneRow | undefined;
+      if (r === undefined) return undefined;
+      return {
+        queryId: r.query_id,
+        createdAt: r.created_at,
+        mode: r.mode,
+        gate: r.gate,
+        pAnswerable: r.p_answerable,
+        pTimeSensitive: r.p_time_sensitive,
+        pNeedsCode: r.p_needs_code,
+        primarySource: r.primary_source,
+        primaryDistJson: r.primary_dist_json,
+        candidatesJson: r.candidates_json,
+        elapsedMs: r.elapsed_ms,
+        weightsVersion: r.weights_version,
+        citedJson: r.cited_json,
+        citedAt: r.cited_at,
+      };
     },
     close() {
       db.close();

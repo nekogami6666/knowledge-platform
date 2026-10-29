@@ -41,6 +41,7 @@ import { formatAnswer } from "./format.js";
 import type { RepoRegistry } from "./repo-registry.js";
 import type { ScopedRepo } from "./repo-scope.js";
 import type { RepoSpec, RepoSyncer, SyncedRepo } from "./repos.js";
+import type { SystemOneHook } from "./system-one/index.js";
 import { formatJstShort } from "./time.js";
 
 // discord ドメイン検証は kb-core と同一の permalink 規律(§9.5)に揃える。
@@ -328,6 +329,8 @@ export interface QaSearchInput {
   onAttempt?: (usage: AgentRunUsage | null) => void;
   /** プロセス内ツール(ADR-0038 D6。Discord 本文検索が有効な /ask の discord_search)。 */
   inProcessTools?: readonly AgentInProcessTool[];
+  /** ユーザープロンプトの前置き(System One の候補ブロック・ADR-0041 D5)。未指定なら質問文だけ。 */
+  promptPrefix?: string;
 }
 /** 戻りは runAgentSearch と同形(numTurns / durationApiMs を型で落とさない・ADR-0035 D4)。 */
 export type QaSearch = (input: QaSearchInput) => Promise<AgentSearchResult<QaAnswer>>;
@@ -427,6 +430,8 @@ export interface AskDeps {
    * 渡したときは discord 引用を「今回ツールが返した permalink」に限る(D7)。未指定 = 機能 OFF(従来どおり)。
    */
   discordSearch?: DiscordSearchSession;
+  /** System One 判定層(ADR-0041。env ASK_FASTPATH が off なら未指定 = 従来どおり)。 */
+  systemOne?: SystemOneHook;
 }
 
 export interface AskResult {
@@ -856,6 +861,14 @@ export async function handleAskRequest(req: AskRequest, deps: AskDeps): Promise<
     // all_visible 有効時は clone のあるリポだけを載せる(ADR-0036)。対応表は利用者の閲覧範囲・
     // clone の有無で変わるため、静的な本文の**後**に置く(本文をプロンプトキャッシュに残す・/ask 高速化)。
     const manifest = buildRepoManifest(repos);
+    // ADR-0041: 候補ブロック(System One)。throw しない・前置きしないときは null。
+    const promptPrefix =
+      (await deps.systemOne?.prepare({
+        queryId,
+        question: req.question,
+        synced,
+        cwd: deps.clonesDir,
+      })) ?? null;
     // git sync は中断できない(1 コマンド 60 秒の上限つき)ため、同期後に一度確かめてから検索に入る。
     if (isAborted()) return interrupted();
     timings.promptMs = endStage();
@@ -873,6 +886,7 @@ export async function handleAskRequest(req: AskRequest, deps: AskDeps): Promise<
       ...(deps.signal !== undefined ? { signal: deps.signal } : {}),
       onAttempt: (u) => usageAcc.add(u),
       ...(discordTools.length > 0 ? { inProcessTools: discordTools } : {}),
+      ...(promptPrefix !== null ? { promptPrefix } : {}),
     });
     timings.searchMs = endStage();
     const { value, usage, requestedModel, actualModel } = result;
@@ -894,6 +908,7 @@ export async function handleAskRequest(req: AskRequest, deps: AskDeps): Promise<
           deps.readFile ?? defaultReadFile,
           deps.discordSearch?.returnedPermalinks,
         );
+    deps.systemOne?.recordCited(queryId, valid); // ADR-0041 D6: 候補が引用されたかの計測
     // ADR-0035 D4 / 段階 1-1: ターン数・トークン等は完了ログ(discord.ts)に載せる。
     search = searchMetricsOf(result, valid.length);
     // 試行ごとの通知が無い検索(テスト用の差し替え等)は最終結果の値を使う。

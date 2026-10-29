@@ -8,6 +8,7 @@
     "build": "tsc -p tsconfig.build.json",
     "eval:qa": "node dist/run-qa-cli.js",
     "eval:extract-review": "node dist/run-extract-review-cli.js",
+    "calibrate:system-one": "node dist/calibrate-system-one.js",
     "bench:ask": "node dist/bench-ask-cli.js"
   },
   "dependencies": {

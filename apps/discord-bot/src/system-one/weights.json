@@ -1,0 +1,62 @@
+{
+  "version": "2026-10-08-initial",
+  "notes": [
+    "較正前の手設定(ADR-0041「初期重み」)。evals/src/calibrate-system-one.ts で Platt / 温度を当てて置き換える。",
+    "relevance: タイトル・タグの一致を重く、本文の一致は弱く、語の網羅率と最長一致語の長さを足す。時間範囲の内外で加減点。",
+    "answerable: 首位候補の関連度の期待値・首位と 2 位の差・網羅率で上げ、needsCode で下げる。",
+    "gate: high 0.8 / mid 0.5(オーナー指定)。"
+  ],
+  "budgetMs": 200,
+  "buildWaitMs": 1500,
+  "retrieval": { "maxCandidates": 200, "minHitWeight": 0.5 },
+  "gate": { "high": 0.8, "mid": 0.5, "highMin": 3, "highMax": 5, "midMax": 8, "minExpected": 1.5 },
+  "relevance": {
+    "bias": -1.0,
+    "weights": {
+      "title": 3.0,
+      "meta": 2.0,
+      "summary": 1.0,
+      "body": 1.2,
+      "coverage": 2.5,
+      "longest": 1.0,
+      "inWindow": 1.0,
+      "outWindow": -1.5,
+      "recency": 0.5,
+      "stale": -0.8
+    },
+    "thresholds": [-0.5, 1.0, 2.5, 4.0],
+    "platt": { "a": 1, "b": 0 }
+  },
+  "timeSensitive": {
+    "bias": -2.0,
+    "weights": { "hasWindow": 3.5, "timeWords": 2.5 },
+    "platt": { "a": 1, "b": 0 }
+  },
+  "needsCode": {
+    "bias": -2.5,
+    "weights": { "codeWords": 3.0, "identifierLike": 2.0, "top1Expected": -1.5 },
+    "platt": { "a": 1, "b": 0 }
+  },
+  "answerable": {
+    "bias": -3.0,
+    "weights": {
+      "top1Expected": 4.0,
+      "gap12": 1.5,
+      "top1Coverage": 2.0,
+      "relevantCount": 0.5,
+      "needsCode": -2.0,
+      "hasCandidates": 0.0
+    },
+    "platt": { "a": 1, "b": 0 }
+  },
+  "primarySource": {
+    "weights": {
+      "kb": { "kbTop": 3.0, "needsCode": -1.0, "timeSensitive": -0.5 },
+      "minutes": { "minutesTop": 3.0, "needsCode": -1.0, "timeSensitive": 0.5 },
+      "discord": { "bias": -0.5, "discordTop": 3.0, "timeSensitive": 0.5 },
+      "code": { "bias": -1.0, "needsCode": 3.0, "top1Expected": -1.0 },
+      "none": { "bias": 0.5, "top1Expected": -3.0 }
+    },
+    "temperature": 1
+  }
+}

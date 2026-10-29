@@ -24,6 +24,7 @@ import {
   withRetry,
 } from "@stratum/llm";
 import { DEFAULT_ASK_TIMEOUT_MS, type QaAnswer, type QaSearch, qaAnswerSchema } from "./ask.js";
+import { withPromptPrefix } from "./system-one/block.js";
 
 // QA 契約を再 export(評価ハーネス等の外部消費者向け。型は ask.ts が正)。
 export {
@@ -108,7 +109,11 @@ export function createQaSearch(deps: QaSearchFactoryDeps = {}): QaSearch {
               ...(input.systemPromptDynamic !== undefined
                 ? { systemPromptDynamic: input.systemPromptDynamic }
                 : {}),
-              prompt: input.question,
+              // ADR-0041 D5: System One の候補ブロックがあれば質問の前に置く(system prompt は変えない)。
+              prompt:
+                input.promptPrefix === undefined
+                  ? input.question
+                  : withPromptPrefix(input.promptPrefix, input.question),
               cwd: input.cwd,
               outputSchema: qaAnswerSchema,
               timeoutMs,

@@ -29,6 +29,17 @@ describe("minutesDateFromPath(源泉日・ADR-0026 D3)", () => {
     expect(minutesDateFromPath("minutes/2026_99_99_from_x/minutes.md")).toBeNull();
   });
 
+  it("会議 ID 形式(mtg-<ISO 8601>)から日付を取る(拡張形式・基本形式)", () => {
+    expect(
+      jstDate(minutesDateFromPath("meetings/2026/2026-09/mtg-2026-09-15T10-00-00-ab12/minutes.md")),
+    ).toBe("2026-09-15");
+    expect(
+      jstDate(minutesDateFromPath("meetings/2026/2026-09/mtg-20260915T100000-ab12/minutes.md")),
+    ).toBe("2026-09-15");
+    // T の続かない 8 桁だけは日付と見なさない。
+    expect(minutesDateFromPath("meetings/x/mtg-20260915-ab12/minutes.md")).toBeNull();
+  });
+
   it("JST 深夜として解釈される(年境界で ID の年とズレない)", () => {
     const d = minutesDateFromPath("minutes/2026/12/2026-12-31-yearend.md");
     expect(jstDate(d)).toBe("2026-12-31");

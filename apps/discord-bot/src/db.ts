@@ -177,11 +177,49 @@ export interface ManagedCloneStore {
   removeManagedClone(dir: string): void;
 }
 
+/**
+ * System One の判定の記録 1 件(ADR-0041 D6)。較正(候補が引用された率)に使う。
+ * **質問文・抜粋は持たない**(質問文は queries にある)。candidatesJson は候補の位置情報と期待値だけ。
+ */
+export interface SystemOneDecisionRecord {
+  queryId: string;
+  /** ISO 8601 JST。 */
+  createdAt: string;
+  /** on = 前置きした / shadow = 判定と記録だけ。 */
+  mode: "on" | "shadow";
+  /** high / mid / low / budget / catalog_wait / error。 */
+  gate: string;
+  pAnswerable: number | null;
+  pTimeSensitive: number | null;
+  pNeedsCode: number | null;
+  primarySource: string | null;
+  /** primarySource の分布の JSON。 */
+  primaryDistJson: string | null;
+  /** 候補(kind・repo・path・url・期待値・ブロックに載せたか)の JSON 配列。 */
+  candidatesJson: string;
+  elapsedMs: number;
+  weightsVersion: string;
+  /** 検証を通った引用(kind・repo・path・url)の JSON 配列。引用の検証前は null。 */
+  citedJson: string | null;
+  citedAt: string | null;
+}
+
+/** System One の判定の記録(BotStore とは別の口。bot 本体だけが使う・ADR-0041 D6)。 */
+export interface SystemOneDecisionStore {
+  /** 記録する(同じ queryId は上書き)。 */
+  recordSystemOneDecision(r: Omit<SystemOneDecisionRecord, "citedJson" | "citedAt">): void;
+  /** 引用を記録する。未知 id は no-op。 */
+  setSystemOneCited(queryId: string, citedJson: string, citedAt: string): void;
+  getSystemOneDecision(queryId: string): SystemOneDecisionRecord | undefined;
+}
+
 /** インメモリ実装(テスト/開発用。native 依存なし)。プロセス終了で消える。 */
 export function createMemoryStore(): BotStore &
   InflightAskStore &
   SharedAnswerStore &
-  ManagedCloneStore {
+  ManagedCloneStore &
+  SystemOneDecisionStore {
+  const systemOne = new Map<string, SystemOneDecisionRecord>();
   const inflight = new Map<string, InflightAsk>();
   const shared = new Map<string, SharedAnswer>();
   const managed = new Map<string, ManagedClone>();
@@ -263,6 +301,17 @@ export function createMemoryStore(): BotStore &
     },
     removeManagedClone(dir) {
       managed.delete(dir);
+    },
+    recordSystemOneDecision(r) {
+      systemOne.set(r.queryId, { ...r, citedJson: null, citedAt: null });
+    },
+    setSystemOneCited(queryId, citedJson, citedAt) {
+      const r = systemOne.get(queryId);
+      if (r) Object.assign(r, { citedJson, citedAt });
+    },
+    getSystemOneDecision(queryId) {
+      const r = systemOne.get(queryId);
+      return r === undefined ? undefined : { ...r };
     },
     close() {},
   };
