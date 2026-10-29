@@ -125,6 +125,7 @@ export async function runSystemOne(input: RunSystemOneInput): Promise<SystemOneR
   } else if (level === "mid") {
     shown = ranked.slice(0, w.gate.midMax);
   }
+  shown = withDiscordSlots(shown, ranked);
   const items: BlockItem[] = shown.map((x) => ({
     candidate: x.candidate,
     readPath:
@@ -145,6 +146,25 @@ export async function runSystemOne(input: RunSystemOneInput): Promise<SystemOneR
     block,
     elapsedMs: Math.round(mono() - t0),
   };
+}
+
+/**
+ * 候補ブロックに Discord を最低限載せる(ADR-0041 追記 D13)。Discord の発言は本文でしか点数を取れず、
+ * タイトル・タグでも点数を取る KB・議事録に常に負けて枠から外れていた(本番 2026-10-29: 事前検索で 20 件当たっても 0 件表示)。
+ * 表示中に Discord が無ければ、順位の高い Discord 候補を最大 DISCORD_RESERVED_SLOTS 件、枠を足して載せる
+ * (KB・議事録の候補は減らさない)。候補は足切り(minHitWeight)を通ったものだけ。ブロックを出さない判定では何もしない。
+ */
+export const DISCORD_RESERVED_SLOTS = 2;
+
+function withDiscordSlots(
+  shown: SystemOneRun["shown"],
+  ranked: SystemOneRun["ranked"],
+): SystemOneRun["shown"] {
+  if (shown.length === 0 || shown.some((x) => x.candidate.kind === "discord")) return shown;
+  const discord = ranked
+    .filter((x) => x.candidate.kind === "discord")
+    .slice(0, DISCORD_RESERVED_SLOTS);
+  return discord.length === 0 ? shown : [...shown, ...discord];
 }
 
 function joinReadPath(dir: string | null, path: string): string | null {

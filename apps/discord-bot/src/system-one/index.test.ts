@@ -40,6 +40,44 @@ afterAll(() => rmSync(clones, { recursive: true, force: true }));
 const QUESTION = "分注ロボットの高湿度での脱調の対処は?";
 
 describe("createSystemOne(/ask のフック・ADR-0041)", () => {
+  it("KB・議事録が枠を埋めても、当たった Discord を最大 2 件まで足して載せる(ADR-0041 追記 D13)", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "s1-slots-"));
+    try {
+      for (let k = 1; k <= 9; k += 1) {
+        const rel = `minutes/meetings/internal/2026/2026-06/2026_06_0${k}_from_10-00_x/minutes.md`;
+        mkdirSync(dirname(join(dir, rel)), { recursive: true });
+        writeFileSync(
+          join(dir, rel),
+          `# 分注ロボット 高湿度 脱調 対処 定例 ${k}\n\n分注ロボットの高湿度での脱調の対処を議論した。`,
+        );
+      }
+      const repos: SyncedRepo[] = [
+        { repo: "org/minutes", absDir: join(dir, "minutes"), resolvedCommit: "s" },
+      ];
+      const hook = createSystemOne({ mode: "on", weights: W, nowMs: () => NOW, nowIso: () => ISO });
+      const block = await hook.prepare({
+        queryId: "qs",
+        question: QUESTION,
+        synced: repos,
+        cwd: dir,
+        discord: {
+          search: async () =>
+            [1, 2, 3].map((n) => ({
+              url: `https://discord.com/channels/1/2/${n}`,
+              title: "#hw",
+              date: "2026-10-07",
+              text: `分注ロボットの脱調の件 ${n}`,
+            })),
+        },
+      });
+      expect(block).not.toBeNull();
+      expect(block?.match(/Discord\(url: /g)).toHaveLength(2);
+      expect(block).toContain("minutes/meetings/internal");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("呼び出しごとの Discord 候補源(質問者の範囲)を使い、Discord 候補に抜粋を載せる(ADR-0041 D9)", async () => {
     const seen: string[][] = [];
     const hook = createSystemOne({ mode: "on", weights: W, nowMs: () => NOW, nowIso: () => ISO });

@@ -219,3 +219,7 @@
 - **D12**: Discord の候補は Read できないため、確信度(high / mid)に関わらず候補ブロックに抜粋を載せる
   (抜粋が無いと内容の確認に `discord_search` を呼ぶことになり、往復が戻る)。ファイルの候補は従来どおり high のみ抜粋。
 - 戻すとき: `discord-index.yaml` の `enabled: false`(Discord 全体)か `ASK_FASTPATH=off`(候補ブロック全体)。
+- **D13(2026-10-29・同日追記)**: 反映直後の本番で、事前検索が 20 件当たっても候補ブロックの Discord は 0 件だった。
+  Discord の発言は本文でしか点数を取れず、タイトル・タグでも点数を取る KB・議事録に常に負けて枠(high 5 / mid 8)から
+  外れるため。表示中に Discord が無ければ、順位の高い Discord 候補を最大 2 件(`DISCORD_RESERVED_SLOTS`)枠を足して
+  載せる。KB・議事録の候補は減らさない。足切り(`minHitWeight`)を通った候補だけ・ブロックを出さない判定では何もしない。
