@@ -249,9 +249,11 @@ export function askHomeChannelMessage(homeChannelIds: readonly string[]): string
 /** ADR-0036 D7: /ask を使えるロールを持たない人への応答(検索も記録もしない)。 */
 export const ASK_ROLE_DENY_MESSAGE = "このコマンドは社内メンバーのみ利用できます。";
 
-// レート制限(§6.2 直列+制御 / §13 専門家負荷)。固定 10 分バケットで user/channel 別にカウント。
+// レート制限(§6.2 直列+制御)。固定 10 分バケットでチャンネル別にカウントする。
+// 1 人あたりの上限は 2026-10-29 のオーナー判断で外した(利用を増やす段階で、本人の連続質問を止めない)。
+// チャンネル全体の上限は費用の歯止めとして残す(直列キューの混雑は ADR-0035 の期限で別に抑える)。
 const RATE_WINDOW_MS = 10 * 60 * 1000;
-export const RATE_LIMITS = { user: 5, channel: 20 } as const;
+export const RATE_LIMITS = { channel: 20 } as const;
 const RATE_LIMIT_MESSAGE = "リクエストが多すぎます。少し時間をおいて再度お試しください。";
 
 /** rate_limits の window_start(10 分バケットのキー)。 */
@@ -674,13 +676,14 @@ async function handleAsk(
     return;
   }
 
-  // §6.2/§13 rate-limit: user/channel 別の 10 分バケット。超過は ephemeral 拒否。
-  // user を先に評価し、超過時は `||` 短絡で channel を増やさない(連打が channel 予算を前借りしない)。
+  // §6.2 rate-limit: チャンネル別の 10 分バケット。超過は ephemeral 拒否(1 人あたりの上限は無し)。
   const win = windowKey(Date.now());
-  const overLimit =
-    !store.hitRateLimit(`user:${interaction.user.id}`, "ask", win, RATE_LIMITS.user).allowed ||
-    !store.hitRateLimit(`channel:${interaction.channelId}`, "ask", win, RATE_LIMITS.channel)
-      .allowed;
+  const overLimit = !store.hitRateLimit(
+    `channel:${interaction.channelId}`,
+    "ask",
+    win,
+    RATE_LIMITS.channel,
+  ).allowed;
   if (overLimit) {
     await ackOrBail(() => interaction.reply({ content: RATE_LIMIT_MESSAGE, ephemeral: true }));
     return;

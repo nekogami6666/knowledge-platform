@@ -74,6 +74,7 @@ import {
   parseGithubPrUrl,
   proxyMergeDecision,
   proxyMergeRejectMessage,
+  RATE_LIMITS,
   SEND_FAILED_MESSAGE,
   SEND_PARTIAL_FAILED_MESSAGE,
   SHUTTING_DOWN_MESSAGE,
@@ -1537,7 +1538,7 @@ describe("InteractionCreate /ask の分割配送結線(§6.2 / ADR-0034 ephemera
     });
   });
 
-  it("rate-limit 超過(user 6 回目)は ephemeral reply で拒否・defer しない", async () => {
+  it("同じ人の連続質問は回数で止めない(1 人あたりの上限は無し)", async () => {
     const { logger } = fakeLogger();
     const client = createBot({
       logger,
@@ -1545,18 +1546,40 @@ describe("InteractionCreate /ask の分割配送結線(§6.2 / ADR-0034 ephemera
       store: createMemoryStore(),
       onAsk: async () => ({ answerText: "ok", status: "answered", queryId: "q" }),
     });
-    let last: ReturnType<typeof fakeAskInteraction> | undefined;
-    for (let i = 0; i < 6; i += 1) {
-      last = fakeAskInteraction(`質問 ${i}`);
-      client.emit(Events.InteractionCreate, last.interaction);
-      // 直列キューの完了を待つ(6 回目だけは reply 拒否で sends が増えない)。
-      if (i < 5) await vi.waitFor(() => expect(last?.sends).toHaveLength(1));
+    for (let i = 0; i < 8; i += 1) {
+      const f = fakeAskInteraction(`質問 ${i}`);
+      client.emit(Events.InteractionCreate, f.interaction);
+      await vi.waitFor(() => expect(f.sends).toHaveLength(1));
+      expect(f.replies).toHaveLength(0);
     }
-    await vi.waitFor(() => expect(last?.replies).toHaveLength(1));
-    expect(last?.replies[0]).toMatchObject({ ephemeral: true });
-    expect(last?.replies[0]?.content).toContain("リクエストが多すぎます");
-    expect(last?.deferOptions()).toHaveLength(0);
-    expect(last?.sends).toHaveLength(0);
+    await client.destroy();
+  });
+
+  it("rate-limit 超過(チャンネル全体で 21 回目)は ephemeral reply で拒否・defer しない", async () => {
+    const { logger } = fakeLogger();
+    const store = createMemoryStore();
+    const client = createBot({
+      logger,
+      channels: channels(),
+      store,
+      onAsk: async () => ({ answerText: "ok", status: "answered", queryId: "q" }),
+    });
+    const probe = fakeAskInteraction("probe");
+    // 同じ 10 分バケットの予算を先に使い切る(チャンネル ID は fake と同じ)。
+    for (let i = 0; i < RATE_LIMITS.channel; i += 1) {
+      store.hitRateLimit(
+        `channel:${probe.interaction.channelId}`,
+        "ask",
+        windowKey(Date.now()),
+        RATE_LIMITS.channel,
+      );
+    }
+    client.emit(Events.InteractionCreate, probe.interaction);
+    await vi.waitFor(() => expect(probe.replies).toHaveLength(1));
+    expect(probe.replies[0]).toMatchObject({ ephemeral: true });
+    expect(probe.replies[0]?.content).toContain("リクエストが多すぎます");
+    expect(probe.deferOptions()).toHaveLength(0);
+    expect(probe.sends).toHaveLength(0);
     await client.destroy();
   });
 });
@@ -2022,7 +2045,10 @@ describe("InteractionCreate /ask の期限・再起動(ADR-0035 追記)", () => 
     expect(asked).toBe(0);
     expect(store.listQueries()).toEqual([]);
     // レート制限の予算を消費していない(次の hit が 1 件目になる)。
-    expect(store.hitRateLimit("user:u1", "ask", windowKey(Date.now()), 5).count).toBe(1);
+    expect(
+      store.hitRateLimit(`channel:${fake.interaction.channelId}`, "ask", windowKey(Date.now()), 20)
+        .count,
+    ).toBe(1);
     await client.destroy();
   });
 
