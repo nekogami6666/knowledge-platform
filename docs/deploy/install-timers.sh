@@ -80,7 +80,7 @@ render stratum-image-prune # 月次 docker image prune(REAL ゲート無し・�
 # Discord ソース(ADR-0033): discord.yaml の targets が空なら no-op なので既定 enable で安全。
 render stratum-extractor-discord EXTRACTOR_DISCORD_REAL
 # 失敗通知の受け皿(template unit・timer 無し)。各 service の OnFailure= から呼ばれる。
-sed -e "s|__ENV_FILE__|$ENV_FILE|g" "$SCRIPT_DIR/stratum-notify-failure@.service" \
+sed -e "s|__ENV_FILE__|$ENV_FILE|g" -e "s|__REPO_DIR__|$REPO_DIR|g" "$SCRIPT_DIR/stratum-notify-failure@.service" \
   >"$UNIT_DIR/stratum-notify-failure@.service"
 echo "  installed: $UNIT_DIR/stratum-notify-failure@.service"
 

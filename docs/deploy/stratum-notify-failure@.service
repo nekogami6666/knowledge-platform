@@ -9,5 +9,5 @@ Description=stratum failure notifier for %i
 Type=oneshot
 # DISCORD_OPS_WEBHOOK を stratum.env から読む(chmod 600・§9.1)。未設定なら静かに成功終了。
 EnvironmentFile=__ENV_FILE__
-ExecStart=/bin/bash -c 'u="$1"; if [ -z "${DISCORD_OPS_WEBHOOK:-}" ]; then echo "DISCORD_OPS_WEBHOOK 未設定。通知スキップ。"; exit 0; fi; curl -fsS -X POST -H "Content-Type: application/json" -d "{\"content\": \"❌ VM タイマーが失敗しました: ${u}(journalctl --user -u ${u} -n 40 で確認)\"}" "$DISCORD_OPS_WEBHOOK"' notify %i
+ExecStart=__REPO_DIR__/docs/deploy/notify-failure.sh %i
 SyslogIdentifier=stratum-notify-failure
