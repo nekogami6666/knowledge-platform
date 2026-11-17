@@ -56,6 +56,26 @@ describe("validateCitations (修正5: LLM 返却を信頼しない多層検証)"
     ]);
   });
 
+  it("path の先頭に clone のディレクトリ名が付いていて、外した先が実在すれば外して通す", () => {
+    const cs: QaCitation[] = [
+      { kind: "github_file", repo: "org/minutes", path: "minutes/2026/x.md" },
+      { kind: "github_file", repo: "org/minutes", path: "./minutes/2026/x.md", lines: "L1" },
+    ];
+    expect(validateCitations(cs, synced, exists)).toEqual([
+      { kind: "github_file", repo: "org/minutes", path: "2026/x.md", ref: "sha-min" },
+      { kind: "github_file", repo: "org/minutes", path: "2026/x.md", ref: "sha-min", lines: "L1" },
+    ]);
+  });
+
+  it("ディレクトリ名を外しても実在しない・別のディレクトリ名・外すと外へ出る path は破棄", () => {
+    const cs: QaCitation[] = [
+      { kind: "github_file", repo: "org/minutes", path: "minutes/2026/none.md" },
+      { kind: "github_file", repo: "org/minutes", path: "other/2026/x.md" },
+      { kind: "github_file", repo: "org/minutes", path: "minutes/../../etc/passwd" },
+    ];
+    expect(validateCitations(cs, synced, exists)).toEqual([]);
+  });
+
   it("allowlist 外の repo は破棄", () => {
     const cs: QaCitation[] = [{ kind: "github_file", repo: "evil/repo", path: "2026/x.md" }];
     expect(validateCitations(cs, synced, exists)).toEqual([]);
@@ -322,7 +342,7 @@ describe("buildRepoManifest (§6.2 repo 対応表)", () => {
         "## 検索対象リポジトリ(このコーパスでの対応)",
         "- org/fw → サブディレクトリ `dispenser-fw/`",
         "- org/minutes → サブディレクトリ `minutes/`",
-        "引用の repo にはこの org/name を使い、path は各サブディレクトリ配下からの相対パスにすること。",
+        "引用の repo にはこの org/name を使い、path は各サブディレクトリ配下からの相対パスにすること(サブディレクトリ名そのものは path に含めない。例: `<サブディレクトリ>/docs/a.md` を読んだら path は `docs/a.md`)。",
         "",
       ].join("\n"),
     );

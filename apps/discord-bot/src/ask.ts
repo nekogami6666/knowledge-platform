@@ -10,7 +10,7 @@
  * commit SHA(resolvedCommit)は LLM を信頼せず bot が付与する(permalink が後からズレないため)。
  */
 import { existsSync, readFileSync } from "node:fs";
-import { join, normalize } from "node:path";
+import { basename, join, normalize } from "node:path";
 import { parseLineRange, safeParseEntry } from "@stratum/kb-core";
 import {
   type AgentInProcessTool,
@@ -93,7 +93,8 @@ export function buildRepoManifest(repos: readonly RepoSpec[]): string {
   return [
     "## 検索対象リポジトリ(このコーパスでの対応)",
     ...lines,
-    "引用の repo にはこの org/name を使い、path は各サブディレクトリ配下からの相対パスにすること。",
+    "引用の repo にはこの org/name を使い、path は各サブディレクトリ配下からの相対パスにすること" +
+      "(サブディレクトリ名そのものは path に含めない。例: `<サブディレクトリ>/docs/a.md` を読んだら path は `docs/a.md`)。",
     "",
   ].join("\n");
 }
@@ -221,6 +222,15 @@ function isSafeRelPath(path: string): boolean {
   return !norm.startsWith("..") && !norm.startsWith("/");
 }
 
+/** path の先頭が clone のディレクトリ名(`<dir>/`)なら外した path を返す。付いていなければ null。 */
+function stripCloneDirPrefix(path: string, absDir: string): string | null {
+  const prefix = `${basename(absDir)}/`;
+  const norm = path.startsWith("./") ? path.slice(2) : path;
+  if (!norm.startsWith(prefix)) return null;
+  const rest = norm.slice(prefix.length);
+  return isSafeRelPath(rest) ? rest : null;
+}
+
 /** 既定のファイル読み取り(注入可)。読めない場合は null(stale 判定をスキップするだけで壊さない)。 */
 const defaultReadFile = (absPath: string): string | null => {
   try {
@@ -284,15 +294,23 @@ export function validateCitations(
     // lines は表記ゆれを正規化してから採用する(正規化不能・不正範囲は citation ごと破棄)。
     const lines = c.lines === undefined ? undefined : normalizeLineRange(c.lines);
     if (c.lines !== undefined && lines === undefined) continue;
-    const absPath = join(syncedRepo.absDir, c.path);
-    if (!fileExists(absPath)) continue;
+    // モデルは cwd(clone の親)からの相対で読むため、path の先頭に clone のディレクトリ名(対応表の `<dir>/`)を
+    // 付けたまま返すことがある。そのままでは実在せず出典ごと捨てていた(golden eval gq-003・2026-11-17)。
+    // 付いていて、外した先が実在するときだけ外して採用する(実在しない path を通すことはない)。
+    let relPath = c.path;
+    if (!fileExists(join(syncedRepo.absDir, relPath))) {
+      const stripped = stripCloneDirPrefix(relPath, syncedRepo.absDir);
+      if (stripped === null || !fileExists(join(syncedRepo.absDir, stripped))) continue;
+      relPath = stripped;
+    }
+    const absPath = join(syncedRepo.absDir, relPath);
     // §6.7 / C8: stale な KB エントリの引用は落とさず、注記フラグを付けて通す(除外はしない)。
-    const raw = c.path.endsWith(".md") ? readFile(absPath) : null;
+    const raw = relPath.endsWith(".md") ? readFile(absPath) : null;
     const stale = raw !== null && isStaleKbEntry(raw);
     out.push({
       kind: "github_file",
       repo: c.repo,
-      path: c.path,
+      path: relPath,
       ref: syncedRepo.resolvedCommit,
       ...(lines !== undefined ? { lines } : {}),
       ...(stale ? { stale: true } : {}),

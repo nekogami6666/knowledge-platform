@@ -6,7 +6,7 @@
  */
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { buildRepoManifest, createQaSearch } from "@stratum/discord-bot/qa";
+import { buildRepoManifest, createQaSearch, validateCitations } from "@stratum/discord-bot/qa";
 import { safeParseEntry } from "@stratum/kb-core";
 import { createFsPromptStore, loadPrompt, type PromptStore } from "@stratum/llm";
 import { loadGoldenQa } from "./golden.js";
@@ -106,7 +106,24 @@ export async function runGoldenEval(input: GoldenEvalInput): Promise<GoldenEvalR
       ...(numTurns !== undefined ? { numTurns } : {}),
     });
   }
-  const citation = scoreRun(golden, results, corpusKbSources(input.corpusDir, input.repos));
+  // 採点は本番と同じ出典の検証(validateCitations)を通した後の引用で行う(利用者に実際に表示される出典を測る)。
+  // 実在しない path は落ち、先頭に clone のディレクトリ名が付いた path は正される。results(生の引用)は
+  // 外れの表示(listMisses)用にそのまま返す。
+  const synced = input.repos.map((r) => ({
+    repo: r.repo,
+    absDir: join(input.corpusDir, r.dir),
+    resolvedCommit: "eval",
+  }));
+  const validated: QaResult[] = results.map((r) => ({
+    ...r,
+    answer: {
+      ...r.answer,
+      citations: validateCitations(r.answer.citations, synced).map((c) =>
+        c.kind === "github_file" ? { kind: c.kind, repo: c.repo, path: c.path } : c,
+      ),
+    },
+  }));
+  const citation = scoreRun(golden, validated, corpusKbSources(input.corpusDir, input.repos));
 
   // §10.2(b): deep モデルで回答妥当性を採点(soft)。1 問の judge 失敗は level 0 に封じ込め。
   const judgePrompt = await loadPrompt("evals", "judge", promptStore);
