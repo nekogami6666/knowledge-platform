@@ -14,6 +14,7 @@
   "dependencies": {
     "@stratum/discord-bot": "workspace:*",
     "@stratum/extractor": "workspace:*",
+    "@stratum/kb-core": "workspace:*",
     "@stratum/llm": "workspace:*",
     "js-yaml": "^4.2.0",
     "zod": "^3.25.76"

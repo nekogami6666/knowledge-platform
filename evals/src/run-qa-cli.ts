@@ -8,6 +8,7 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { compareToBaseline, type EvalScore } from "./baseline.js";
 import { runGoldenEval } from "./run-qa.js";
+import { listMisses } from "./score.js";
 
 const PROMPTS_DIR = fileURLToPath(new URL("../../prompts", import.meta.url));
 const CORPUS_DIR = fileURLToPath(new URL("../fixtures/qa-corpus", import.meta.url));
@@ -35,6 +36,8 @@ async function main(): Promise<void> {
     validityRate: validity.validityRate,
   };
   const comparison = compareToBaseline(current, BASELINE);
+  // 外れた問題と引用先(synthetic コーパスなので出してよい・ADR-0002)。原因を週次ログ・通知から追えるように。
+  const misses = listMisses(citation, results);
   // §6.2 AC1 の床。**率**で判定する(旧実装は `passCount < 8` の絶対数で、golden を 10 件から
   // 増やした瞬間に床が実質無効化する時限バグだった — 50 件なら「正答 16% 未満」まで鳴らない)。
   const belowFloor = citation.citationMatchRate < 0.8;
@@ -60,13 +63,29 @@ async function main(): Promise<void> {
     comparison,
     belowFloor,
     alert,
+    directMatchRate: citation.directMatchRate,
+    misses,
     citation,
     validity,
     timingSummary,
     timing,
   };
   writeFileSync(OUT, JSON.stringify(out, null, 2));
-  console.log(JSON.stringify({ current, comparison, belowFloor, alert, timingSummary }, null, 2));
+  console.log(
+    JSON.stringify(
+      {
+        current,
+        directMatchRate: citation.directMatchRate,
+        comparison,
+        belowFloor,
+        alert,
+        misses,
+        timingSummary,
+      },
+      null,
+      2,
+    ),
+  );
   if (alert) {
     const dropped =
       comparison.drops.map((d) => `${d.metric}-${d.delta.toFixed(2)}`).join(",") || "none";

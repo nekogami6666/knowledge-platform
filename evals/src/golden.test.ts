@@ -23,12 +23,15 @@ describe("loadGoldenQa", () => {
     expect(g?.expected_sources).toEqual([]);
   });
 
-  it("expected_sources は QaCitation 形(github_file / discord)で parse される", () => {
+  it("expected_sources は QaCitation 形で parse される(gq-008 は Discord を記録した議事録が期待)", () => {
     const golden = loadGoldenQa(goldenYaml);
     const file = golden.find((x) => x.id === "gq-001")?.expected_sources[0];
     expect(file).toMatchObject({ kind: "github_file", repo: "org/minutes" });
-    const discord = golden.find((x) => x.id === "gq-008")?.expected_sources[0];
-    expect(discord).toMatchObject({ kind: "discord" });
+    // v7 以降、本文から写した Discord の URL は引用しない(ADR-0038 D7)ため、一次資料の議事録を期待にする。
+    const g8 = golden.find((x) => x.id === "gq-008")?.expected_sources;
+    expect(g8).toEqual([
+      { kind: "github_file", repo: "org/minutes", path: "2026/06/2026-06-03-hw-weekly.md" },
+    ]);
   });
 
   it("not_found 既定は false、answer_points 既定は []", () => {

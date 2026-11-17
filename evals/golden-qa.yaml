@@ -71,9 +71,13 @@
 
 - id: gq-008
   question: "Y 軸脱調の初報はどこで共有されましたか?"
+  # 2026-11-09: 期待を Discord の URL から、それを記録した議事録(一次資料)に変更。プロンプト v7 以降、
+  # 本文から写した Discord の URL は引用しない規定(引用は discord_search の permalink だけ・ADR-0038 D7)で、
+  # 週次 eval には Discord の索引が無いため旧期待は満たせなかった。
   expected_sources:
-    - kind: discord
-      url: "https://discord.com/channels/100200/300400/500600"
+    - kind: github_file
+      repo: org/minutes
+      path: "2026/06/2026-06-03-hw-weekly.md"
   answer_points:
     - "Discord で初報が共有された"
 

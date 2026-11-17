@@ -70,13 +70,16 @@ jobs:
               | curl -fsS -X POST -H "Content-Type: application/json" -d @- "$DISCORD_OPS_WEBHOOK"
             exit 0
           fi
-          SUMMARY=$(jq -c '{passCount: .citation.passCount, current, comparison: .comparison.drops}' "$RESULT")
+          SUMMARY=$(jq -c '{passCount: .citation.passCount, current, directMatchRate, comparison: .comparison.drops}' "$RESULT")
+          # 外れた問題と引用先(synthetic コーパス)。1 行 1 問・最大 13 行。
+          MISSES=$(jq -r '.misses[]? | "- \(.id): \(if .notFound then "notFound" else (.cited | join(", ")) end)"' "$RESULT" | head -n 13)
+          echo "外れた問題:"; echo "$MISSES"
           if [ -z "${DISCORD_OPS_WEBHOOK:-}" ]; then
             echo "DISCORD_OPS_WEBHOOK 未設定。通知できないが回帰を検出: $SUMMARY"
             exit 0
           fi
-          jq -n --arg s "$SUMMARY" \
-            '{content: ("⚠️ 週次 golden eval 回帰検出(§10.2)\n```json\n" + $s + "\n```")}' \
+          jq -n --arg s "$SUMMARY" --arg m "$MISSES" \
+            '{content: ("⚠️ 週次 golden eval 回帰検出(§10.2)\n```json\n" + $s + "\n```\n外れた問題(引用先):\n" + $m)}' \
             | curl -fsS -X POST -H "Content-Type: application/json" -d @- "$DISCORD_OPS_WEBHOOK"
 
       # 役割分担: 上の Alert on regression(always)は「eval が完走して回帰を検出した」通知。

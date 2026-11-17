@@ -1,7 +1,7 @@
 import type { QaAnswer, QaCitation } from "@stratum/discord-bot/qa";
 import { describe, expect, it } from "vitest";
 import type { GoldenQa } from "./golden.js";
-import { citationMatches, scoreQuestion, scoreRun } from "./score.js";
+import { citationMatches, type KbSourcesOf, listMisses, scoreQuestion, scoreRun } from "./score.js";
 
 const ans = (over: Partial<QaAnswer> = {}): QaAnswer => ({
   answer: "A",
@@ -123,5 +123,63 @@ describe("scoreRun", () => {
     // g0: expected 空 → every が真 → match。g1: result 欠落 → 不一致。
     expect(score.passCount).toBe(1);
     expect(score.perQuestion.find((q) => q.id === "g1")?.matched).toBe(false);
+  });
+});
+
+describe("KB 経由の一致(引用した KB 記事の sources に期待の議事録がある)", () => {
+  const minutes: QaCitation = { kind: "github_file", repo: "org/minutes", path: "2026/06/m.md" };
+  const kbCite: QaCitation = {
+    kind: "github_file",
+    repo: "org/knowledge-base",
+    path: "knowledge/hardware/kb-1.md",
+  };
+  const kbSourcesOf: KbSourcesOf = (repo, path) =>
+    repo === "org/knowledge-base" && path === "knowledge/hardware/kb-1.md"
+      ? [{ repo: "org/minutes", path: "2026/06/m.md" }]
+      : [];
+  const g = golden({ expected_sources: [minutes] });
+
+  it("resolver があれば KB 記事の引用で一致(matchedVia: kb)", () => {
+    expect(scoreQuestion(g, ans({ citations: [kbCite] }), kbSourcesOf)).toMatchObject({
+      matched: true,
+      matchedVia: "kb",
+    });
+  });
+
+  it("resolver が無ければ従来どおり直接一致だけ", () => {
+    expect(scoreQuestion(g, ans({ citations: [kbCite] }))).toMatchObject({
+      matched: false,
+      matchedVia: null,
+    });
+  });
+
+  it("直接引用は direct・sources に無い KB 記事は不一致・notFound は不一致", () => {
+    expect(scoreQuestion(g, ans({ citations: [minutes] }), kbSourcesOf).matchedVia).toBe("direct");
+    const other: QaCitation = {
+      kind: "github_file",
+      repo: "org/knowledge-base",
+      path: "knowledge/x.md",
+    };
+    expect(scoreQuestion(g, ans({ citations: [other] }), kbSourcesOf).matched).toBe(false);
+    expect(
+      scoreQuestion(g, ans({ notFound: true, citations: [kbCite] }), kbSourcesOf).matched,
+    ).toBe(false);
+  });
+
+  it("scoreRun: citationMatchRate は KB 経由を含み、directMatchRate は含まない・listMisses は外れと引用先", () => {
+    const gs = [
+      golden({ id: "a", expected_sources: [minutes] }),
+      golden({ id: "b", expected_sources: [minutes] }),
+      golden({ id: "c", expected_sources: [minutes] }),
+    ];
+    const results = [
+      { id: "a", answer: ans({ citations: [minutes] }) },
+      { id: "b", answer: ans({ citations: [kbCite] }) },
+      { id: "c", answer: ans({ citations: [{ kind: "discord", url: "u" }] }) },
+    ];
+    const s = scoreRun(gs, results, kbSourcesOf);
+    expect(s.citationMatchRate).toBeCloseTo(2 / 3);
+    expect(s.directMatchRate).toBeCloseTo(1 / 3);
+    expect(listMisses(s, results)).toEqual([{ id: "c", notFound: false, cited: ["discord"] }]);
   });
 });

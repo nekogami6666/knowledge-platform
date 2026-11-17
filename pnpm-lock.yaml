@@ -218,6 +218,9 @@ importers:
       '@stratum/extractor':
         specifier: workspace:*
         version: link:../apps/extractor
+      '@stratum/kb-core':
+        specifier: workspace:*
+        version: link:../packages/kb-core
       '@stratum/llm':
         specifier: workspace:*
         version: link:../packages/llm

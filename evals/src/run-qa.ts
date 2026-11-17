@@ -4,11 +4,42 @@
  * 呼び出し側が Claude on AWS の env(CLAUDE_CODE_USE_ANTHROPIC_AWS / ANTHROPIC_AWS_* / AWS_REGION)を用意する。
  * ADR-0002: corpus は synthetic のみ。
  */
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { buildRepoManifest, createQaSearch } from "@stratum/discord-bot/qa";
+import { safeParseEntry } from "@stratum/kb-core";
 import { createFsPromptStore, loadPrompt, type PromptStore } from "@stratum/llm";
 import { loadGoldenQa } from "./golden.js";
 import { type JudgedQuestion, judgeAnswer, scoreValidity, type ValidityScore } from "./judge.js";
-import { type QaResult, type RunScore, scoreRun } from "./score.js";
+import { type KbSourcesOf, type QaResult, type RunScore, scoreRun } from "./score.js";
+
+/**
+ * corpus 上の KB 記事(knowledge/ 配下)の sources からファイル参照を返す resolver(採点の KB 経由一致用)。
+ * KB の読み取りは kb-core 経由(鉄則)。KB 記事でない・読めない・parse できないときは []。
+ */
+export function corpusKbSources(
+  corpusDir: string,
+  repos: readonly { repo: string; dir: string }[],
+): KbSourcesOf {
+  return (repo, path) => {
+    if (!path.startsWith("knowledge/")) return [];
+    const dir = repos.find((r) => r.repo === repo)?.dir;
+    if (dir === undefined) return [];
+    let raw: string;
+    try {
+      raw = readFileSync(join(corpusDir, dir, path), "utf8");
+    } catch {
+      return [];
+    }
+    const parsed = safeParseEntry(raw, "knowledge", path);
+    if (!parsed.ok) return [];
+    return parsed.entry.frontmatter.sources.flatMap((s) =>
+      "repo" in s && "path" in s && typeof s.repo === "string" && typeof s.path === "string"
+        ? [{ repo: s.repo, path: s.path }]
+        : [],
+    );
+  };
+}
 
 export interface GoldenEvalInput {
   /** golden-qa.yaml の生テキスト。 */
@@ -75,7 +106,7 @@ export async function runGoldenEval(input: GoldenEvalInput): Promise<GoldenEvalR
       ...(numTurns !== undefined ? { numTurns } : {}),
     });
   }
-  const citation = scoreRun(golden, results);
+  const citation = scoreRun(golden, results, corpusKbSources(input.corpusDir, input.repos));
 
   // §10.2(b): deep モデルで回答妥当性を採点(soft)。1 問の judge 失敗は level 0 に封じ込め。
   const judgePrompt = await loadPrompt("evals", "judge", promptStore);
